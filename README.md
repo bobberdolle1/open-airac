@@ -7,11 +7,11 @@
 [![Tauri 2.0](https://img.shields.io/badge/UI-Tauri_2.0-blue.svg)](https://tauri.app/)
 [![X-Plane 12](https://img.shields.io/badge/Simulator-X--Plane_12-blue)](https://www.x-plane.com/)
 [![MSFS 2024](https://img.shields.io/badge/Simulator-MSFS_2024-green)](https://www.flightsimulator.com/)
-[![GitHub Stars](https://img.shields.io/github/stars/bobberdolle1/open-airac?style=social)](https://github.com/bobberdolle1/open-airac)
+[![GitHub Release](https://img.shields.io/github/v/release/bobberdolle1/open-airac)](https://github.com/bobberdolle1/open-airac/releases/latest)
 
 **Zero-cost, math-driven navigation engine, dynamic World Magnetic Model solver, and next-gen EFB flight planner for flight simulators.**
 
-[Key Features](#-key-features) • [The Philosophy](#-the-iron-philosophy) • [Architecture](#-architecture) • [Tech Stack](#-tech-stack-2026) • [Comparison](#-navigraph-vs-openairac) • [Quickstart](#-quickstart)
+[Key Features](#-key-features) • [Installation Guide](#-installation--usage-guide) • [Architecture](#-architecture) • [Tech Stack](#-tech-stack-2026) • [Comparison](#-navigraph-vs-openairac) • [Quickstart](#-quickstart)
 
 </div>
 
@@ -45,23 +45,23 @@ The traditional flight simulation navigation cycle relies on expensive monthly s
 
 ```mermaid
 graph TD
-    subgraph Open Data Sources
-        FAA[FAA CIFP (ARINC 424)]
-        OA[OurAirports Open Data]
-        AIP[OpenAIP / AIXM 5.1]
+    subgraph OpenData["Open Data Sources"]
+        FAA["FAA CIFP - ARINC 424"]
+        OA["OurAirports Open Data"]
+        AIP["OpenAIP / AIXM 5.1"]
     end
 
-    subgraph OpenAIRAC Core Engine (Rust)
-        PARSER[ARINC 424 & AIXM Parser]
-        WMM[WMM2025 Magnetic Solver]
-        PROC[ARINC 424 Procedure Engine]
-        ROUTE[A* / Contraction Hierarchy Autorouter]
+    subgraph CoreEngine["OpenAIRAC Core Engine (Rust)"]
+        PARSER["ARINC 424 & AIXM Parser"]
+        WMM["WMM2025 Magnetic Solver"]
+        PROC["ARINC 424 Procedure Engine"]
+        ROUTE["A* Autorouter"]
     end
 
-    subgraph Exporters & UI
-        XP12[X-Plane 12 Native .dat Exporter]
-        MSFS[MSFS 2024 NavData Packager]
-        EFB[Tauri 2.0 EFB & Vector Flight Planner]
+    subgraph Exporters["Exporters & UI"]
+        XP12["X-Plane 12 Native .dat Exporter"]
+        MSFS["MSFS 2024 NavData Packager"]
+        EFB["Tauri 2.0 EFB & Vector Flight Planner"]
     end
 
     FAA --> PARSER
@@ -105,34 +105,37 @@ graph TD
 
 ---
 
-## 🚀 Quickstart
+## 📦 Installation & Usage Guide
 
-### Installation via CLI (Rust)
+### Method 1: Ready-to-Use ZIP Release (Windows x64)
 
-```bash
-# Install the OpenAIRAC CLI tool
-cargo install openairac-cli
+1. Download **[`OpenAIRAC-v0.1.0-Windows-x64.zip`](https://github.com/bobberdolle1/open-airac/releases/latest)** from Releases.
+2. Extract the archive anywhere on your PC (e.g. `C:\Tools\OpenAIRAC`).
+3. Run the sync command in PowerShell / Command Prompt:
 
-# Run one-touch initial setup for your simulators
-openairac sync --sim xp12 --path "F:/SteamLibrary/steamapps/common/X-Plane 12"
+```powershell
+.\openairac.exe sync --sim xp12 --path "F:\SteamLibrary\steamapps\common\X-Plane 12"
 ```
 
-### Build from Source
+4. Launch X-Plane 12 and enjoy up-to-date navigation data and dynamic magnetic headings!
+
+---
+
+### Method 2: Build from Source (Rust CLI)
 
 Prerequisites:
 - [Rust](https://www.rust-lang.org/) (version 1.85+)
-- Node.js (v22+) & `pnpm` (for the EFB UI)
 
 ```bash
 # Clone the repository
-git clone https.github.com/bobberdolle1/open-airac.git
+git clone https://github.com/bobberdolle1/open-airac.git
 cd open-airac
 
-# Build the Rust Core & CLI
+# Build release executable
 cargo build --release
 
-# Run the OpenAIRAC Engine
-cargo run --package openairac-cli -- sync --help
+# Run sync tool
+./target/release/openairac-cli sync --sim xp12 --path "F:/SteamLibrary/steamapps/common/X-Plane 12"
 ```
 
 ---
