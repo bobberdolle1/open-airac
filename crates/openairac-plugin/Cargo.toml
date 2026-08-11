@@ -1,0 +1,15 @@
+[package]
+name = "openairac-plugin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+openairac-core = { path = "../openairac-core" }
+openairac-exporter = { path = "../openairac-exporter" }
+reqwest = { version = "0.12", features = ["blocking"] }
+anyhow.workspace = true

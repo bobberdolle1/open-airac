@@ -311,6 +311,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b1f9e3d69d39e4862ffed03ed071a76f9a13ba1d9109d355b0f0aa6b15e393c4"
 dependencies = [
  "futures-core",
+ "futures-sink",
 ]
 
 [[package]]
@@ -854,6 +855,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "openairac-plugin"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "openairac-core",
+ "openairac-exporter",
+ "reqwest",
+]
+
+[[package]]
 name = "openssl"
 version = "0.10.81"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -988,6 +999,7 @@ dependencies = [
  "base64",
  "bytes",
  "encoding_rs",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "h2",

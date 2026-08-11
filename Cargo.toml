@@ -5,6 +5,7 @@ members = [
     "crates/openairac-exporter",
     "crates/openairac-planner",
     "crates/openairac-cli",
+    "crates/openairac-plugin",
 ]
 
 [workspace.package]
