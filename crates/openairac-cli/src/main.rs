@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use openairac_core::{OurAirportsParser, WmmCalculator};
+use magnetic::{analyze_runway_magnetic_drift, Wmm2025};
+use openairac_core::OurAirportsParser;
 use openairac_exporter::XPlane12Exporter;
 use std::fs::{self, File};
 use std::io::Write;
@@ -8,7 +9,10 @@ use std::path::Path;
 
 #[derive(Parser)]
 #[command(name = "openairac")]
-#[command(about = "✈️ OpenAIRAC CLI - Math-Driven Navigation Engine for Flight Simulators", long_about = None)]
+#[command(
+    about = "✈️ OpenAIRAC — The open navigation data engine for flight simulation. Install once, stay current automatically.",
+    long_about = None
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -38,7 +42,7 @@ enum Commands {
         path: String,
     },
 
-    /// Calculate dynamic World Magnetic Model variation for location
+    /// Calculate genuine NOAA WMM2025 magnetic variation for location
     Magvar {
         /// Latitude
         #[arg(short, long)]
@@ -50,6 +54,29 @@ enum Commands {
 
         /// Year (e.g. 2026.6)
         #[arg(short, long, default_value_t = 2026.6)]
+        year: f64,
+    },
+
+    /// Inspect magnetic drift for official vs computed runway designators
+    Magdrift {
+        /// Official runway designator (e.g. "09")
+        #[arg(short, long)]
+        designator: String,
+
+        /// True heading of runway in degrees
+        #[arg(short, long)]
+        heading: f64,
+
+        /// Latitude
+        #[arg(short, long)]
+        lat: f64,
+
+        /// Longitude
+        #[arg(short, long)]
+        lon: f64,
+
+        /// Year (e.g. 2026.0)
+        #[arg(short, long, default_value_t = 2026.0)]
         year: f64,
     },
 }
@@ -74,9 +101,9 @@ async fn main() -> Result<()> {
                 let navaid_url = "https://davidmegginson.github.io/ourairports-data/navaids.csv";
                 let response = reqwest::get(navaid_url).await?.text().await?;
 
-                println!("⚙️ Parsing navaids & computing dynamic WMM magnetic variations...");
+                println!("⚙️ Parsing navaids & computing NOAA WMM2025 magnetic variations...");
                 let navaids = OurAirportsParser::parse_navaids(response.as_bytes(), *year)?;
-                println!("✅ Processed {} navaids.", navaids.len());
+                println!("✅ Processed {} canonical navaids.", navaids.len());
 
                 let nav_file_path = custom_data_dir.join("earth_nav.dat");
                 let file = File::create(&nav_file_path)?;
@@ -108,12 +135,36 @@ async fn main() -> Result<()> {
             let mut file = File::create(&bat_path)?;
             file.write_all(bat_content.as_bytes())?;
             println!("✅ Auto-sync launcher created at: {:?}", bat_path);
-            println!("💡 Run 'Start_XPlane12_OpenAIRAC.bat' or set it as Steam Launch Option!");
         }
         Commands::Magvar { lat, lon, year } => {
-            let declination = WmmCalculator::calculate_declination(*lat, *lon, 0.0, *year);
+            let wmm = Wmm2025::calculate(*lat, *lon, 0.0, *year);
             println!("🧭 Lat: {}, Lon: {}, Year: {}", lat, lon, year);
-            println!("📍 Magnetic Declination (Variation): {:.1}°", declination);
+            println!("📍 Magnetic Declination (Variation): {:.2}°", wmm.declination_deg);
+            println!("📍 Dip Angle (Inclination): {:.2}°", wmm.inclination_deg);
+            println!("📍 Total Intensity: {:.1} nT", wmm.total_intensity_nt);
+        }
+        Commands::Magdrift {
+            designator,
+            heading,
+            lat,
+            lon,
+            year,
+        } => {
+            let analysis = analyze_runway_magnetic_drift(designator, *heading, *lat, *lon, *year);
+            println!("✈️ Runway Drift Analysis for RWY {}", analysis.official_designator);
+            println!("   True Heading: {:.1}°", analysis.true_heading_deg);
+            println!("   WMM2025 MagVar: {:.2}°", analysis.wmm_magvar_deg);
+            println!("   Computed Magnetic Heading: {:.1}°", analysis.computed_magnetic_heading_deg);
+            println!("   Computed Magnetic Candidate: {}", analysis.computed_magnetic_designator);
+
+            if analysis.is_redesignation_suggested {
+                println!(
+                    "⚠️  WARNING: Magnetic drift threshold exceeded! Official: {}, Computed: {} (Difference: {:.1}°)",
+                    analysis.official_designator, analysis.computed_magnetic_designator, analysis.drift_difference_deg
+                );
+            } else {
+                println!("✅ Runway designator aligns with official charts.");
+            }
         }
     }
 

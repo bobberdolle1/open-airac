@@ -51,11 +51,10 @@ fn perform_in_sim_auto_sync() -> Result<(), Box<dyn std::error::Error>> {
         let _ = std::fs::create_dir_all(&custom_data_path);
     }
 
-    // Blocking HTTP fetch inside plugin background thread
     let navaid_url = "https://davidmegginson.github.io/ourairports-data/navaids.csv";
     let body = reqwest::blocking::get(navaid_url)?.text()?;
 
-    let current_year = 2026.6;
+    let current_year = 2026.0;
     let navaids = openairac_core::OurAirportsParser::parse_navaids(body.as_bytes(), current_year)?;
 
     let nav_file = std::fs::File::create(custom_data_path.join("earth_nav.dat"))?;

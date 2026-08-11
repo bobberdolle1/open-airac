@@ -9,6 +9,8 @@ repository.workspace = true
 openairac-core = { path = "../openairac-core" }
 openairac-exporter = { path = "../openairac-exporter" }
 openairac-planner = { path = "../openairac-planner" }
+magnetic = { path = "../magnetic" }
+nav-model = { path = "../nav-model" }
 clap.workspace = true
 anyhow.workspace = true
 tracing.workspace = true

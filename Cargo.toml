@@ -1,11 +1,12 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/nav-model",
+    "crates/magnetic",
     "crates/openairac-core",
     "crates/openairac-exporter",
     "crates/openairac-planner",
     "crates/openairac-cli",
-    "crates/openairac-plugin",
 ]
 
 [workspace.package]

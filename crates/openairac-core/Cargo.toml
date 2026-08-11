@@ -6,6 +6,8 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+magnetic = { path = "../magnetic" }
+nav-model = { path = "../nav-model" }
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true

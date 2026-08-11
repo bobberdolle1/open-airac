@@ -1,11 +1,11 @@
 [package]
-name = "openairac-exporter"
+name = "nav-model"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
 [dependencies]
-nav-model = { path = "../nav-model" }
+serde.workspace = true
+chrono.workspace = true
 anyhow.workspace = true
-tracing.workspace = true

@@ -311,7 +311,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b1f9e3d69d39e4862ffed03ed071a76f9a13ba1d9109d355b0f0aa6b15e393c4"
 dependencies = [
  "futures-core",
- "futures-sink",
 ]
 
 [[package]]
@@ -740,6 +739,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 
 [[package]]
+name = "magnetic"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "serde",
+]
+
+[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -780,6 +788,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "nav-model"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "serde",
+]
+
+[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -815,6 +832,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "magnetic",
+ "nav-model",
  "openairac-core",
  "openairac-exporter",
  "openairac-planner",
@@ -831,6 +850,8 @@ dependencies = [
  "anyhow",
  "chrono",
  "csv",
+ "magnetic",
+ "nav-model",
  "serde",
  "serde_json",
  "tracing",
@@ -841,7 +862,7 @@ name = "openairac-exporter"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "openairac-core",
+ "nav-model",
  "tracing",
 ]
 
@@ -852,16 +873,6 @@ dependencies = [
  "anyhow",
  "openairac-core",
  "serde",
-]
-
-[[package]]
-name = "openairac-plugin"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "openairac-core",
- "openairac-exporter",
- "reqwest",
 ]
 
 [[package]]
@@ -999,7 +1010,6 @@ dependencies = [
  "base64",
  "bytes",
  "encoding_rs",
- "futures-channel",
  "futures-core",
  "futures-util",
  "h2",
