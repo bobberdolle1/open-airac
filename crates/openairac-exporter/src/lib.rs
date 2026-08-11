@@ -1,4 +1,4 @@
-use openairac_core::{Waypoint, Navaid};
+use openairac_core::{Navaid, NavaidType, Waypoint};
 use anyhow::Result;
 use std::io::Write;
 
@@ -24,11 +24,37 @@ impl XPlane12Exporter {
         Ok(())
     }
 
-    /// Export navaids into X-Plane 12 `earth_nav.dat` format
-    pub fn export_earth_nav<W: Write>(_navaids: &[Navaid], mut writer: W) -> Result<()> {
+    /// Export navaids into X-Plane 12 `earth_nav.dat` format (1200 Version)
+    pub fn export_earth_nav<W: Write>(navaids: &[Navaid], mut writer: W) -> Result<()> {
         writeln!(writer, "I")?;
         writeln!(writer, "1200 Version - OpenAIRAC Dynamic Cycle")?;
         writeln!(writer)?;
+
+        for nav in navaids {
+            let type_code = match nav.navaid_type {
+                NavaidType::Vor => 3,
+                NavaidType::Vordme => 13,
+                NavaidType::Ndb => 2,
+                NavaidType::Tacn => 12,
+            };
+
+            let freq = nav.frequency_khz / 10; // e.g. 114600 -> 11460
+
+            writeln!(
+                writer,
+                "{:<2} {:>13.9} {:>14.9} {:>6} {:>5} {:>5} {:>6.2} {:<5} {}",
+                type_code,
+                nav.latitude,
+                nav.longitude,
+                nav.elevation_ft,
+                freq,
+                130, // Slaved variation / Range
+                nav.magnetic_var,
+                nav.id,
+                nav.name
+            )?;
+        }
+
         writeln!(writer, "99")?;
         Ok(())
     }
