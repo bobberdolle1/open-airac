@@ -7,7 +7,7 @@ pub struct WmmCalculator;
 impl WmmCalculator {
     /// Calculate magnetic variation (declination) in degrees.
     /// Positive = East, Negative = West.
-    pub fn calculate_declination(latitude: f64, longitude: f64, altitude_ft: f64, year: f64) -> f64 {
+    pub fn calculate_declination(latitude: f64, longitude: f64, _altitude_ft: f64, year: f64) -> f64 {
         // High-precision WMM spherical harmonic expansion approximation
         // In full implementation, uses NOAA WMM2025 coefficient matrices.
         let base_shift = (year - 2020.0) * 0.08;

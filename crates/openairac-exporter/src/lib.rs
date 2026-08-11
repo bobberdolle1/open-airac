@@ -1,4 +1,4 @@
-use openairac-core::{Waypoint, Navaid};
+use openairac_core::{Waypoint, Navaid};
 use anyhow::Result;
 use std::io::Write;
 
