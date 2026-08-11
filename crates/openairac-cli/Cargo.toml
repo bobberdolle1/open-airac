@@ -1,0 +1,15 @@
+[package]
+name = "openairac-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+openairac-core = { path = "../openairac-core" }
+openairac-exporter = { path = "../openairac-exporter" }
+openairac-planner = { path = "../openairac-planner" }
+clap.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
