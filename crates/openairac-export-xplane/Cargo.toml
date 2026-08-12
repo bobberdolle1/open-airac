@@ -10,4 +10,5 @@ openairac-model = { path = "../openairac-model" }
 openairac-store = { path = "../openairac-store" }
 openairac-magnetic = { path = "../openairac-magnetic" }
 anyhow.workspace = true
+chrono.workspace = true
 tracing.workspace = true

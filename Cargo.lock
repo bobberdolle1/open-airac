@@ -1091,6 +1091,7 @@ name = "openairac-export-xplane"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "openairac-magnetic",
  "openairac-model",
  "openairac-store",
@@ -1121,6 +1122,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "serde",
+ "thiserror",
 ]
 
 [[package]]
@@ -1130,6 +1132,16 @@ dependencies = [
  "anyhow",
  "chrono",
  "serde",
+]
+
+[[package]]
+name = "openairac-plugin"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "openairac-export-xplane",
+ "openairac-model",
+ "openairac-store",
 ]
 
 [[package]]

@@ -1,13 +1,14 @@
-name: OpenAIRAC 28-Day Automated Builder
+name: OpenAIRAC Scheduled Data Sync
 
 on:
   schedule:
-    # Runs at 00:00 UTC every 28 days
-    - cron: '0 0 */28 * *'
+    # Daily check for updated provider datasets
+    - cron: '0 2 * * *'
   workflow_dispatch:
 
 jobs:
-  build-and-release:
+  check-and-sync:
+    name: Check Provider Datasets & Validate Pipeline
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -15,14 +16,12 @@ jobs:
       - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Run Tests
+      - name: Run Workspace Tests
         run: cargo test --workspace
 
-      - name: Build OpenAIRAC Release Packages
-        run: cargo build --release --workspace
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
-        with:
-          files: target/release/openairac-cli
+      - name: Test OurAirports Data Sync & Export Pipeline
+        run: |
+          mkdir -p dist/xplane
+          cargo run -p openairac-cli -- sync --provider ourairports --db ./data/world.sqlite --fixture
+          cargo run -p openairac-cli -- doctor --db ./data/world.sqlite
+          cargo run -p openairac-cli -- export xplane --db ./data/world.sqlite --out ./dist/xplane

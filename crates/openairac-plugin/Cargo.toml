@@ -12,3 +12,4 @@ crate-type = ["cdylib"]
 openairac-model = { path = "../openairac-model" }
 openairac-export-xplane = { path = "../openairac-export-xplane" }
 anyhow.workspace = true
+openairac-store = { path = "../openairac-store" }

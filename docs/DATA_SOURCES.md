@@ -1,22 +1,31 @@
-# 📡 OpenAIRAC Data Sources & License Provenance
+# OpenAIRAC Data Sources & Provenance
 
-OpenAIRAC aggregates open aeronautical data from multiple international providers. Each data source is isolated in a separate **Ingest Adapter** to respect licensing terms and maintain strict data provenance.
+## Data License & Provenance Policy
 
----
+OpenAIRAC strictly separates application source code (MIT License) from ingested third-party aviation data. Ingesting navigation data into OpenAIRAC does not change the license of the underlying data.
 
-## Data Sources Matrix
+Every ingested dataset is recorded in SQLite under `source_snapshots` with:
+- `provider`: Data provider identifier (e.g. `OurAirports`, `FAA_CIFP`)
+- `dataset`: Name of dataset (e.g. `airports`, `runways`, `navaids`)
+- `provider_revision`: Revision date or AIRAC cycle if applicable
+- `retrieved_at`: ISO timestamp of ingestion
+- `source_uri`: Exact URI data was retrieved from
+- `content_sha256`: SHA-256 hash of raw dataset content
+- `license_notes`: License classification and terms
 
-| Source | Data Content | License / Terms | Integration Strategy |
-| :--- | :--- | :--- | :--- |
-| **FAA CIFP** | US Instrument Procedures, Waypoints, Airways, SIDs/STARs | **Public Domain (US Govt)** | Native ARINC 424 ingestion via `arinc424` Rust crate. |
-| **OurAirports** | Global Airports, Runways, Radio Frequencies, Navaids | **Public Domain / CC0** | Core global airport baseline. |
-| **Open Flightmaps** | European VFR/IFR Airspaces, Navaids, Procedures | **openflightmaps License / ODbL** | Isolated adapter (`nav-ingest-ofm`). Requires attribution. |
-| **OpenAIP** | Global Airspaces, Airports, Navaids | **CC BY-NC 4.0** | Optional non-commercial adapter (`nav-ingest-openaip`). Keeps MIT core separate. |
+## Ingested Data Sources (v0.2)
 
----
+### 1. OurAirports (Public Domain / CC0)
+- **Datasets**: `airports.csv`, `runways.csv`, `navaids.csv`
+- **Coverage**: Worldwide open airport, runway end, and navaid data
+- **Status**: Implemented end-to-end
 
-## License Isolation Principle
+### 2. NOAA / NCEI World Magnetic Model 2025 (Public Domain)
+- **Datasets**: `WMM2025.COF` coefficients (2025.0–2030.0 epoch)
+- **Coverage**: Global geomagnetic field components and declination
+- **Status**: Implemented end-to-end
 
-1. The **OpenAIRAC Core Engine** and storage architecture are licensed under **MIT**.
-2. Data ingest adapters operate as isolated plugins.
-3. Every record stored in the Canonical DB contains a `source` tag with full provenance tracking.
+### 3. FAA CIFP / ARINC 424 (Public Domain / US Government Work)
+- **Datasets**: FAA Coded Instrument Flight Procedures
+- **Coverage**: US airspace waypoints, navaids, airways, procedures
+- **Status**: Experimental fixed-width parser adapter for waypoints and navaids

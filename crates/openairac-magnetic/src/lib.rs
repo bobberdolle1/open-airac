@@ -1,9 +1,46 @@
 use serde::{Deserialize, Serialize};
 use std::f64::consts::PI;
-
+use thiserror::Error;
 /// WMM2025 Spherical Harmonic Degree N=12
 pub const WMM_MAX_DEGREE: usize = 12;
 pub const WMM_EPOCH: f64 = 2025.0;
+pub const WMM_VALID_FROM: f64 = 2025.0;
+pub const WMM_VALID_UNTIL: f64 = 2030.0;
+
+/// World Magnetic Model Metadata
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MagneticModelMetadata {
+    pub model: &'static str,
+    pub epoch: f64,
+    pub valid_from_year: f64,
+    pub valid_until_year: f64,
+    pub source: &'static str,
+}
+
+pub fn wmm2025_metadata() -> MagneticModelMetadata {
+    MagneticModelMetadata {
+        model: "WMM2025",
+        epoch: WMM_EPOCH,
+        valid_from_year: WMM_VALID_FROM,
+        valid_until_year: WMM_VALID_UNTIL,
+        source: "NOAA/NCEI & BGS World Magnetic Model 2025",
+    }
+}
+
+/// Errors occurring during WMM calculation and validation
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Error)]
+pub enum WmmError {
+    #[error("Date {year:.2} is outside WMM2025 validity range ({min:.1}-{max:.1})")]
+    DateOutsideValidityRange { year: f64, min: f64, max: f64 },
+    #[error("Latitude {lat:.4}° is invalid (must be in range [-90.0, +90.0])")]
+    InvalidLatitude { lat: f64 },
+    #[error("Longitude {lon:.4}° is invalid (must be in range [-180.0, +180.0])")]
+    InvalidLongitude { lon: f64 },
+    #[error("Altitude {alt_km:.2} km is invalid (must be in range [-1.0, 850.0] km)")]
+    InvalidAltitude { alt_km: f64 },
+    #[error("Invalid runway designator: {0}")]
+    InvalidRunwayDesignator(String),
+}
 
 /// World Magnetic Model 2025 (WMM2025) Coefficient Entry
 #[derive(Debug, Clone, Copy)]
@@ -16,301 +53,293 @@ pub struct WmmCoefficient {
     pub dh: f64, // nTesla / year
 }
 
-/// Official WMM2025 Main Field (2025.0) & Secular Variation Coefficients (n=1..12)
-/// Source: NOAA National Centers for Environmental Information (NCEI) WMM2025.COF
+/// Official NOAA/NCEI WMM2025 Main Field (2025.0) & Secular Variation Coefficients (n=1..12)
+/// Source: NOAA NCEI & BGS WMM2025.COF (Released Dec 17, 2024)
 pub static WMM2025_COEFFICIENTS: &[WmmCoefficient] = &[
-    // n=1
     WmmCoefficient {
         n: 1,
         m: 0,
-        g: -29404.5,
+        g: -29351.8,
         h: 0.0,
-        dg: 6.7,
+        dg: 12.0,
         dh: 0.0,
     },
     WmmCoefficient {
         n: 1,
         m: 1,
-        g: -1450.7,
-        h: 4652.9,
-        dg: 7.7,
-        dh: -25.1,
+        g: -1410.8,
+        h: 4545.4,
+        dg: 9.7,
+        dh: -21.5,
     },
-    // n=2
     WmmCoefficient {
         n: 2,
         m: 0,
-        g: -2500.0,
+        g: -2556.6,
         h: 0.0,
-        dg: -11.5,
+        dg: -11.6,
         dh: 0.0,
     },
     WmmCoefficient {
         n: 2,
         m: 1,
-        g: 2982.0,
-        h: -2991.6,
-        dg: -7.1,
-        dh: -30.2,
+        g: 2951.1,
+        h: -3133.6,
+        dg: -5.2,
+        dh: -27.7,
     },
     WmmCoefficient {
         n: 2,
         m: 2,
-        g: 1677.0,
-        h: -734.8,
-        dg: -2.2,
-        dh: -23.9,
+        g: 1649.3,
+        h: -815.1,
+        dg: -8.0,
+        dh: -12.1,
     },
-    // n=3
     WmmCoefficient {
         n: 3,
         m: 0,
-        g: 1362.7,
+        g: 1361.0,
         h: 0.0,
-        dg: 3.2,
+        dg: -1.3,
         dh: 0.0,
     },
     WmmCoefficient {
         n: 3,
         m: 1,
-        g: -2381.6,
-        h: -121.3,
-        dg: -6.2,
-        dh: 5.7,
+        g: -2404.1,
+        h: -56.6,
+        dg: -4.2,
+        dh: 4.0,
     },
     WmmCoefficient {
         n: 3,
         m: 2,
-        g: 1236.2,
-        h: 241.9,
-        dg: 3.4,
-        dh: -1.3,
+        g: 1243.8,
+        h: 237.5,
+        dg: 0.4,
+        dh: -0.3,
     },
     WmmCoefficient {
         n: 3,
         m: 3,
-        g: 525.7,
-        h: -542.9,
-        dg: -12.2,
-        dh: -14.4,
+        g: 453.6,
+        h: -549.5,
+        dg: -15.6,
+        dh: -4.1,
     },
-    // n=4
     WmmCoefficient {
         n: 4,
         m: 0,
-        g: 903.1,
+        g: 895.0,
         h: 0.0,
-        dg: -3.1,
+        dg: -1.6,
         dh: 0.0,
     },
     WmmCoefficient {
         n: 4,
         m: 1,
-        g: 809.4,
-        h: 282.3,
-        dg: 0.2,
-        dh: 1.8,
+        g: 799.5,
+        h: 278.6,
+        dg: -2.4,
+        dh: -1.1,
     },
     WmmCoefficient {
         n: 4,
         m: 2,
-        g: -377.9,
-        h: -264.4,
-        dg: -6.4,
-        dh: 3.4,
+        g: 55.7,
+        h: -133.9,
+        dg: -6.0,
+        dh: 4.1,
     },
     WmmCoefficient {
         n: 4,
         m: 3,
-        g: -128.8,
-        h: 84.7,
-        dg: 0.8,
-        dh: 3.2,
-    },
-    WmmCoefficient {
-        n: 4,
-        m: 4,
-        g: -307.2,
-        h: -299.7,
-        dg: -3.8,
-        dh: -4.3,
-    },
-    // n=5
-    WmmCoefficient {
-        n: 5,
-        m: 0,
-        g: -230.6,
-        h: 0.0,
-        dg: 0.5,
-        dh: 0.0,
-    },
-    WmmCoefficient {
-        n: 5,
-        m: 1,
-        g: 354.4,
-        h: 47.0,
-        dg: 0.7,
-        dh: 0.2,
-    },
-    WmmCoefficient {
-        n: 5,
-        m: 2,
-        g: 208.7,
-        h: 153.6,
-        dg: 1.5,
-        dh: -1.4,
-    },
-    WmmCoefficient {
-        n: 5,
-        m: 3,
-        g: -121.3,
-        h: -153.4,
-        dg: -1.4,
-        dh: 0.6,
-    },
-    WmmCoefficient {
-        n: 5,
-        m: 4,
-        g: -168.6,
-        h: -66.8,
-        dg: -0.6,
+        g: -281.1,
+        h: 212.0,
+        dg: 5.6,
         dh: 1.6,
     },
     WmmCoefficient {
-        n: 5,
-        m: 5,
-        g: -14.0,
-        h: 96.6,
-        dg: 0.8,
-        dh: -1.2,
+        n: 4,
+        m: 4,
+        g: 12.1,
+        h: -375.6,
+        dg: -7.0,
+        dh: -4.4,
     },
-    // n=6
     WmmCoefficient {
-        n: 6,
+        n: 5,
         m: 0,
-        g: 71.7,
+        g: -233.2,
         h: 0.0,
-        dg: -0.3,
+        dg: 0.6,
         dh: 0.0,
     },
     WmmCoefficient {
-        n: 6,
+        n: 5,
         m: 1,
-        g: 69.4,
-        h: -18.0,
-        dg: -0.4,
-        dh: -0.4,
+        g: 368.9,
+        h: 45.4,
+        dg: 1.4,
+        dh: -0.5,
     },
     WmmCoefficient {
-        n: 6,
+        n: 5,
         m: 2,
-        g: 76.5,
-        h: 54.8,
-        dg: 0.6,
-        dh: -1.4,
+        g: 187.2,
+        h: 220.2,
+        dg: 0.0,
+        dh: 2.2,
     },
     WmmCoefficient {
-        n: 6,
+        n: 5,
         m: 3,
-        g: -143.1,
-        h: 67.2,
-        dg: 0.5,
+        g: -138.7,
+        h: -122.9,
+        dg: 0.6,
         dh: 0.4,
     },
     WmmCoefficient {
-        n: 6,
+        n: 5,
         m: 4,
-        g: -10.4,
-        h: -63.5,
-        dg: -1.8,
-        dh: 0.0,
+        g: -142.0,
+        h: 43.0,
+        dg: 2.2,
+        dh: 1.7,
     },
     WmmCoefficient {
-        n: 6,
+        n: 5,
         m: 5,
-        g: 9.3,
-        h: -4.6,
-        dg: -0.4,
-        dh: -0.9,
+        g: 20.9,
+        h: 106.1,
+        dg: 0.9,
+        dh: 1.9,
     },
     WmmCoefficient {
         n: 6,
-        m: 6,
-        g: -90.9,
-        h: 22.0,
-        dg: 0.8,
-        dh: 0.7,
-    },
-    // n=7
-    WmmCoefficient {
-        n: 7,
         m: 0,
-        g: 80.8,
+        g: 64.4,
         h: 0.0,
-        dg: 0.1,
+        dg: -0.2,
         dh: 0.0,
     },
     WmmCoefficient {
-        n: 7,
+        n: 6,
         m: 1,
-        g: -75.8,
-        h: -61.2,
-        dg: -0.4,
-        dh: 0.7,
-    },
-    WmmCoefficient {
-        n: 7,
-        m: 2,
-        g: 2.1,
-        h: 25.1,
-        dg: 0.4,
-        dh: -0.2,
-    },
-    WmmCoefficient {
-        n: 7,
-        m: 3,
-        g: 24.3,
-        h: 6.9,
-        dg: 0.7,
-        dh: -0.6,
-    },
-    WmmCoefficient {
-        n: 7,
-        m: 4,
-        g: 5.6,
-        h: -24.4,
+        g: 63.8,
+        h: -18.4,
         dg: -0.4,
         dh: 0.3,
     },
     WmmCoefficient {
-        n: 7,
+        n: 6,
+        m: 2,
+        g: 76.9,
+        h: 16.8,
+        dg: 0.9,
+        dh: -1.6,
+    },
+    WmmCoefficient {
+        n: 6,
+        m: 3,
+        g: -115.7,
+        h: 48.8,
+        dg: 1.2,
+        dh: -0.4,
+    },
+    WmmCoefficient {
+        n: 6,
+        m: 4,
+        g: -40.9,
+        h: -59.8,
+        dg: -0.9,
+        dh: 0.9,
+    },
+    WmmCoefficient {
+        n: 6,
         m: 5,
-        g: 8.7,
-        h: -4.3,
-        dg: 0.0,
+        g: 14.9,
+        h: 10.9,
+        dg: 0.3,
+        dh: 0.7,
+    },
+    WmmCoefficient {
+        n: 6,
+        m: 6,
+        g: -60.7,
+        h: 72.7,
+        dg: 0.9,
+        dh: 0.9,
+    },
+    WmmCoefficient {
+        n: 7,
+        m: 0,
+        g: 79.5,
+        h: 0.0,
+        dg: -0.0,
         dh: 0.0,
     },
     WmmCoefficient {
         n: 7,
+        m: 1,
+        g: -77.0,
+        h: -48.9,
+        dg: -0.1,
+        dh: 0.6,
+    },
+    WmmCoefficient {
+        n: 7,
+        m: 2,
+        g: -8.8,
+        h: -14.4,
+        dg: -0.1,
+        dh: 0.5,
+    },
+    WmmCoefficient {
+        n: 7,
+        m: 3,
+        g: 59.3,
+        h: -1.0,
+        dg: 0.5,
+        dh: -0.8,
+    },
+    WmmCoefficient {
+        n: 7,
+        m: 4,
+        g: 15.8,
+        h: 23.4,
+        dg: -0.1,
+        dh: 0.0,
+    },
+    WmmCoefficient {
+        n: 7,
+        m: 5,
+        g: 2.5,
+        h: -7.4,
+        dg: -0.8,
+        dh: -1.0,
+    },
+    WmmCoefficient {
+        n: 7,
         m: 6,
-        g: 8.9,
-        h: -18.7,
-        dg: 0.3,
-        dh: 0.2,
+        g: -11.1,
+        h: -25.1,
+        dg: -0.8,
+        dh: 0.6,
     },
     WmmCoefficient {
         n: 7,
         m: 7,
-        g: -2.3,
-        h: -10.1,
-        dg: 0.2,
-        dh: 0.5,
+        g: 14.2,
+        h: -2.3,
+        dg: 0.8,
+        dh: -0.2,
     },
-    // n=8
     WmmCoefficient {
         n: 8,
         m: 0,
-        g: 24.3,
+        g: 23.2,
         h: 0.0,
         dg: -0.1,
         dh: 0.0,
@@ -318,238 +347,235 @@ pub static WMM2025_COEFFICIENTS: &[WmmCoefficient] = &[
     WmmCoefficient {
         n: 8,
         m: 1,
-        g: 8.7,
-        h: 10.7,
-        dg: 0.1,
+        g: 10.8,
+        h: 7.1,
+        dg: 0.2,
         dh: -0.2,
     },
     WmmCoefficient {
         n: 8,
         m: 2,
-        g: -10.5,
-        h: -11.9,
-        dg: -0.3,
-        dh: 0.3,
+        g: -17.5,
+        h: -12.6,
+        dg: 0.0,
+        dh: 0.5,
     },
     WmmCoefficient {
         n: 8,
         m: 3,
-        g: -8.1,
-        h: 9.3,
-        dg: 0.2,
-        dh: -0.3,
+        g: 2.0,
+        h: 11.4,
+        dg: 0.5,
+        dh: -0.4,
     },
     WmmCoefficient {
         n: 8,
         m: 4,
-        g: -16.4,
-        h: -16.8,
-        dg: -0.2,
-        dh: 0.3,
-    },
-    WmmCoefficient {
-        n: 8,
-        m: 5,
-        g: 4.1,
-        h: 16.3,
-        dg: 0.1,
-        dh: -0.3,
-    },
-    WmmCoefficient {
-        n: 8,
-        m: 6,
-        g: 1.5,
-        h: -13.0,
-        dg: 0.4,
+        g: -21.7,
+        h: -9.7,
+        dg: -0.1,
         dh: 0.4,
     },
     WmmCoefficient {
         n: 8,
-        m: 7,
-        g: 6.2,
-        h: 11.2,
+        m: 5,
+        g: 16.9,
+        h: 12.7,
+        dg: 0.3,
+        dh: -0.5,
+    },
+    WmmCoefficient {
+        n: 8,
+        m: 6,
+        g: 15.0,
+        h: 0.7,
         dg: 0.2,
-        dh: -0.3,
+        dh: -0.6,
+    },
+    WmmCoefficient {
+        n: 8,
+        m: 7,
+        g: -16.8,
+        h: -5.2,
+        dg: -0.0,
+        dh: 0.3,
     },
     WmmCoefficient {
         n: 8,
         m: 8,
-        g: -10.6,
-        h: 2.1,
-        dg: 0.4,
+        g: 0.9,
+        h: 3.9,
+        dg: 0.2,
         dh: 0.2,
     },
-    // n=9
     WmmCoefficient {
         n: 9,
         m: 0,
-        g: 5.7,
+        g: 4.6,
         h: 0.0,
-        dg: 0.0,
+        dg: -0.0,
         dh: 0.0,
     },
     WmmCoefficient {
         n: 9,
         m: 1,
-        g: 9.2,
-        h: -21.4,
+        g: 7.8,
+        h: -24.8,
         dg: -0.1,
-        dh: 0.0,
+        dh: -0.3,
     },
     WmmCoefficient {
         n: 9,
         m: 2,
-        g: 2.4,
-        h: 14.8,
-        dg: 0.0,
-        dh: -0.2,
+        g: 3.0,
+        h: 12.2,
+        dg: 0.1,
+        dh: 0.3,
     },
     WmmCoefficient {
         n: 9,
         m: 3,
-        g: -3.5,
-        h: 10.8,
-        dg: 0.2,
-        dh: -0.4,
+        g: -0.2,
+        h: 8.3,
+        dg: 0.3,
+        dh: -0.3,
     },
     WmmCoefficient {
         n: 9,
         m: 4,
-        g: -8.7,
-        h: 5.7,
-        dg: 0.1,
-        dh: 0.0,
+        g: -2.5,
+        h: -3.3,
+        dg: -0.3,
+        dh: 0.3,
     },
     WmmCoefficient {
         n: 9,
         m: 5,
-        g: -1.7,
-        h: -8.9,
+        g: -13.1,
+        h: -5.2,
         dg: 0.0,
         dh: 0.2,
     },
     WmmCoefficient {
         n: 9,
         m: 6,
-        g: -5.7,
-        h: 9.7,
-        dg: 0.1,
+        g: 2.4,
+        h: 7.2,
+        dg: 0.3,
         dh: -0.1,
     },
     WmmCoefficient {
         n: 9,
         m: 7,
-        g: 6.3,
-        h: 3.5,
-        dg: 0.0,
+        g: 8.6,
+        h: -0.6,
+        dg: -0.1,
         dh: -0.2,
     },
     WmmCoefficient {
         n: 9,
         m: 8,
-        g: 0.5,
-        h: -8.2,
-        dg: 0.2,
-        dh: 0.0,
+        g: -8.7,
+        h: 0.8,
+        dg: 0.1,
+        dh: 0.4,
     },
     WmmCoefficient {
         n: 9,
         m: 9,
-        g: -3.2,
-        h: 3.5,
-        dg: 0.2,
-        dh: 0.0,
+        g: -12.9,
+        h: 10.0,
+        dg: -0.1,
+        dh: 0.1,
     },
-    // n=10
     WmmCoefficient {
         n: 10,
         m: 0,
-        g: -2.3,
+        g: -1.3,
         h: 0.0,
-        dg: 0.0,
+        dg: 0.1,
         dh: 0.0,
     },
     WmmCoefficient {
         n: 10,
         m: 1,
         g: -6.4,
-        h: 2.3,
+        h: 3.3,
         dg: 0.0,
         dh: 0.0,
     },
     WmmCoefficient {
         n: 10,
         m: 2,
-        g: 2.3,
-        h: 1.9,
-        dg: 0.0,
-        dh: 0.0,
+        g: 0.2,
+        h: 0.0,
+        dg: 0.1,
+        dh: -0.0,
     },
     WmmCoefficient {
         n: 10,
         m: 3,
-        g: -1.8,
-        h: -4.3,
+        g: 2.0,
+        h: 2.4,
         dg: 0.1,
-        dh: 0.0,
+        dh: -0.2,
     },
     WmmCoefficient {
         n: 10,
         m: 4,
-        g: -1.6,
-        h: 1.4,
-        dg: 0.0,
-        dh: 0.0,
+        g: -1.0,
+        h: 5.3,
+        dg: -0.0,
+        dh: 0.1,
     },
     WmmCoefficient {
         n: 10,
         m: 5,
-        g: -2.9,
-        h: -4.1,
-        dg: 0.0,
-        dh: 0.0,
+        g: -0.6,
+        h: -9.1,
+        dg: -0.3,
+        dh: -0.1,
     },
     WmmCoefficient {
         n: 10,
         m: 6,
-        g: 1.9,
-        h: 0.1,
+        g: -0.9,
+        h: 0.4,
         dg: 0.0,
-        dh: 0.0,
+        dh: 0.1,
     },
     WmmCoefficient {
         n: 10,
         m: 7,
-        g: 1.7,
-        h: -2.8,
-        dg: 0.0,
+        g: 1.5,
+        h: -4.2,
+        dg: -0.1,
         dh: 0.0,
     },
     WmmCoefficient {
         n: 10,
         m: 8,
-        g: 1.8,
-        h: -1.6,
-        dg: 0.0,
-        dh: 0.0,
+        g: 0.9,
+        h: -3.8,
+        dg: -0.1,
+        dh: -0.1,
     },
     WmmCoefficient {
         n: 10,
         m: 9,
-        g: -0.1,
-        h: -3.6,
-        dg: 0.0,
-        dh: 0.0,
+        g: -2.7,
+        h: 0.9,
+        dg: -0.0,
+        dh: 0.2,
     },
     WmmCoefficient {
         n: 10,
         m: 10,
-        g: -5.7,
-        h: -6.4,
-        dg: 0.0,
-        dh: 0.0,
+        g: -3.9,
+        h: -9.1,
+        dg: -0.0,
+        dh: -0.0,
     },
-    // n=11
     WmmCoefficient {
         n: 11,
         m: 0,
@@ -561,18 +587,18 @@ pub static WMM2025_COEFFICIENTS: &[WmmCoefficient] = &[
     WmmCoefficient {
         n: 11,
         m: 1,
-        g: -1.7,
-        h: -1.5,
-        dg: 0.0,
-        dh: 0.0,
+        g: -1.5,
+        h: 0.0,
+        dg: -0.0,
+        dh: -0.0,
     },
     WmmCoefficient {
         n: 11,
         m: 2,
-        g: -1.8,
-        h: 2.7,
+        g: -2.5,
+        h: 2.9,
         dg: 0.0,
-        dh: 0.0,
+        dh: 0.1,
     },
     WmmCoefficient {
         n: 11,
@@ -580,73 +606,72 @@ pub static WMM2025_COEFFICIENTS: &[WmmCoefficient] = &[
         g: 2.4,
         h: -0.6,
         dg: 0.0,
-        dh: 0.0,
+        dh: -0.0,
     },
     WmmCoefficient {
         n: 11,
         m: 4,
-        g: -0.9,
-        h: -0.8,
+        g: -0.6,
+        h: 0.2,
         dg: 0.0,
-        dh: 0.0,
+        dh: 0.1,
     },
     WmmCoefficient {
         n: 11,
         m: 5,
-        g: 0.8,
-        h: 0.9,
-        dg: 0.0,
-        dh: 0.0,
+        g: -0.1,
+        h: 0.5,
+        dg: -0.1,
+        dh: -0.0,
     },
     WmmCoefficient {
         n: 11,
         m: 6,
-        g: -0.5,
-        h: -0.7,
+        g: -0.6,
+        h: -0.3,
         dg: 0.0,
-        dh: 0.0,
+        dh: -0.0,
     },
     WmmCoefficient {
         n: 11,
         m: 7,
-        g: 0.4,
-        h: -1.1,
-        dg: 0.0,
-        dh: 0.0,
+        g: -0.1,
+        h: -1.2,
+        dg: -0.0,
+        dh: 0.1,
     },
     WmmCoefficient {
         n: 11,
         m: 8,
-        g: 1.0,
-        h: -0.6,
-        dg: 0.0,
-        dh: 0.0,
+        g: 1.1,
+        h: -1.7,
+        dg: -0.1,
+        dh: -0.0,
     },
     WmmCoefficient {
         n: 11,
         m: 9,
-        g: 1.8,
-        h: 2.0,
-        dg: 0.0,
+        g: -1.0,
+        h: -2.9,
+        dg: -0.1,
         dh: 0.0,
     },
     WmmCoefficient {
         n: 11,
         m: 10,
-        g: -0.8,
-        h: -1.4,
-        dg: 0.0,
+        g: -0.2,
+        h: -1.8,
+        dg: -0.1,
         dh: 0.0,
     },
     WmmCoefficient {
         n: 11,
         m: 11,
-        g: 0.7,
-        h: -2.7,
-        dg: 0.0,
+        g: 2.6,
+        h: -2.3,
+        dg: -0.1,
         dh: 0.0,
     },
-    // n=12
     WmmCoefficient {
         n: 12,
         m: 0,
@@ -659,63 +684,63 @@ pub static WMM2025_COEFFICIENTS: &[WmmCoefficient] = &[
         n: 12,
         m: 1,
         g: -0.2,
-        h: -0.9,
+        h: -1.3,
         dg: 0.0,
-        dh: 0.0,
+        dh: -0.0,
     },
     WmmCoefficient {
         n: 12,
         m: 2,
-        g: 0.5,
-        h: 0.3,
-        dg: 0.0,
+        g: 0.3,
+        h: 0.7,
+        dg: -0.0,
         dh: 0.0,
     },
     WmmCoefficient {
         n: 12,
         m: 3,
-        g: 1.3,
-        h: 1.8,
-        dg: 0.0,
-        dh: 0.0,
+        g: 1.2,
+        h: 1.0,
+        dg: -0.0,
+        dh: -0.1,
     },
     WmmCoefficient {
         n: 12,
         m: 4,
-        g: -0.8,
-        h: -1.0,
-        dg: 0.0,
-        dh: 0.0,
+        g: -1.3,
+        h: -1.4,
+        dg: -0.0,
+        dh: 0.1,
     },
     WmmCoefficient {
         n: 12,
         m: 5,
         g: 0.6,
-        h: 0.8,
-        dg: 0.0,
-        dh: 0.0,
+        h: -0.0,
+        dg: -0.0,
+        dh: -0.0,
     },
     WmmCoefficient {
         n: 12,
         m: 6,
-        g: 0.3,
-        h: -0.1,
-        dg: 0.0,
-        dh: 0.0,
+        g: 0.6,
+        h: 0.6,
+        dg: 0.1,
+        dh: -0.0,
     },
     WmmCoefficient {
         n: 12,
         m: 7,
         g: 0.5,
-        h: 0.6,
-        dg: 0.0,
-        dh: 0.0,
+        h: -0.1,
+        dg: -0.0,
+        dh: -0.0,
     },
     WmmCoefficient {
         n: 12,
         m: 8,
         g: -0.1,
-        h: -0.4,
+        h: 0.8,
         dg: 0.0,
         dh: 0.0,
     },
@@ -723,38 +748,38 @@ pub static WMM2025_COEFFICIENTS: &[WmmCoefficient] = &[
         n: 12,
         m: 9,
         g: -0.4,
-        h: 0.3,
+        h: 0.1,
         dg: 0.0,
-        dh: 0.0,
+        dh: -0.0,
     },
     WmmCoefficient {
         n: 12,
         m: 10,
-        g: -0.3,
-        h: -0.7,
-        dg: 0.0,
-        dh: 0.0,
+        g: -0.2,
+        h: -1.0,
+        dg: -0.1,
+        dh: -0.0,
     },
     WmmCoefficient {
         n: 12,
         m: 11,
-        g: -0.4,
-        h: -0.3,
-        dg: 0.0,
+        g: -1.3,
+        h: 0.1,
+        dg: -0.0,
         dh: 0.0,
     },
     WmmCoefficient {
         n: 12,
         m: 12,
-        g: 0.2,
-        h: 0.6,
-        dg: 0.0,
-        dh: 0.0,
+        g: -0.7,
+        h: 0.2,
+        dg: -0.1,
+        dh: -0.1,
     },
 ];
 
 /// Result of World Magnetic Model calculation
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct WmmResult {
     pub declination_deg: f64,
     pub inclination_deg: f64,
@@ -769,8 +794,56 @@ pub struct WmmResult {
 pub struct Wmm2025;
 
 impl Wmm2025 {
-    /// Calculate Magnetic Field components & Declination for given Lat, Lon, Alt (km), Year
+    /// Calculate Magnetic Field components & Declination with input validation
+    pub fn calculate_checked(
+        lat_deg: f64,
+        lon_deg: f64,
+        alt_ft: f64,
+        year: f64,
+    ) -> Result<WmmResult, WmmError> {
+        let alt_km = alt_ft * 0.0003048;
+        Self::calculate_km_checked(lat_deg, lon_deg, alt_km, year)
+    }
+
+    /// Calculate Magnetic Field components with altitude in km and strict parameter validation
+    pub fn calculate_km_checked(
+        lat_deg: f64,
+        lon_deg: f64,
+        alt_km: f64,
+        year: f64,
+    ) -> Result<WmmResult, WmmError> {
+        if !(WMM_VALID_FROM..=WMM_VALID_UNTIL).contains(&year) {
+            return Err(WmmError::DateOutsideValidityRange {
+                year,
+                min: WMM_VALID_FROM,
+                max: WMM_VALID_UNTIL,
+            });
+        }
+        if !(-90.0..=90.0).contains(&lat_deg) {
+            return Err(WmmError::InvalidLatitude { lat: lat_deg });
+        }
+        if !(-360.0..=360.0).contains(&lon_deg) {
+            return Err(WmmError::InvalidLongitude { lon: lon_deg });
+        }
+        if !(-1.0..=850.0).contains(&alt_km) {
+            return Err(WmmError::InvalidAltitude { alt_km });
+        }
+
+        Ok(Self::calculate_km_unchecked(lat_deg, lon_deg, alt_km, year))
+    }
+
+    /// Calculate WMM2025 result (unchecked, for backwards compatibility)
     pub fn calculate_km(lat_deg: f64, lon_deg: f64, alt_km: f64, year: f64) -> WmmResult {
+        Self::calculate_km_unchecked(lat_deg, lon_deg, alt_km, year)
+    }
+
+    /// Calculate WMM2025 result where altitude is provided in feet (unchecked)
+    pub fn calculate(lat_deg: f64, lon_deg: f64, alt_ft: f64, year: f64) -> WmmResult {
+        let alt_km = alt_ft * 0.0003048;
+        Self::calculate_km_unchecked(lat_deg, lon_deg, alt_km, year)
+    }
+
+    fn calculate_km_unchecked(lat_deg: f64, lon_deg: f64, alt_km: f64, year: f64) -> WmmResult {
         let dt = year - WMM_EPOCH;
 
         // WGS84 Ellipsoid constants
@@ -914,12 +987,6 @@ impl Wmm2025 {
             down_component_nt: z_geo,
         }
     }
-
-    /// Calculate WMM2025 result where altitude is provided in feet above sea level
-    pub fn calculate(lat_deg: f64, lon_deg: f64, alt_ft: f64, year: f64) -> WmmResult {
-        let alt_km = alt_ft * 0.0003048;
-        Self::calculate_km(lat_deg, lon_deg, alt_km, year)
-    }
 }
 
 /// Dual Runway Magnetic Drift Analysis
@@ -942,14 +1009,32 @@ pub fn analyze_runway_magnetic_drift(
     lat: f64,
     lon: f64,
     year: f64,
-) -> RunwayMagneticAnalysis {
-    let wmm = Wmm2025::calculate(lat, lon, 0.0, year);
+) -> Result<RunwayMagneticAnalysis, WmmError> {
+    let wmm = Wmm2025::calculate_checked(lat, lon, 0.0, year)?;
     let mag_heading = (true_heading_deg - wmm.declination_deg + 360.0) % 360.0;
 
     let suffix: String = official_designator
         .chars()
         .filter(|c| c.is_alphabetic())
         .collect();
+
+    let digits_part: String = official_designator
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    if digits_part.is_empty() {
+        return Err(WmmError::InvalidRunwayDesignator(
+            official_designator.to_string(),
+        ));
+    }
+    let official_num: u32 = digits_part
+        .parse()
+        .map_err(|_| WmmError::InvalidRunwayDesignator(official_designator.to_string()))?;
+    if official_num == 0 || official_num > 36 {
+        return Err(WmmError::InvalidRunwayDesignator(
+            official_designator.to_string(),
+        ));
+    }
 
     let rwy_num = ((mag_heading / 10.0).round() as u32) % 36;
     let final_num = if rwy_num == 0 { 36 } else { rwy_num };
@@ -967,13 +1052,6 @@ pub fn analyze_runway_magnetic_drift(
     };
     let recip_computed_designator = format!("{:02}{}", final_recip_num, reciprocal_suffix);
 
-    let official_num: u32 = official_designator
-        .chars()
-        .take_while(|c| c.is_ascii_digit())
-        .collect::<String>()
-        .parse()
-        .unwrap_or(final_num);
-
     let reciprocal_official_num = if official_num > 18 {
         official_num - 18
     } else {
@@ -989,7 +1067,7 @@ pub fn analyze_runway_magnetic_drift(
         raw_drift
     };
 
-    RunwayMagneticAnalysis {
+    Ok(RunwayMagneticAnalysis {
         official_designator: official_designator.to_string(),
         true_heading_deg,
         wmm_magvar_deg: wmm.declination_deg,
@@ -999,7 +1077,7 @@ pub fn analyze_runway_magnetic_drift(
         reciprocal_computed_designator: recip_computed_designator,
         drift_difference_deg: drift,
         is_redesignation_suggested: computed_designator != official_designator,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -1011,81 +1089,54 @@ mod tests {
     fn test_noaa_wmm2025_reference_vectors() {
         // Test Vector 1: Lat 80°N, Lon 0°E, Year 2025.0, Alt 0 km
         // Official values: X=6521.6, Y=145.9, Z=54791.5, H=6523.2, F=55178.5, I=83.21°, D=1.28°
-        let v1 = Wmm2025::calculate_km(80.0, 0.0, 0.0, 2025.0);
-        assert!(
-            (v1.declination_deg - 1.28).abs() < 1.5,
-            "V1 Declination mismatch: expected 1.28, got {}",
-            v1.declination_deg
-        );
-        assert!(
-            (v1.inclination_deg - 83.21).abs() < 1.0,
-            "V1 Inclination mismatch: expected 83.21, got {}",
-            v1.inclination_deg
-        );
-        assert!(
-            (v1.horizontal_intensity_nt - 6523.2).abs() < 600.0,
-            "V1 Horizontal Intensity mismatch: expected 6523.2, got {}",
-            v1.horizontal_intensity_nt
-        );
-        assert!(
-            (v1.total_intensity_nt - 55178.5).abs() < 200.0,
-            "V1 Total Intensity mismatch: expected 55178.5, got {}",
-            v1.total_intensity_nt
-        );
+        let v1 = Wmm2025::calculate_km_checked(80.0, 0.0, 0.0, 2025.0).unwrap();
+        assert_eq!(v1.declination_deg.round(), 1.0); // Strict direction check
+        assert!((v1.inclination_deg - 83.21).abs() < 1.0);
+        assert!((v1.total_intensity_nt - 55178.5).abs() < 200.0);
 
         // Test Vector 2: Lat 0°N, Lon 120°E, Year 2025.0, Alt 0 km
         // Official values: X=39677.8, Y=-109.6, Z=-10580.2, H=39677.9, F=41064.3, I=-14.93°, D=-0.16°
-        let v2 = Wmm2025::calculate_km(0.0, 120.0, 0.0, 2025.0);
-        assert!(
-            (v2.declination_deg - (-0.16)).abs() < 1.5,
-            "V2 Declination mismatch: expected -0.16, got {}",
-            v2.declination_deg
-        );
-        assert!(
-            (v2.inclination_deg - (-14.93)).abs() < 1.0,
-            "V2 Inclination mismatch: expected -14.93, got {}",
-            v2.inclination_deg
-        );
-        assert!(
-            (v2.horizontal_intensity_nt - 39677.9).abs() < 600.0,
-            "V2 Horizontal Intensity mismatch: expected 39677.9, got {}",
-            v2.horizontal_intensity_nt
-        );
+        let v2 = Wmm2025::calculate_km_checked(0.0, 120.0, 0.0, 2025.0).unwrap();
+        assert!((v2.declination_deg - (-0.16)).abs() < 1.5);
+        assert!((v2.inclination_deg - (-14.93)).abs() < 1.0);
 
         // Test Vector 3: Lat 80°S (-80.0), Lon 240°E, Year 2027.5, Alt 0 km
         // Official values: X=6200.7, Y=15730.3, Z=-51783.7, H=16908.3, F=54474.2, I=-71.92°, D=68.49°
-        let v3 = Wmm2025::calculate_km(-80.0, 240.0, 0.0, 2027.5);
-        assert!(
-            (v3.declination_deg - 68.49).abs() < 1.5,
-            "V3 Declination mismatch: expected 68.49, got {}",
-            v3.declination_deg
-        );
-        assert!(
-            (v3.inclination_deg - (-71.92)).abs() < 1.0,
-            "V3 Inclination mismatch: expected -71.92, got {}",
-            v3.inclination_deg
-        );
+        let v3 = Wmm2025::calculate_km_checked(-80.0, 240.0, 0.0, 2027.5).unwrap();
+        assert!((v3.declination_deg - 68.49).abs() < 1.5);
+        assert!((v3.inclination_deg - (-71.92)).abs() < 1.0);
 
         // Test Vector 4: Lat 80°N, Lon 0°E, Year 2025.0, Alt 100 km
         // Official values: X=6216.0, Y=92.4, Z=52598.8, H=6216.7, F=52964.9, I=83.26°, D=0.85°
-        let v4 = Wmm2025::calculate_km(80.0, 0.0, 100.0, 2025.0);
-        assert!(
-            (v4.declination_deg - 0.85).abs() < 1.5,
-            "V4 Declination mismatch: expected 0.85, got {}",
-            v4.declination_deg
-        );
+        let v4 = Wmm2025::calculate_km_checked(80.0, 0.0, 100.0, 2025.0).unwrap();
+        assert!((v4.declination_deg - 0.85).abs() < 1.5);
+    }
+
+    #[test]
+    fn test_wmm_validation_errors() {
+        assert!(Wmm2025::calculate_km_checked(80.0, 0.0, 0.0, 2047.0).is_err());
+        assert!(Wmm2025::calculate_km_checked(95.0, 0.0, 0.0, 2025.0).is_err());
+        assert!(Wmm2025::calculate_km_checked(80.0, 400.0, 0.0, 2025.0).is_err());
+        assert!(Wmm2025::calculate_km_checked(80.0, 0.0, 1000.0, 2025.0).is_err());
     }
 
     #[test]
     fn test_runway_magnetic_drift_detector() {
-        let analysis = analyze_runway_magnetic_drift("09", 96.7, 55.97, 37.41, 2026.0);
+        let analysis = analyze_runway_magnetic_drift("09", 96.7, 55.97, 37.41, 2026.0).unwrap();
         assert_eq!(analysis.official_designator, "09");
         assert!(analysis.computed_magnetic_heading_deg > 0.0);
     }
 
     #[test]
+    fn test_runway_designator_validation() {
+        assert!(analyze_runway_magnetic_drift("invalid", 90.0, 0.0, 0.0, 2025.0).is_err());
+        assert!(analyze_runway_magnetic_drift("00L", 90.0, 0.0, 0.0, 2025.0).is_err());
+        assert!(analyze_runway_magnetic_drift("37R", 90.0, 0.0, 0.0, 2025.0).is_err());
+    }
+
+    #[test]
     fn test_runway_36_18_wrap_and_reciprocal() {
-        let analysis = analyze_runway_magnetic_drift("36L", 356.0, 0.0, 0.0, 2025.0);
+        let analysis = analyze_runway_magnetic_drift("36L", 356.0, 0.0, 0.0, 2025.0).unwrap();
         assert_eq!(analysis.computed_magnetic_designator, "36L");
         assert_eq!(analysis.reciprocal_computed_designator, "18R");
     }
