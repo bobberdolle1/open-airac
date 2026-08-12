@@ -1,5 +1,5 @@
 [package]
-name = "nav-model"
+name = "openairac-magnetic"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

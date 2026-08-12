@@ -8,3 +8,10 @@ target/
 node_modules/
 dist/
 .env
+
+*.zip
+*.sqlite
+*.sqlite3
+*.db
+data/
+prompt.md

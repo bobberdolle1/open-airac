@@ -1,14 +1,20 @@
 use anyhow::Result;
-use nav_model::{CanonicalNavaid, CanonicalWaypoint, NavaidKind};
+use openairac_model::{CanonicalNavaid, CanonicalWaypoint, NavaidKind};
 use std::io::Write;
 
 pub struct XPlane12Exporter;
 
 impl XPlane12Exporter {
     /// Export waypoints into X-Plane 12 `earth_fix.dat` format (1200 Version)
-    pub fn export_earth_fix<W: Write>(waypoints: &[CanonicalWaypoint], mut writer: W) -> Result<()> {
+    pub fn export_earth_fix<W: Write>(
+        waypoints: &[CanonicalWaypoint],
+        mut writer: W,
+    ) -> Result<()> {
         writeln!(writer, "I")?;
-        writeln!(writer, "1200 Version - OpenAIRAC Canonical World, NOAA WMM2025")?;
+        writeln!(
+            writer,
+            "1200 Version - OpenAIRAC Canonical World, NOAA WMM2025"
+        )?;
         writeln!(writer)?;
 
         for wp in waypoints {
@@ -27,7 +33,10 @@ impl XPlane12Exporter {
     /// Export navaids into X-Plane 12 `earth_nav.dat` format (1200 Version)
     pub fn export_earth_nav<W: Write>(navaids: &[CanonicalNavaid], mut writer: W) -> Result<()> {
         writeln!(writer, "I")?;
-        writeln!(writer, "1200 Version - OpenAIRAC Canonical World, NOAA WMM2025 Engine")?;
+        writeln!(
+            writer,
+            "1200 Version - OpenAIRAC Canonical World, NOAA WMM2025 Engine"
+        )?;
         writeln!(writer)?;
 
         for nav in navaids {
@@ -39,7 +48,7 @@ impl XPlane12Exporter {
                 NavaidKind::IlsGlidepath => 5,
             };
 
-            let freq = nav.frequency_khz / 10; // e.g. 114600 -> 11460
+            let freq = nav.frequency_khz / 10;
 
             writeln!(
                 writer,
@@ -49,7 +58,7 @@ impl XPlane12Exporter {
                 nav.longitude,
                 nav.elevation_ft,
                 freq,
-                130, // Slaved variation / Range
+                130,
                 nav.computed_wmm_magvar_deg,
                 nav.ident,
                 nav.name

@@ -62,7 +62,7 @@ pub struct CanonicalNavaid {
 /// Canonical Airport & Runway with Dual Designators
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CanonicalRunway {
-    pub official_designator: String,       // e.g. "09"
+    pub official_designator: String,          // e.g. "09"
     pub computed_magnetic_designator: String, // e.g. "10"
     pub true_heading_deg: f64,
     pub length_ft: u32,

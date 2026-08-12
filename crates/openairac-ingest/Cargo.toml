@@ -1,5 +1,5 @@
 [package]
-name = "openairac-cli"
+name = "openairac-ingest"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,16 +7,13 @@ repository.workspace = true
 
 [dependencies]
 openairac-model = { path = "../openairac-model" }
-openairac-magnetic = { path = "../openairac-magnetic" }
 openairac-store = { path = "../openairac-store" }
-openairac-ingest = { path = "../openairac-ingest" }
+openairac-magnetic = { path = "../openairac-magnetic" }
 openairac-procedures = { path = "../openairac-procedures" }
-openairac-routing = { path = "../openairac-routing" }
-openairac-export-xplane = { path = "../openairac-export-xplane" }
-clap.workspace = true
-anyhow.workspace = true
-tracing.workspace = true
-tracing-subscriber.workspace = true
-tokio.workspace = true
-reqwest.workspace = true
+csv.workspace = true
+serde.workspace = true
 chrono.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+reqwest.workspace = true
