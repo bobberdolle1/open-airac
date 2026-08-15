@@ -41,8 +41,11 @@ Every ingested dataset is recorded in SQLite under `source_snapshots` with:
 - **Status**: Experimental. Layered decoder (fixed-width → raw records →
   canonical entities) with explicit unsupported-record reporting.
   Supported today: `EA` enroute waypoints, `D` VHF navaids (VOR, VOR-DME,
-  VORTAC, DME-only, TACAN-only, ILS localizers), `DB`/`PN` NDBs.
-  Everything else is preserved raw and reported as unsupported.
-- **Known gaps**: ILS localizer bearings are not decoded from `D` records
-  (export of ILS rows is therefore refused until a bearing source exists);
-  terminal waypoints/procedures (PD/PE/PF) are future work.
+  VORTAC, DME-only, TACAN-only, ILS localizers and their DME-ILS
+  components), `DB`/`PN` NDBs, and `ER` airway records chained into airway
+  segments. Everything else is preserved raw and reported as unsupported.
+- **Known gaps**: ILS localizer bearings/glideslope angles and ILS
+  categories are not decodable from `D` records (convert424toxplane
+  synthesizes the glideslope geometry and reads categories from `PF`
+  records) — ILS rows are therefore refused at export; terminal
+  waypoints/procedures (PD/PE/PF) are future work.

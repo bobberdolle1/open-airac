@@ -1144,6 +1144,8 @@ dependencies = [
  "openairac-model",
  "openairac-store",
  "serde",
+ "serde_json",
+ "sha2",
  "tracing",
 ]
 

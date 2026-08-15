@@ -103,13 +103,17 @@ openairac validate --db ./data/world.openairac.sqlite
 ```bash
 openairac export xplane --db ./data/world.openairac.sqlite --out ./dist/xplane
 ```
-
-The exporter is fail-closed: records missing fields the X-Plane format
-requires (ICAO region, waypoint type, localizer bearings) are skipped with
-diagnostics instead of being fabricated, files are staged and swapped in
-atomically, and an export that would produce an empty nav layer is refused
-unless `--allow-empty` is passed explicitly.
-
+The exporter is fail-closed and layer-aware: it writes `earth_fix.dat`,
+`earth_nav.dat` and `earth_awy.dat` plus a checksummed `manifest.json`,
+stages them and swaps them in atomically. Records missing fields the
+X-Plane format requires (ICAO region, elevation, slaved variation, service
+class, waypoint type, localizer bearings, airway endpoint references) are
+skipped with diagnostics instead of being fabricated. An incomplete layer —
+including a missing or empty `earth_awy.dat`, which breaks X-Plane's
+referential integrity — is refused unless `--allow-empty` is passed.
+**OpenAIRAC does not yet install into a live simulator installation**; the
+output is for validation and testing. Row conventions are cross-checked
+against Laminar convert424toxplane v12.4 output for the same FAA CIFP input.
 ---
 
 ## 📄 License
