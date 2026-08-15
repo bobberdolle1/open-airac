@@ -13,7 +13,7 @@ Every ingested dataset is recorded in SQLite under `source_snapshots` with:
 - `content_sha256`: SHA-256 hash of raw dataset content
 - `license_notes`: License classification and terms
 
-## Ingested Data Sources (v0.2)
+## Ingested Data Sources (v0.3)
 
 ### 1. OurAirports (Public Domain / CC0)
 - **Datasets**: `airports.csv`, `runways.csv`, `navaids.csv`
@@ -38,14 +38,33 @@ Every ingested dataset is recorded in SQLite under `source_snapshots` with:
 - **Datasets**: FAA Coded Instrument Flight Procedures (FAACIFP18,
   https://aeronav.faa.gov/Upload_313-d/cifp/)
 - **Coverage**: US airspace waypoints, navaids, airways, procedures
-- **Status**: Experimental. Layered decoder (fixed-width → raw records →
-  canonical entities) with explicit unsupported-record reporting.
-  Supported today: `EA` enroute waypoints, `D` VHF navaids (VOR, VOR-DME,
-  VORTAC, DME-only, TACAN-only, ILS localizers and their DME-ILS
-  components), `DB`/`PN` NDBs, and `ER` airway records chained into airway
-  segments. Everything else is preserved raw and reported as unsupported.
-- **Known gaps**: ILS localizer bearings/glideslope angles and ILS
-  categories are not decodable from `D` records (convert424toxplane
-  synthesizes the glideslope geometry and reads categories from `PF`
-  records) — ILS rows are therefore refused at export; terminal
-  waypoints/procedures (PD/PE/PF) are future work.
+- **Status**: Implemented at the library level
+  (`openairac_ingest::faa_cifp::ingest_cifp`), golden-tested against real
+  cycle 2608 records cross-checked with convert424toxplane v12.4 output.
+  Supported record classes:
+  - `EA` enroute waypoints,
+  - `D` VHF navaids (VOR, VOR-DME, VORTAC, DME-only, TACAN-only, ILS
+    localizers and their DME-ILS components), `DB`/`PN` NDBs,
+  - `ER` airway records chained into airway segments,
+  - `PA` terminal airports, `PG` terminal runways,
+  - `PC` terminal waypoints (parent airport attached as
+    `terminal_area_ident`),
+  - `PD`/`PE`/`PF` SID/STAR/approach procedure legs with the full
+    verified column map (recommended navaid, arc radius, course/distance
+    pairs, altitude bands, speed limits, MSA center fix, route
+    qualifiers). The raw record is always preserved (`raw` column).
+  Everything else is preserved raw and reported as unsupported.
+- **Known gaps**:
+  - ILS localizer bearings/glideslope angles are not decodable from `D`
+    records; they live in `PF` approach records. The exporter therefore
+    still refuses ILS rows until PF data is joined in (planned v0.5).
+  - CIFP ingestion is not yet wired into the CLI `sync` command
+    (library-level only).
+  - Terminal record support is decoding/verification level: procedure
+    geometry rendering (RF arcs etc.) is not implemented.
+
+## Not yet ingested
+
+- ICAO AIP / worldwide procedure sources (regional coverage expansion,
+  roadmap v0.6).
+- MSFS 2024 navdata inputs (roadmap v0.7).

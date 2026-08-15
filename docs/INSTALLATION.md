@@ -2,11 +2,14 @@
 
 This guide explains how to install, configure, and use **OpenAIRAC**.
 
-> Status note: v0.2 is a foundation release. The CLI, the canonical temporal
-> store, WMM2025, OurAirports ingestion and the X-Plane 12 navaid/fix exporter
-> are functional. Simulator *installation* of the exported files (backup,
-> swap, rollback) and MSFS support are planned — do not point the exporter at
-> a live simulator installation yet.
+> Status note: v0.3 (Routing & Procedures Foundation). The CLI, the
+> canonical temporal store (schema v4), WMM2025, OurAirports ingestion,
+> the routing/procedures/integration layers, and the X-Plane 12
+> navaid/fix/airway exporter are functional. FAA CIFP ingestion
+> (incl. SID/STAR/approach legs) is implemented at the library level but
+> not yet wired into the CLI. Simulator *installation* of the exported
+> files (backup, swap, rollback) and MSFS support are planned — do not
+> point the exporter at a live simulator installation yet.
 
 ---
 
@@ -48,10 +51,10 @@ cargo build --release
 .\openairac.exe status --db .\data\world.openairac.sqlite
 
 # 3. Validate canonical structural integrity (references, coordinates,
-#    temporal ranges, frequencies)
+#    temporal ranges, frequencies, procedure sequences, terminators)
 .\openairac.exe validate --db .\data\world.openairac.sqlite
 
-# 4. Export X-Plane 12 dat files into a scratch directory
+# 4. Export X-Plane 12 dat files into a scratch directory (diagnostic)
 .\openairac.exe export xplane --db .\data\world.openairac.sqlite --out .\dist\xplane
 
 # 5. Health check
@@ -60,8 +63,11 @@ cargo build --release
 
 ### Export behavior (fail-closed)
 
-- The exporter writes `earth_fix.dat` / `earth_nav.dat` per Laminar's
-  XPFIX1200 / XPNAV1200 specifications, staged and swapped in atomically.
+- The exporter writes `earth_fix.dat`, `earth_nav.dat`, and
+  `earth_awy.dat` per Laminar's XPFIX1200 / XPNAV1200 / XPAWY1101
+  specifications, staged and swapped in **sequentially file-by-file**
+  (the multi-file swap is not atomic as a set), with a checksummed
+  `manifest.json`.
 - Records missing fields the format requires (e.g. ICAO region) are skipped
   with diagnostics — values are never invented.
 - An export that would produce an empty nav layer is refused unless

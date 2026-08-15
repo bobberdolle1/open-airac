@@ -99,7 +99,7 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum ExportTarget {
-    /// Export X-Plane 12 dat files (earth_fix.dat, earth_nav.dat)
+    /// Export X-Plane 12 dat files (earth_fix.dat, earth_nav.dat, earth_awy.dat)
     Xplane {
         #[arg(short, long, default_value = "./data/world.openairac.sqlite")]
         db: PathBuf,

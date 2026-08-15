@@ -8,7 +8,7 @@
 [![X-Plane 12](https://img.shields.io/badge/Simulator-X--Plane_12-blue)](https://www.x-plane.com/)
 [![CI](https://github.com/bobberdolle1/open-airac/actions/workflows/ci.yml/badge.svg)](https://github.com/bobberdolle1/open-airac/actions/workflows/ci.yml)
 
-**The open navigation data engine for flight simulation. Install once. Navigate forever.**
+**OpenAIRAC — free/open Navigraph-class navigation-data infrastructure for flight simulation.**
 
 [Architecture](docs/ARCHITECTURE.md) • [Data Sources](docs/DATA_SOURCES.md) • [Roadmap](docs/ROADMAP.md)
 
@@ -16,28 +16,34 @@
 
 ---
 
-## ⚡ Product Philosophy
+## What OpenAIRAC is
 
-> **"Install once. Navigation updates itself."**
+OpenAIRAC is an open navigation-data **engine**: it ingests public
+navigation datasets, stores them in a canonical temporal database, and
+produces validated simulator navigation data — with the ambition of
+being free/open Navigraph-class infrastructure.
 
-Traditional flight simulation navigation relies on expensive recurring subscriptions and rigid manual 28-day AIRAC package updates.
+## Why temporal navigation data matters
 
-**OpenAIRAC decouples data sources from the runtime engine:**
-1. **Canonical Temporal Database:** Embedded SQLite engine storing navigation entities with `valid_from`, `valid_until`, and SHA-256 source snapshot provenance.
-2. **NOAA WMM2025 Geomagnetic Physics:** Official NOAA/NCEI World Magnetic Model 2025 (N=12 spherical harmonic expansion) for magnetic declination and field components.
-3. **Dual Runway Designator Modeling:** Distinguishes between published official designators (`official_designator = "09"`) and magnetic drift candidates (`computed_magnetic_designator = "08"`), alerting users when redesignation is suggested.
-4. **Open Data Ingestion Engine:** Abstract provider pipeline supporting **OurAirports** (airports, runways, navaids) and an experimental **FAA CIFP** ARINC 424 fixed-width parser adapter.
+Flight-sim navigation data changes on the real-world 28-day AIRAC
+cycle. Traditional tools replace whole datasets by hand. OpenAIRAC
+stores every entity as `(id, valid_from)` revisions with source
+provenance, so the engine can:
 
----
+* answer "what was the world on any date" (`world_at(t)`),
+* preload the next AIRAC cycle before it becomes effective,
+* diff cycles, validate referential integrity, and roll back cleanly,
+* never fabricate values: every missing field is skipped with a
+  diagnostic, never guessed.
 
-## 📊 Feature Status Table (v0.3 Routing & Procedures Foundation)
+## What actually works today (v0.3)
 
 | Feature | Status | Crate / Component |
 | :--- | :---: | :--- |
 | **NOAA WMM2025 Geomagnetic Field Solver** | **Implemented** | `openairac-magnetic` |
 | **Runway Magnetic Drift Analysis** | **Implemented** | `openairac-magnetic` |
 | **Canonical Domain Model & Provenance** | **Implemented** | `openairac-model` |
-| **Temporal SQLite Store (revisioned `world_at`) & Migrations** | **Implemented** | `openairac-store` |
+| **Temporal SQLite Store (revisioned `world_at`, schema v4)** | **Implemented** | `openairac-store` |
 | **Transactional, Fail-Closed Ingestion + Diagnostics** | **Implemented** | `openairac-ingest` |
 | **OurAirports Ingestion (live fetch: Airports/Runways/Navaids)** | **Implemented** | `openairac-ingest` |
 | **FAA CIFP ARINC 424 Adapter (EA/D/DB/PN/ER + PA/PG/PC/PD/PE/PF)** | **Implemented** | `openairac-ingest` |
@@ -46,8 +52,55 @@ Traditional flight simulation navigation relies on expensive recurring subscript
 | **Flight-Plan Integration (airport → SID → enroute → STAR → approach)** | **Implemented** | `openairac-integration` |
 | **WorldQuery Service API (world_at / search / nearby / airways / procedures / plan)** | **Implemented** | `openairac-service` |
 | **X-Plane 12 dat Exporter (`earth_fix`/`earth_nav`/`earth_awy`, staged & fail-closed)** | **Diagnostic** | `openairac-export-xplane` |
-| **MSFS 2024 Packager** | *Planned* | Roadmap |
-| **Flight Deck EFB Interface** | *Planned* | Roadmap |
+
+### Data sources that work today
+
+* **OurAirports** — worldwide airports, runways, navaids (live HTTP
+  fetch or offline fixtures), via the CLI (`openairac sync`).
+* **FAA CIFP / ARINC 424** (cycle 2608 verified) — US airspace enroute
+  and terminal records: waypoints (`EA`), VHF navaids (`D`/`DB`/`PN`),
+  airways (`ER`), terminal airports/runways/waypoints
+  (`PA`/`PG`/`PC`), and SID/STAR/approach legs (`PD`/`PE`/`PF`).
+  Decoding is implemented and golden-tested at the library level
+  (`openairac_ingest::faa_cifp::ingest_cifp`); CLI wiring for CIFP
+  ingestion is not yet exposed.
+
+### Simulator output that works today
+
+* **X-Plane 12** — `earth_fix.dat`, `earth_nav.dat`, `earth_awy.dat`
+  per Laminar XPFIX1200/XPNAV1200/XPAWY1101 specs, with a checksummed
+  `manifest.json` and staged sequential swap. The native exporter is a
+  **diagnostic/validation tool**: it never fabricates values and does
+  not install into a live simulator. The production path for complete
+  X-Plane data (FMC procedures via `earth_424.dat`) is documented in
+  [`docs/X_PLANE_STRATEGY.md`](docs/X_PLANE_STRATEGY.md).
+
+### What is experimental
+
+* The native X-Plane exporter's enroute layer (US coverage only,
+  diagnostic use).
+* CIFP terminal data end-to-end (decoding verified; not yet joined
+  into simulator output).
+
+### What is planned
+
+* Automatic AIRAC cycle detection, next-cycle preload/activation,
+  differential updates, and update distribution (v0.4).
+* Procedure geometry rendering (RF arcs etc.) and remaining ARINC
+  semantics (v0.5).
+* Worldwide provider architecture and regional coverage (v0.6).
+* MSFS 2024 navdata packager (v0.7).
+
+### What is NOT production ready
+
+* **No live simulator installation** — the exporter writes to a
+  scratch directory only; it is not a drop-in Navigraph replacement
+  yet.
+* **No worldwide coverage** — CIFP covers the US; OurAirports has no
+  procedure data.
+* **No automatic updates** — AIRAC lifecycle automation is v0.4.
+* Flight Deck / EFB is a **separate future product**, after the engine
+  is mature (see roadmap).
 
 ---
 
@@ -66,6 +119,7 @@ crates/
 ├── openairac-export-xplane/  # X-Plane 12 navdata exporter (diagnostic path)
 ├── openairac-plugin/         # X-Plane 12 C-ABI plugin for live SQLite status querying
 └── openairac-cli/            # Command-line interface
+```
 
 ---
 
@@ -91,6 +145,8 @@ openairac magdrift --designator "09" --heading 96.7 --lat 55.97 --lon 37.41 --da
 openairac sync --provider ourairports --db ./data/world.openairac.sqlite
 ```
 Use `--fixture` for an offline sample dataset (CI / smoke testing).
+FAA CIFP ingestion is available at the library level
+(`openairac_ingest::faa_cifp`); CLI wiring is on the roadmap.
 
 ### 5. Inspect Database Status & Entity Counts
 ```bash
@@ -102,7 +158,7 @@ openairac status --db ./data/world.openairac.sqlite
 openairac validate --db ./data/world.openairac.sqlite
 ```
 
-### 7. Export X-Plane 12 Navigation Data (`earth_fix.dat`, `earth_nav.dat`)
+### 7. Export X-Plane 12 Navigation Data (diagnostic)
 ```bash
 openairac export xplane --db ./data/world.openairac.sqlite --out ./dist/xplane
 ```

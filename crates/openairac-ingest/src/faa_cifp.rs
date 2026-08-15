@@ -1,4 +1,4 @@
-//! FAA CIFP ARINC 424 Experimental Ingestion Adapter.
+//! FAA CIFP ARINC 424 Ingestion Adapter.
 //!
 //! Layered design so incremental support is possible without string-slicing
 //! leaking into the domain layer:
@@ -10,7 +10,8 @@
 //!         ↓
 //! semantic interpretation (interpret → CifpInterpretation)
 //!         ↓
-//! canonical entities (CanonicalWaypoint / CanonicalNavaid / CanonicalAirwayLeg)
+//! canonical entities (CanonicalWaypoint / CanonicalNavaid /
+//! CanonicalAirwayLeg / CanonicalProcedureLeg)
 //! ```
 //!
 //! Supported record classes (ARINC 424-18 / FAA CIFP, verified against
