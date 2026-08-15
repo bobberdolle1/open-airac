@@ -52,6 +52,9 @@ pub struct FetchedDataset {
     /// The temporal validity start for this publication's entities
     /// (usually the AIRAC cycle's effective_from). `None` = now.
     pub valid_from: Option<DateTime<Utc>>,
+    /// Publication identity for replay/conflict detection. `None`:
+    /// derived per provider/dataset/cycle/kind.
+    pub publication_id: Option<String>,
     pub raw_content: String,
 }
 
@@ -224,6 +227,7 @@ pub fn fetch_url(
         revision_kind: RevisionKind::Baseline,
         coverage: Coverage::FullSnapshot,
         valid_from: None,
+        publication_id: None,
         raw_content: body,
     })
 }

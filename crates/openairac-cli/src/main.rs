@@ -79,6 +79,14 @@ enum Commands {
         /// AIRAC cycle ident (required for cycle-aware providers like faa_cifp)
         #[arg(long)]
         cycle: Option<String>,
+        /// Publication kind: baseline (full snapshot), differential
+        /// (changes only; absence means nothing), correction
+        /// (re-publishes/replaces publication state)
+        #[arg(long, default_value = "baseline")]
+        kind: String,
+        /// Explicit publication identity (replay/conflict detection)
+        #[arg(long)]
+        publication: Option<String>,
     },
 
     /// AIRAC cycle catalog: discovery and inspection
@@ -221,6 +229,7 @@ fn sync_fixture(store: &mut WorldStore) -> Result<()> {
             revision_kind: openairac_model::RevisionKind::Baseline,
             coverage: openairac_model::Coverage::FullSnapshot,
             valid_from: None,
+            publication_id: None,
             raw_content: content.to_string(),
         };
         let report = OurAirportsImporter::ingest_dataset(&dataset, store)?;
@@ -362,6 +371,8 @@ fn main() -> Result<()> {
             fixture,
             datasets,
             cycle,
+            kind,
+            publication,
         } => {
             println!("Synchronizing OpenAIRAC Navigation Data...");
             println!("  Provider: {provider}");
@@ -377,6 +388,23 @@ fn main() -> Result<()> {
                 if *fixture {
                     anyhow::bail!("--fixture is not supported for faa_cifp");
                 }
+                let (revision_kind, coverage) = match kind.as_str() {
+                    "baseline" => (
+                        openairac_model::RevisionKind::Baseline,
+                        openairac_model::Coverage::FullSnapshot,
+                    ),
+                    "differential" => (
+                        openairac_model::RevisionKind::Baseline,
+                        openairac_model::Coverage::Partial,
+                    ),
+                    "correction" => (
+                        openairac_model::RevisionKind::Correction,
+                        openairac_model::Coverage::FullSnapshot,
+                    ),
+                    other => anyhow::bail!(
+                        "unknown --kind '{other}' (supported: baseline, differential, correction)"
+                    ),
+                };
                 let Some(cycle_ident) = cycle.as_deref() else {
                     anyhow::bail!(
                         "--cycle <ident> is required for faa_cifp (discover cycles with `openairac cycle discover`)"
@@ -413,11 +441,14 @@ fn main() -> Result<()> {
                     .unwrap_or_else(|| vec!["FAACIFP18".to_string()]);
                 for dataset_name in requested {
                     println!("  Fetching {dataset_name} for cycle {cycle_ident}...");
-                    let dataset = openairac_ingest::provider::DataProvider::fetch(
+                    let mut dataset = openairac_ingest::provider::DataProvider::fetch(
                         &provider,
                         &dataset_name,
                         Some(&selector),
                     )?;
+                    dataset.revision_kind = revision_kind;
+                    dataset.coverage = coverage;
+                    dataset.publication_id = publication.clone();
                     println!(
                         "    fetched {} bytes from {}",
                         dataset.raw_content.len(),
@@ -439,17 +470,6 @@ fn main() -> Result<()> {
                     for (kind, count) in &report.kind_counts {
                         println!("    {kind}: {count}");
                     }
-                    store.insert_dataset_version(&openairac_model::DatasetVersion {
-                        id: 0,
-                        provider: "FAA_CIFP".to_string(),
-                        dataset: dataset.dataset_name.clone(),
-                        airac_cycle: dataset.airac_cycle.clone(),
-                        content_sha256: dataset.content_sha256.clone(),
-                        retrieved_at: dataset.retrieved_at,
-                        revision_kind: dataset.revision_kind,
-                        coverage: dataset.coverage,
-                        notes: None,
-                    })?;
                 }
             } else if *fixture {
                 println!("  Using offline fixture content.");
@@ -596,90 +616,17 @@ fn main() -> Result<()> {
                 );
             }
             CycleCmd::Observe { db } => {
-                let store = WorldStore::open(db)?;
+                let mut store = WorldStore::open(db)?;
                 let now = chrono::Utc::now();
-                let cycles = store.query_cycles()?;
-
-                // Activate the newest preloaded cycle whose effective date
-                // has been reached; older preloaded candidates are skipped.
-                let mut candidates: Vec<_> = cycles
-                    .iter()
-                    .filter(|c| {
-                        c.status == openairac_model::CycleStatus::Preloaded
-                            && c.effective_from.map(|e| e <= now).unwrap_or(false)
-                    })
-                    .collect();
-                candidates.sort_by_key(|c| c.effective_from);
-                if let Some(newest) = candidates.pop() {
-                    store.set_cycle_status(&newest.id, openairac_model::CycleStatus::Active)?;
-                    if !store
-                        .has_cycle_event(&newest.id, openairac_model::CycleEventKind::Observed)?
-                    {
-                        store.record_cycle_event(&openairac_model::CycleEvent {
-                            id: 0,
-                            at: now,
-                            kind: openairac_model::CycleEventKind::Observed,
-                            cycle_id: newest.id.clone(),
-                            restored_cycle_id: None,
-                            notes: None,
-                        })?;
-                    }
-                    println!(
-                        "Activated cycle {} (effective {})",
-                        newest.id.0,
-                        newest.effective_from.unwrap()
-                    );
-                    for older in candidates {
-                        store.set_cycle_status(
-                            &older.id,
-                            openairac_model::CycleStatus::Superseded,
-                        )?;
-                        println!(
-                            "  superseded {} (skipped, superseded by {})",
-                            older.id.0, newest.id.0
-                        );
-                    }
+                let report = store.observe_cycles(now)?;
+                for cycle in &report.activated {
+                    println!("Activated cycle {}", cycle.0);
                 }
-
-                // Re-read the catalog: supersede older active cycles, mark
-                // expired windows.
-                let cycles = store.query_cycles()?;
-                let mut active: Vec<_> = cycles
-                    .iter()
-                    .filter(|c| c.status == openairac_model::CycleStatus::Active)
-                    .collect();
-                active.sort_by_key(|c| c.effective_from);
-                if let Some(head) = active.pop() {
-                    for older in active {
-                        store.set_cycle_status(
-                            &older.id,
-                            openairac_model::CycleStatus::Superseded,
-                        )?;
-                        println!("  superseded {} (replaced by {})", older.id.0, head.id.0);
-                    }
-                    if head.effective_until.map(|u| u < now).unwrap_or(false) {
-                        store.set_cycle_status(&head.id, openairac_model::CycleStatus::Expired)?;
-                        println!(
-                            "  expired {} (effective window passed, no successor)",
-                            head.id.0
-                        );
-                    }
+                for cycle in &report.superseded {
+                    println!("  superseded {}", cycle.0);
                 }
-                for cycle in &cycles {
-                    let window_passed = cycle.effective_until.map(|u| u < now).unwrap_or(false);
-                    if window_passed
-                        && matches!(
-                            cycle.status,
-                            openairac_model::CycleStatus::Discovered
-                                | openairac_model::CycleStatus::Preloaded
-                        )
-                    {
-                        store.set_cycle_status(&cycle.id, openairac_model::CycleStatus::Expired)?;
-                        println!(
-                            "  expired {} (window passed without activation)",
-                            cycle.id.0
-                        );
-                    }
+                for cycle in &report.expired {
+                    println!("  expired {}", cycle.0);
                 }
                 println!("Cycle bookkeeping is up to date.");
             }

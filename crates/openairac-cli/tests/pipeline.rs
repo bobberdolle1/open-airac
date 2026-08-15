@@ -60,6 +60,7 @@ fn fixture_dataset(name: &str, content: &str, retrieved_at: DateTime<Utc>) -> Fe
         revision_kind: openairac_model::RevisionKind::Baseline,
         coverage: openairac_model::Coverage::FullSnapshot,
         valid_from: None,
+        publication_id: None,
         raw_content: content.to_string(),
     }
 }

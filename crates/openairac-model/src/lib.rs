@@ -512,6 +512,13 @@ pub struct DatasetVersion {
     pub retrieved_at: DateTime<Utc>,
     pub revision_kind: RevisionKind,
     pub coverage: Coverage,
+    /// Publication identity: two files for the same cycle are not
+    /// necessarily the same publication. Same identity + same checksum =
+    /// replay; same identity + different checksum = conflict unless the
+    /// publication is a Correction.
+    pub publication_id: Option<String>,
+    /// The effective instant this publication's entities carry.
+    pub valid_from: Option<DateTime<Utc>>,
     pub notes: Option<String>,
 }
 
@@ -602,4 +609,109 @@ pub fn tables_for_provider(provider: &str) -> Option<Vec<&'static str>> {
     tables.sort_unstable();
     tables.dedup();
     Some(tables)
+}
+
+// ---------------------------------------------------------------------------
+// Publication semantics (v0.4 S7)
+// ---------------------------------------------------------------------------
+
+/// What a publication MEANS for the dataset's entities.
+///
+/// * `FullSnapshot`: "this file is the whole dataset" — entities absent
+///   from the file MAY be closed (subject to masking rules).
+/// * `Differential`: "this file contains only changes" — absence means
+///   NOTHING; removals require explicit tombstones.
+/// * `Correction`: a re-publication that replaces/supersedes not-yet-
+///   effective publication state, or adds post-effective revisions at a
+///   new instant. Never a silent rewrite of effective history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UpdateKind {
+    FullSnapshot,
+    Differential,
+    Correction { coverage: Coverage },
+}
+
+impl UpdateKind {
+    /// The orthogonal (RevisionKind, Coverage) axes persisted in
+    /// `dataset_versions`.
+    pub fn components(&self) -> (RevisionKind, Coverage) {
+        match self {
+            UpdateKind::FullSnapshot => (RevisionKind::Baseline, Coverage::FullSnapshot),
+            UpdateKind::Differential => (RevisionKind::Baseline, Coverage::Partial),
+            UpdateKind::Correction { coverage } => (RevisionKind::Correction, *coverage),
+        }
+    }
+
+    pub fn from_components(kind: RevisionKind, coverage: Coverage) -> Self {
+        match (kind, coverage) {
+            (RevisionKind::Baseline, Coverage::FullSnapshot) => UpdateKind::FullSnapshot,
+            (RevisionKind::Baseline, Coverage::Partial) => UpdateKind::Differential,
+            (RevisionKind::Correction, coverage) => UpdateKind::Correction { coverage },
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            UpdateKind::FullSnapshot => "FullSnapshot",
+            UpdateKind::Differential => "Differential",
+            UpdateKind::Correction { .. } => "Correction",
+        }
+    }
+
+    /// Whether full-snapshot absence semantics apply (close_absent).
+    pub fn closes_absent(&self) -> bool {
+        matches!(
+            self,
+            UpdateKind::FullSnapshot
+                | UpdateKind::Correction {
+                    coverage: Coverage::FullSnapshot
+                }
+        )
+    }
+}
+
+/// A first-class removal fact: the provider explicitly published that
+/// this entity no longer exists from `effective_from` onward. Absence in
+/// a differential publication is NEVER a tombstone.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Tombstone {
+    pub provider: String,
+    pub dataset: String,
+    /// Store entity table name (closed set).
+    pub entity_table: String,
+    pub entity_id: String,
+    pub effective_from: DateTime<Utc>,
+    pub source_snapshot_id: SourceSnapshotId,
+    /// Provider-supplied reason/code when available.
+    pub reason: Option<String>,
+}
+
+/// Outcome of applying one tombstone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TombstoneOutcome {
+    /// An open row was closed at the effective instant.
+    Closed,
+    /// The entity was already closed/absent at the effective instant
+    /// (idempotent replay or superseded).
+    AlreadyClosed,
+    /// No row for this entity exists at any time: deterministic
+    /// diagnostic, nothing fabricated.
+    Unknown,
+}
+
+/// Outcome of recording a dataset publication under its identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PublicationOutcome {
+    /// New publication: recorded and applied.
+    Recorded,
+    /// Exact replay: same identity + same checksum, nothing re-applied.
+    Duplicate,
+}
+
+/// Report of one `observe_cycles` transaction.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ObserveReport {
+    pub activated: Vec<CycleId>,
+    pub superseded: Vec<CycleId>,
+    pub expired: Vec<CycleId>,
 }

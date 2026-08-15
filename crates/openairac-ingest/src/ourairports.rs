@@ -638,6 +638,7 @@ id,filename,ident,name,type,frequency_khz,latitude_deg,longitude_deg,elevation_f
             revision_kind: openairac_model::RevisionKind::Baseline,
             coverage: openairac_model::Coverage::FullSnapshot,
             valid_from: None,
+            publication_id: None,
             raw_content: content.to_string(),
         }
     }
@@ -727,6 +728,6 @@ id,filename,ident,name,type,frequency_khz,latitude_deg,longitude_deg,elevation_f
         assert_eq!(status.total_runways, 3);
         assert_eq!(status.total_navaids, 4);
         assert_eq!(status.total_snapshots, 3);
-        assert_eq!(status.migration_version, 5);
+        assert_eq!(status.migration_version, 6);
     }
 }

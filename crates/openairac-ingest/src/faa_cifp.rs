@@ -1375,6 +1375,10 @@ impl crate::provider::DataProvider for CifpProvider {
 
         // The catalog is the authority on the cycle: cross-check the
         // confirmed effective date (defense in depth behind the CLI).
+        // Baseline publications land exactly on the cycle's effective
+        // instant; corrections may re-publish at the same instant
+        // (preload replacement) or at a later instant (post-effective
+        // new revisions) — never earlier, never inferred.
         let cycle_id = CycleId(cycle.clone());
         let catalog = store.query_cycle(&cycle_id)?.ok_or_else(|| {
             anyhow::anyhow!(
@@ -1382,11 +1386,19 @@ impl crate::provider::DataProvider for CifpProvider {
             )
         })?;
         match catalog.effective_from {
-            Some(e) if e == valid_from => {}
             Some(e) => {
-                anyhow::bail!(
-                    "catalog effective_from {e} does not match dataset valid_from {valid_from}"
-                );
+                let is_correction =
+                    dataset.revision_kind == crate::provider::RevisionKind::Correction;
+                if !is_correction && valid_from != e {
+                    anyhow::bail!(
+                        "catalog effective_from {e} does not match dataset valid_from {valid_from}"
+                    );
+                }
+                if is_correction && valid_from < e {
+                    anyhow::bail!(
+                        "correction valid_from {valid_from} precedes the cycle's effective {e}"
+                    );
+                }
             }
             None => {
                 anyhow::bail!("cycle '{cycle}' has UNCONFIRMED effective dates; cannot ingest");
@@ -1425,46 +1437,91 @@ impl crate::provider::DataProvider for CifpProvider {
         );
 
         let start = std::time::Instant::now();
+        let update_kind =
+            openairac_model::UpdateKind::from_components(dataset.revision_kind, dataset.coverage);
+        let publication_id = dataset.publication_id.clone().unwrap_or_else(|| {
+            let tag = match update_kind {
+                openairac_model::UpdateKind::FullSnapshot => "baseline",
+                openairac_model::UpdateKind::Differential => "differential",
+                openairac_model::UpdateKind::Correction { .. } => "correction",
+            };
+            format!("{}:{}:{tag}", dataset.dataset_name, cycle)
+        });
+
+        // Publication identity guard: replay is idempotent, conflicting
+        // content under one identity fails loudly unless it is a
+        // Correction (explicitly modeled replacement).
+        let (kind, coverage) = update_kind.components();
+        let version = openairac_model::DatasetVersion {
+            id: 0,
+            provider: "FAA_CIFP".to_string(),
+            dataset: dataset.dataset_name.clone(),
+            airac_cycle: Some(cycle.clone()),
+            content_sha256: dataset.content_sha256.clone(),
+            retrieved_at: dataset.retrieved_at,
+            revision_kind: kind,
+            coverage,
+            publication_id: Some(publication_id.clone()),
+            valid_from: Some(valid_from),
+            notes: None,
+        };
+        let outcome = store.record_dataset_publication(&version)?;
+
         let mut closed_rows = 0usize;
-        store.transact(|conn| {
-            insert_cifp_entities_conn(conn, &waypoints, &navaids, &airway_legs, &procedure_legs)?;
-            if dataset.coverage == crate::provider::Coverage::FullSnapshot {
-                for table in CIFP_ENTITY_TABLES {
-                    if masked.contains(&table) {
-                        continue;
-                    }
-                    let seen_ids = seen.get(&table).cloned().unwrap_or_default();
-                    closed_rows += openairac_store::close_absent_at(
-                        conn, table, "faa", valid_from, &seen_ids,
-                    )?;
-                }
-            }
-            // Cycle bookkeeping: link the snapshot, record the schedule
-            // intent once, advance Discovered -> Preloaded.
-            openairac_store::insert_cycle_snapshot_conn(conn, &cycle_id, &snapshot_id)?;
-            if !openairac_store::has_cycle_event_conn(conn, &cycle_id, CycleEventKind::Scheduled)? {
-                openairac_store::record_cycle_event_conn(
-                    conn,
-                    &CycleEvent {
-                        id: 0,
-                        at: Utc::now(),
-                        kind: CycleEventKind::Scheduled,
-                        cycle_id: cycle_id.clone(),
-                        restored_cycle_id: None,
-                        notes: Some(format!("ingested {}", dataset.content_sha256)),
-                    },
-                )?;
-            }
-            if catalog.status == CycleStatus::Discovered {
-                openairac_store::set_cycle_status_conn(
+        let mut duplicate = false;
+        if outcome == openairac_model::PublicationOutcome::Duplicate {
+            duplicate = true;
+        } else {
+            let plan = openairac_store::PublicationPlan {
+                namespace: "faa".to_string(),
+                kind: update_kind,
+                valid_from,
+                payloads: openairac_store::EntityPayloads {
+                    airports: Vec::new(),
+                    runways: Vec::new(),
+                    navaids: navaids.clone(),
+                    waypoints: waypoints.clone(),
+                    airway_legs: airway_legs.clone(),
+                    procedure_legs: procedure_legs.clone(),
+                },
+                tombstones: Vec::new(),
+                masked_tables: masked.clone(),
+                publication_id: publication_id.clone(),
+            };
+            let applied = store.apply_publication(&plan)?;
+            closed_rows = applied.rows_closed;
+            store.transact(|conn| {
+                // Cycle bookkeeping: link the snapshot, record the
+                // schedule intent once, advance Discovered -> Preloaded.
+                openairac_store::insert_cycle_snapshot_conn(conn, &cycle_id, &snapshot_id)?;
+                if !openairac_store::has_cycle_event_conn(
                     conn,
                     &cycle_id,
-                    CycleStatus::Preloaded,
-                    Utc::now(),
-                )?;
-            }
-            Ok(())
-        })?;
+                    CycleEventKind::Scheduled,
+                )? {
+                    openairac_store::record_cycle_event_conn(
+                        conn,
+                        &CycleEvent {
+                            id: 0,
+                            at: Utc::now(),
+                            kind: CycleEventKind::Scheduled,
+                            cycle_id: cycle_id.clone(),
+                            restored_cycle_id: None,
+                            notes: Some(format!("published {publication_id}")),
+                        },
+                    )?;
+                }
+                if catalog.status == CycleStatus::Discovered {
+                    openairac_store::set_cycle_status_conn(
+                        conn,
+                        &cycle_id,
+                        CycleStatus::Preloaded,
+                        Utc::now(),
+                    )?;
+                }
+                Ok(())
+            })?;
+        }
 
         let mut report = IngestReport::new("FAA_CIFP", "FAACIFP18", &dataset.content_sha256);
         report.records_seen = scan.lines_seen;
@@ -1492,25 +1549,39 @@ impl crate::provider::DataProvider for CifpProvider {
                 .iter()
                 .filter(|c| !matches!(c, ('P', ' ', 'A') | ('P', ' ', 'G')))
                 .count();
-        if dataset.coverage == crate::provider::Coverage::FullSnapshot {
-            for table in CIFP_ENTITY_TABLES {
-                if masked.contains(&table) {
-                    report.warnings.push(format!(
-                        "full-snapshot close skipped for {}: unsupported record classes could mask removals",
-                        table.as_str()
-                    ));
-                } else if seen.get(&table).map(|v| v.len()).unwrap_or(0) == 0 && closed_rows == 0 {
-                    report.warnings.push(format!(
-                        "full-snapshot close for {} had an empty seen set",
-                        table.as_str()
-                    ));
-                }
-            }
-        }
-        if closed_rows > 0 {
+        if duplicate {
             report.warnings.push(format!(
-                "{closed_rows} entity row(s) closed as absent from the snapshot"
+                "publication {publication_id} is an exact replay; skipped"
             ));
+        } else {
+            let coverage = dataset.coverage;
+            if update_kind.closes_absent() {
+                for table in CIFP_ENTITY_TABLES {
+                    if masked.contains(&table) {
+                        report.warnings.push(format!(
+                            "full-snapshot close skipped for {}: unsupported record classes could mask removals",
+                            table.as_str()
+                        ));
+                    } else if seen.get(&table).map(|v| v.len()).unwrap_or(0) == 0
+                        && closed_rows == 0
+                    {
+                        report.warnings.push(format!(
+                            "full-snapshot close for {} had an empty seen set",
+                            table.as_str()
+                        ));
+                    }
+                }
+            } else if coverage == crate::provider::Coverage::Partial {
+                // Differential semantics: absence means nothing.
+                report
+                    .warnings
+                    .push("differential publication: no full-snapshot close".to_string());
+            }
+            if closed_rows > 0 {
+                report.warnings.push(format!(
+                    "{closed_rows} entity row(s) closed as absent from the snapshot"
+                ));
+            }
         }
         report.duration_ms = start.elapsed().as_millis() as u64;
         Ok(report)
@@ -2033,6 +2104,7 @@ mod tests {
             revision_kind: crate::provider::RevisionKind::Baseline,
             coverage: crate::provider::Coverage::FullSnapshot,
             valid_from: None, // <- must be rejected, never inferred
+            publication_id: None,
             raw_content: content,
         };
         let provider = CifpProvider;
@@ -2089,6 +2161,7 @@ mod tests {
             revision_kind: crate::provider::RevisionKind::Baseline,
             coverage: crate::provider::Coverage::FullSnapshot,
             valid_from: Some(vf),
+            publication_id: None,
             raw_content: content.clone(),
         };
         let mut provider_store = WorldStore::open_in_memory().unwrap();
@@ -2200,6 +2273,7 @@ mod tests {
             revision_kind: crate::provider::RevisionKind::Baseline,
             coverage: crate::provider::Coverage::FullSnapshot,
             valid_from: Some(vf),
+            publication_id: None,
             raw_content: content.to_string(),
         }
     }

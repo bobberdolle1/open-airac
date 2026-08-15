@@ -151,7 +151,12 @@ impl WorldStore {
                 .execute_batch(include_str!("../migrations/v5_airac_lifecycle.sql"))
                 .context("Failed to execute database migration v5_airac_lifecycle.sql")?;
         }
-        self.conn.pragma_update(None, "user_version", 5)?;
+        if version < 6 {
+            self.conn
+                .execute_batch(include_str!("../migrations/v6_publications.sql"))
+                .context("Failed to execute database migration v6_publications.sql")?;
+        }
+        self.conn.pragma_update(None, "user_version", 6)?;
         Ok(())
     }
 
@@ -404,6 +409,60 @@ impl WorldStore {
         let report = rollback_cycle_conn(&txn, cycle_id, at)?;
         txn.commit()?;
         Ok(report)
+    }
+
+    /// Advance cycle bookkeeping atomically (one transaction).
+    pub fn observe_cycles(&mut self, now: DateTime<Utc>) -> Result<ObserveReport> {
+        let txn = self.conn.transaction()?;
+        let report = observe_cycles_conn(&txn, now)?;
+        txn.commit()?;
+        Ok(report)
+    }
+
+    /// Record a dataset publication under its identity (replay vs
+    /// correction vs conflict guard).
+    pub fn record_dataset_publication(
+        &self,
+        version: &DatasetVersion,
+    ) -> Result<PublicationOutcome> {
+        record_dataset_publication_conn(&self.conn, version)
+    }
+
+    /// Apply a publication plan in one transaction.
+    pub fn apply_publication(&mut self, plan: &PublicationPlan) -> Result<PublicationReport> {
+        let txn = self.conn.transaction()?;
+        let report = apply_publication_conn(&txn, plan)?;
+        txn.commit()?;
+        Ok(report)
+    }
+
+    /// Apply one tombstone in one transaction.
+    pub fn apply_tombstone(&mut self, tomb: &Tombstone) -> Result<TombstoneOutcome> {
+        let txn = self.conn.transaction()?;
+        let outcome = apply_tombstone_conn(&txn, tomb)?;
+        txn.commit()?;
+        Ok(outcome)
+    }
+
+    /// Withdraw a not-yet-effective revision or tombstone (corrections).
+    pub fn withdraw_future_revision(
+        &mut self,
+        table: EntityTable,
+        id: &str,
+        valid_from: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> Result<bool> {
+        let txn = self.conn.transaction()?;
+        let removed = withdraw_future_revision_conn(&txn, table, id, valid_from, now)?;
+        txn.commit()?;
+        Ok(removed)
+    }
+
+    pub fn withdraw_tombstone(&mut self, tomb: &Tombstone, now: DateTime<Utc>) -> Result<bool> {
+        let txn = self.conn.transaction()?;
+        let removed = withdraw_tombstone_conn(&txn, tomb, now)?;
+        txn.commit()?;
+        Ok(removed)
     }
 
     /// Structural integrity validation of the canonical store. Returns every
@@ -901,6 +960,204 @@ impl WorldStore {
                         "entity_aliases",
                         entity_id,
                         format!("unknown entity_table '{table}'"),
+                    );
+                }
+            }
+        }
+
+        // 18. Tombstones: provider/namespace consistency, known tables,
+        // unknown-entity facts.
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT entity_table, entity_id, provider FROM tombstones ORDER BY entity_table, entity_id",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?;
+            for row in rows {
+                let (table, entity_id, provider) = row?;
+                if EntityTable::parse(&table).is_none() {
+                    push(
+                        "error",
+                        "tombstones",
+                        entity_id.clone(),
+                        format!("unknown entity_table '{table}'"),
+                    );
+                }
+                match openairac_model::namespace_for_provider(&provider) {
+                    None => push(
+                        "error",
+                        "tombstones",
+                        entity_id.clone(),
+                        format!("unknown provider '{provider}'"),
+                    ),
+                    Some(ns) => {
+                        if !entity_id.starts_with(&format!("{ns}:")) {
+                            push(
+                                "error",
+                                "tombstones",
+                                entity_id.clone(),
+                                format!("entity outside provider '{provider}' namespace '{ns}'"),
+                            );
+                        }
+                    }
+                }
+                if let Some(table_enum) = EntityTable::parse(&table) {
+                    let ever: bool = self
+                        .conn
+                        .query_row(
+                            &format!(
+                                "SELECT 1 FROM {} WHERE id = ?1 LIMIT 1",
+                                table_enum.as_str()
+                            ),
+                            params![entity_id],
+                            |_| Ok(()),
+                        )
+                        .optional()?
+                        .is_some();
+                    if !ever {
+                        push(
+                            "warning",
+                            "tombstones",
+                            entity_id.clone(),
+                            "tombstone for entity with no historical row".into(),
+                        );
+                    }
+                }
+            }
+        }
+
+        // 19. Duplicate conflicting publication identities: same
+        // publication_id, different checksum, neither a Correction.
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT publication_id, COUNT(DISTINCT content_sha256) AS n,
+                        MIN(revision_kind) AS min_kind
+                 FROM dataset_versions
+                 WHERE publication_id IS NOT NULL
+                 GROUP BY publication_id
+                 HAVING n > 1 AND MIN(CASE WHEN revision_kind = 'Correction' THEN 0 ELSE 1 END) = 1
+                 ORDER BY publication_id LIMIT 20",
+            )?;
+            let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+            for row in rows {
+                let (publication_id, n) = row?;
+                push(
+                    "error",
+                    "dataset_versions",
+                    publication_id.clone(),
+                    format!("{n} different contents under one non-correction publication identity"),
+                );
+            }
+        }
+
+        // 20. Publication/effective-date and cycle consistency.
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT publication_id, airac_cycle, revision_kind, valid_from
+                 FROM dataset_versions ORDER BY id",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, Option<String>>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                ))
+            })?;
+            for row in rows {
+                let (publication_id, cycle, kind, valid_from) = row?;
+                let Some(cycle_ident) = cycle else { continue };
+                let cycle_row = query_cycle_conn(&self.conn, &CycleId(cycle_ident.clone()))?;
+                let Some(cycle_row) = cycle_row else {
+                    push(
+                        "error",
+                        "dataset_versions",
+                        publication_id
+                            .clone()
+                            .unwrap_or_else(|| cycle_ident.clone()),
+                        format!("references unknown cycle '{cycle_ident}'"),
+                    );
+                    continue;
+                };
+                if let (Some(vf), Some(eff)) = (valid_from, cycle_row.effective_from) {
+                    if kind == "Baseline" && vf != eff.to_rfc3339() {
+                        push(
+                            "error",
+                            "dataset_versions",
+                            publication_id
+                                .clone()
+                                .unwrap_or_else(|| cycle_ident.clone()),
+                            format!(
+                                "baseline valid_from {vf} != cycle effective {}",
+                                eff.to_rfc3339()
+                            ),
+                        );
+                    }
+                    if kind == "Correction" && vf < eff.to_rfc3339() {
+                        push(
+                            "error",
+                            "dataset_versions",
+                            publication_id
+                                .clone()
+                                .unwrap_or_else(|| cycle_ident.clone()),
+                            "correction valid_from precedes the cycle's effective date".into(),
+                        );
+                    }
+                }
+            }
+        }
+
+        // 21. Differential publications must never run close_absent.
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT publication_id, rows_closed FROM publication_applications
+                 WHERE coverage = 'Partial' AND rows_closed > 0 ORDER BY publication_id LIMIT 20",
+            )?;
+            let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+            for row in rows {
+                let (publication_id, rows_closed) = row?;
+                push(
+                    "error",
+                    "publication_applications",
+                    publication_id,
+                    format!("differential publication closed {rows_closed} row(s)"),
+                );
+            }
+        }
+
+        // 22. publication_applications: kind/coverage membership.
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT publication_id, kind, coverage FROM publication_applications ORDER BY publication_id",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?;
+            for row in rows {
+                let (publication_id, kind, coverage) = row?;
+                if RevisionKind::parse(&kind).is_none() {
+                    push(
+                        "error",
+                        "publication_applications",
+                        publication_id.clone(),
+                        format!("unknown kind '{kind}'"),
+                    );
+                }
+                if Coverage::parse(&coverage).is_none() {
+                    push(
+                        "error",
+                        "publication_applications",
+                        publication_id.clone(),
+                        format!("unknown coverage '{coverage}'"),
                     );
                 }
             }
@@ -2226,8 +2483,8 @@ pub fn insert_dataset_version_conn(conn: &Connection, version: &DatasetVersion) 
     conn.execute(
         "INSERT INTO dataset_versions
             (provider, dataset, airac_cycle, content_sha256, retrieved_at,
-             revision_kind, coverage, notes)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+             revision_kind, coverage, publication_id, valid_from, notes)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             version.provider,
             version.dataset,
@@ -2236,6 +2493,8 @@ pub fn insert_dataset_version_conn(conn: &Connection, version: &DatasetVersion) 
             rfc3339(version.retrieved_at),
             version.revision_kind.as_str(),
             version.coverage.as_str(),
+            version.publication_id,
+            version.valid_from.map(rfc3339),
             version.notes,
         ],
     )
@@ -2251,7 +2510,7 @@ pub fn latest_dataset_version_conn(
 ) -> Result<Option<DatasetVersion>> {
     let mut stmt = conn.prepare(
         "SELECT id, provider, dataset, airac_cycle, content_sha256, retrieved_at,
-                revision_kind, coverage, notes
+                revision_kind, coverage, publication_id, valid_from, notes
          FROM dataset_versions
          WHERE provider = ?1 AND dataset = ?2 AND airac_cycle IS ?3
          ORDER BY retrieved_at DESC, id DESC LIMIT 1",
@@ -2267,10 +2526,12 @@ pub fn latest_dataset_version_conn(
             r.get::<_, String>(6)?,
             r.get::<_, String>(7)?,
             r.get::<_, Option<String>>(8)?,
+            r.get::<_, Option<String>>(9)?,
+            r.get::<_, Option<String>>(10)?,
         ))
     })?;
     if let Some(row) = rows.next() {
-        let (id, prov, ds, cycle_s, sha, retrieved, kind, cov, notes) = row?;
+        let (id, prov, ds, cycle_s, sha, retrieved, kind, cov, pub_id, vf, notes) = row?;
         return Ok(Some(DatasetVersion {
             id,
             provider: prov,
@@ -2282,6 +2543,10 @@ pub fn latest_dataset_version_conn(
                 .ok_or_else(|| anyhow::anyhow!("unknown revision_kind '{kind}'"))?,
             coverage: Coverage::parse(&cov)
                 .ok_or_else(|| anyhow::anyhow!("unknown coverage '{cov}'"))?,
+            publication_id: pub_id,
+            valid_from: vf
+                .map(|v| parse_utc(&v, "dataset_versions.valid_from"))
+                .transpose()?,
             notes,
         }));
     }
@@ -2437,6 +2702,473 @@ pub fn close_entity_at(
         )
         .with_context(|| format!("tombstone-closing '{id}' in {table}"))?;
     Ok(closed > 0)
+}
+
+// ---------------------------------------------------------------------------
+// Publications, tombstones, corrections (v0.4 S7)
+// ---------------------------------------------------------------------------
+
+/// Apply one tombstone: close the provider-owned open row at the
+/// effective instant and record the tombstone as a first-class fact.
+///
+/// * The entity id MUST carry the provider's registered namespace
+///   (isolation).
+/// * Open row -> Closed; row exists but already closed/absent ->
+///   AlreadyClosed (idempotent replay); no row ever -> Unknown
+///   (deterministic diagnostic, nothing fabricated).
+pub fn apply_tombstone_conn(conn: &Connection, tomb: &Tombstone) -> Result<TombstoneOutcome> {
+    let namespace = openairac_model::namespace_for_provider(&tomb.provider)
+        .ok_or_else(|| anyhow::anyhow!("unknown provider '{}'", tomb.provider))?;
+    let prefix = format!("{namespace}:");
+    if !tomb.entity_id.starts_with(&prefix) {
+        anyhow::bail!(
+            "tombstone entity '{}' is outside provider '{}' namespace '{namespace}'",
+            tomb.entity_id,
+            tomb.provider
+        );
+    }
+    let table = EntityTable::parse(&tomb.entity_table)
+        .ok_or_else(|| anyhow::anyhow!("unknown entity_table '{}'", tomb.entity_table))?;
+    let ever: bool = conn
+        .query_row(
+            &format!("SELECT 1 FROM {} WHERE id = ?1 LIMIT 1", table.as_str()),
+            params![tomb.entity_id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    let outcome = if !ever {
+        TombstoneOutcome::Unknown
+    } else if close_entity_at(conn, table, &tomb.entity_id, tomb.effective_from)? {
+        TombstoneOutcome::Closed
+    } else {
+        TombstoneOutcome::AlreadyClosed
+    };
+    conn.execute(
+        "INSERT OR IGNORE INTO tombstones
+            (entity_table, entity_id, effective_from, provider, dataset,
+             source_snapshot_id, reason)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            tomb.entity_table,
+            tomb.entity_id,
+            rfc3339(tomb.effective_from),
+            tomb.provider,
+            tomb.dataset,
+            tomb.source_snapshot_id.0,
+            tomb.reason,
+        ],
+    )
+    .context("recording tombstone")?;
+    Ok(outcome)
+}
+
+/// Withdraw a NOT-YET-EFFECTIVE revision (a future added entity that a
+/// correction removes before the cycle becomes effective). Refuses to
+/// touch effective history (`valid_from <= now`).
+pub fn withdraw_future_revision_conn(
+    conn: &Connection,
+    table: EntityTable,
+    id: &str,
+    valid_from: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> Result<bool> {
+    if valid_from <= now {
+        anyhow::bail!(
+            "refusing to withdraw effective revision '{id}' at {valid_from} (immutable history)"
+        );
+    }
+    let table = table.as_str();
+    let removed = conn
+        .execute(
+            &format!("DELETE FROM {table} WHERE id = ?1 AND valid_from = ?2"),
+            params![id, rfc3339(valid_from)],
+        )
+        .with_context(|| format!("withdrawing future revision '{id}' in {table}"))?;
+    Ok(removed > 0)
+}
+
+/// Withdraw a NOT-YET-EFFECTIVE tombstone (a correction cancels a future
+/// removal): delete the tombstone fact and re-open the row it closed
+/// (the close never became effective).
+pub fn withdraw_tombstone_conn(
+    conn: &Connection,
+    tomb: &Tombstone,
+    now: DateTime<Utc>,
+) -> Result<bool> {
+    if tomb.effective_from <= now {
+        anyhow::bail!(
+            "refusing to withdraw effective tombstone for '{}' at {} (immutable history)",
+            tomb.entity_id,
+            tomb.effective_from
+        );
+    }
+    let table = EntityTable::parse(&tomb.entity_table)
+        .ok_or_else(|| anyhow::anyhow!("unknown entity_table '{}'", tomb.entity_table))?;
+    let table = table.as_str();
+    let removed = conn
+        .execute(
+            "DELETE FROM tombstones
+             WHERE entity_table = ?1 AND entity_id = ?2 AND effective_from = ?3",
+            params![
+                tomb.entity_table,
+                tomb.entity_id,
+                rfc3339(tomb.effective_from)
+            ],
+        )
+        .context("withdrawing tombstone fact")?;
+    if removed > 0 {
+        conn.execute(
+            &format!(
+                "UPDATE {table} SET valid_until = NULL
+                 WHERE id = ?1 AND valid_until = ?2"
+            ),
+            params![tomb.entity_id, rfc3339(tomb.effective_from)],
+        )
+        .with_context(|| format!("re-opening '{}' in {table}", tomb.entity_id))?;
+    }
+    Ok(removed > 0)
+}
+
+/// Record a dataset publication under its identity.
+///
+/// * Unknown identity -> recorded.
+/// * Same identity + same checksum -> Duplicate (replay, nothing
+///   re-applied).
+/// * Same identity + different checksum -> allowed ONLY for
+///   `revision_kind = Correction` (explicitly modeled replacement of
+///   not-yet-effective state), otherwise a loud conflict.
+pub fn record_dataset_publication_conn(
+    conn: &Connection,
+    version: &DatasetVersion,
+) -> Result<PublicationOutcome> {
+    let publication_id = version
+        .publication_id
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("publication requires a publication_id (identity)"))?;
+    let existing: Option<(String, String)> = conn
+        .query_row(
+            "SELECT content_sha256, revision_kind FROM dataset_versions
+             WHERE publication_id = ?1
+             ORDER BY retrieved_at DESC, id DESC LIMIT 1",
+            params![publication_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    if let Some((sha, kind)) = existing {
+        if sha == version.content_sha256 {
+            return Ok(PublicationOutcome::Duplicate);
+        }
+        if RevisionKind::parse(&kind) != Some(RevisionKind::Correction)
+            && version.revision_kind != RevisionKind::Correction
+        {
+            anyhow::bail!(
+                "publication '{publication_id}' already exists with different content \
+                 ({sha}); re-publishing under the same identity requires a Correction"
+            );
+        }
+    }
+    insert_dataset_version_conn(conn, version)?;
+    Ok(PublicationOutcome::Recorded)
+}
+
+/// Heterogeneous entity payloads of one publication.
+#[derive(Debug, Default, Clone)]
+pub struct EntityPayloads {
+    pub airports: Vec<CanonicalAirport>,
+    pub runways: Vec<CanonicalRunway>,
+    pub navaids: Vec<CanonicalNavaid>,
+    pub waypoints: Vec<CanonicalWaypoint>,
+    pub airway_legs: Vec<CanonicalAirwayLeg>,
+    pub procedure_legs: Vec<CanonicalProcedureLeg>,
+}
+
+/// A complete publication plan: what a provider published for one
+/// dataset at one effective instant.
+#[derive(Debug, Clone)]
+pub struct PublicationPlan {
+    /// Registered provider namespace (ownership scope).
+    pub namespace: String,
+    pub kind: UpdateKind,
+    pub valid_from: DateTime<Utc>,
+    pub payloads: EntityPayloads,
+    pub tombstones: Vec<Tombstone>,
+    /// Tables whose full-snapshot close must be skipped (masking).
+    pub masked_tables: std::collections::BTreeSet<EntityTable>,
+    pub publication_id: String,
+}
+
+/// Application result of one publication.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PublicationReport {
+    pub created: usize,
+    pub updated: usize,
+    pub unchanged: usize,
+    pub rows_closed: usize,
+    pub tombstone_outcomes: Vec<TombstoneOutcome>,
+}
+
+/// Apply one publication's payloads and tombstones.
+///
+/// * Upserts via the payload-comparing insert_*_conn (no new revisions
+///   for unchanged entities).
+/// * Tombstones applied BEFORE full-snapshot close (close_absent is a
+///   no-op on rows the tombstone already closed).
+/// * `close_absent_at` runs ONLY when `kind.closes_absent()` (baseline
+///   or corrected full snapshots) and per-table masking is respected.
+///   Differential publications NEVER close absent entities.
+/// * Records a `publication_applications` audit row.
+pub fn apply_publication_conn(
+    conn: &Connection,
+    plan: &PublicationPlan,
+) -> Result<PublicationReport> {
+    let mut report = PublicationReport::default();
+    // Upserts route through insert_with_future_correction so a
+    // Correction re-publishing the same future instant REPLACES the
+    // not-yet-effective revision instead of colliding; effective
+    // instants stay immutable (normal revisioning).
+    let now = Utc::now();
+    let vf = plan.valid_from;
+
+    for airport in &plan.payloads.airports {
+        let write = insert_with_future_correction(conn, "airports", &airport.id.0, vf, now, |c| {
+            insert_airport_conn(c, airport)
+        })?;
+        match write {
+            EntityWrite::Created => report.created += 1,
+            EntityWrite::Updated => report.updated += 1,
+            EntityWrite::Unchanged => report.unchanged += 1,
+        }
+    }
+    for runway in &plan.payloads.runways {
+        let write = insert_with_future_correction(conn, "runways", &runway.id.0, vf, now, |c| {
+            insert_runway_conn(c, runway)
+        })?;
+        match write {
+            EntityWrite::Created => report.created += 1,
+            EntityWrite::Updated => report.updated += 1,
+            EntityWrite::Unchanged => report.unchanged += 1,
+        }
+    }
+    for navaid in &plan.payloads.navaids {
+        let write =
+            insert_with_future_correction(conn, "navaids", &navaid.object_id.0, vf, now, |c| {
+                insert_navaid_conn(c, navaid)
+            })?;
+        match write {
+            EntityWrite::Created => report.created += 1,
+            EntityWrite::Updated => report.updated += 1,
+            EntityWrite::Unchanged => report.unchanged += 1,
+        }
+    }
+    for waypoint in &plan.payloads.waypoints {
+        let write = insert_with_future_correction(
+            conn,
+            "waypoints",
+            &waypoint.object_id.0,
+            vf,
+            now,
+            |c| insert_waypoint_conn(c, waypoint),
+        )?;
+        match write {
+            EntityWrite::Created => report.created += 1,
+            EntityWrite::Updated => report.updated += 1,
+            EntityWrite::Unchanged => report.unchanged += 1,
+        }
+    }
+    for leg in &plan.payloads.airway_legs {
+        let write =
+            insert_with_future_correction(conn, "airway_legs", &leg.object_id.0, vf, now, |c| {
+                insert_airway_leg_conn(c, leg)
+            })?;
+        match write {
+            EntityWrite::Created => report.created += 1,
+            EntityWrite::Updated => report.updated += 1,
+            EntityWrite::Unchanged => report.unchanged += 1,
+        }
+    }
+    for leg in &plan.payloads.procedure_legs {
+        let write = insert_with_future_correction(
+            conn,
+            "procedure_legs",
+            &leg.object_id.0,
+            vf,
+            now,
+            |c| insert_procedure_leg_conn(c, leg),
+        )?;
+        match write {
+            EntityWrite::Created => report.created += 1,
+            EntityWrite::Updated => report.updated += 1,
+            EntityWrite::Unchanged => report.unchanged += 1,
+        }
+    }
+
+    for tomb in &plan.tombstones {
+        report
+            .tombstone_outcomes
+            .push(apply_tombstone_conn(conn, tomb)?);
+    }
+
+    if plan.kind.closes_absent() {
+        let tables = [
+            EntityTable::Airports,
+            EntityTable::Runways,
+            EntityTable::Navaids,
+            EntityTable::Waypoints,
+            EntityTable::AirwayLegs,
+            EntityTable::ProcedureLegs,
+        ];
+        for table in tables {
+            if plan.masked_tables.contains(&table) {
+                continue;
+            }
+            let seen: Vec<String> = match table {
+                EntityTable::Airports => plan
+                    .payloads
+                    .airports
+                    .iter()
+                    .map(|e| e.id.0.clone())
+                    .collect(),
+                EntityTable::Runways => plan
+                    .payloads
+                    .runways
+                    .iter()
+                    .map(|e| e.id.0.clone())
+                    .collect(),
+                EntityTable::Navaids => plan
+                    .payloads
+                    .navaids
+                    .iter()
+                    .map(|e| e.object_id.0.clone())
+                    .collect(),
+                EntityTable::Waypoints => plan
+                    .payloads
+                    .waypoints
+                    .iter()
+                    .map(|e| e.object_id.0.clone())
+                    .collect(),
+                EntityTable::AirwayLegs => plan
+                    .payloads
+                    .airway_legs
+                    .iter()
+                    .map(|e| e.object_id.0.clone())
+                    .collect(),
+                EntityTable::ProcedureLegs => plan
+                    .payloads
+                    .procedure_legs
+                    .iter()
+                    .map(|e| e.object_id.0.clone())
+                    .collect(),
+            };
+            report.rows_closed +=
+                close_absent_at(conn, table, &plan.namespace, plan.valid_from, &seen)?;
+        }
+    }
+
+    let (kind, coverage) = plan.kind.components();
+    conn.execute(
+        "INSERT INTO publication_applications
+            (publication_id, valid_from, kind, coverage, rows_closed, applied_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            plan.publication_id,
+            rfc3339(plan.valid_from),
+            kind.as_str(),
+            coverage.as_str(),
+            report.rows_closed as i64,
+            rfc3339(Utc::now()),
+        ],
+    )
+    .context("recording publication application")?;
+
+    Ok(report)
+}
+
+/// Advance cycle bookkeeping atomically (one transaction, via the
+/// WorldStore wrapper). Queries remain driven by temporal validity —
+/// statuses are bookkeeping only.
+///
+/// Deterministic rules at `now`:
+/// * The newest Preloaded cycle with a reached effective date activates
+///   (Observed event, idempotent); older reached Preloaded candidates
+///   are Superseded.
+/// * All but the newest Active cycle are Superseded.
+/// * The newest Active cycle with a passed effective_until expires.
+/// * Discovered/Preloaded cycles whose window passed expire.
+/// * A late-synced OLDER cycle (ingested after a newer one is already
+///   Active) is never observably Active: it either Supersedes or
+///   Expires, and no activation event is fabricated for it.
+pub fn observe_cycles_conn(conn: &Connection, now: DateTime<Utc>) -> Result<ObserveReport> {
+    let cycles = query_cycles_conn(conn)?;
+    let mut report = ObserveReport::default();
+
+    // 1. Activate the newest reached preloaded cycle.
+    let mut candidates: Vec<&AiracCycle> = cycles
+        .iter()
+        .filter(|c| {
+            c.status == CycleStatus::Preloaded
+                && c.effective_from.map(|e| e <= now).unwrap_or(false)
+        })
+        .collect();
+    candidates.sort_by_key(|c| c.effective_from);
+    if let Some(newest) = candidates.pop() {
+        set_cycle_status_conn(conn, &newest.id, CycleStatus::Active, now)?;
+        if !has_cycle_event_conn(conn, &newest.id, CycleEventKind::Observed)? {
+            record_cycle_event_conn(
+                conn,
+                &CycleEvent {
+                    id: 0,
+                    at: now,
+                    kind: CycleEventKind::Observed,
+                    cycle_id: newest.id.clone(),
+                    restored_cycle_id: None,
+                    notes: None,
+                },
+            )?;
+        }
+        report.activated.push(newest.id.clone());
+        for older in candidates {
+            set_cycle_status_conn(conn, &older.id, CycleStatus::Superseded, now)?;
+            report.superseded.push(older.id.clone());
+        }
+    }
+
+    // Re-read the catalog after transitions.
+    let cycles = query_cycles_conn(conn)?;
+
+    // 2. Supersede all but the newest Active cycle.
+    let mut active: Vec<&AiracCycle> = cycles
+        .iter()
+        .filter(|c| c.status == CycleStatus::Active)
+        .collect();
+    active.sort_by_key(|c| c.effective_from);
+    if let Some(head) = active.pop() {
+        for older in active {
+            set_cycle_status_conn(conn, &older.id, CycleStatus::Superseded, now)?;
+            report.superseded.push(older.id.clone());
+        }
+        // 3. The newest Active cycle with a passed window expires.
+        if head.effective_until.map(|u| u < now).unwrap_or(false) {
+            set_cycle_status_conn(conn, &head.id, CycleStatus::Expired, now)?;
+            report.expired.push(head.id.clone());
+        }
+    }
+
+    // 4. Never-activated cycles whose window passed expire.
+    for cycle in &cycles {
+        let window_passed = cycle.effective_until.map(|u| u < now).unwrap_or(false);
+        if window_passed
+            && matches!(
+                cycle.status,
+                CycleStatus::Discovered | CycleStatus::Preloaded
+            )
+        {
+            set_cycle_status_conn(conn, &cycle.id, CycleStatus::Expired, now)?;
+            report.expired.push(cycle.id.clone());
+        }
+    }
+
+    Ok(report)
 }
 
 // ---------------------------------------------------------------------------
@@ -3094,7 +3826,7 @@ mod tests {
         let store = WorldStore::open_in_memory().unwrap();
         let status = store.status().unwrap();
         assert!(status.integrity_ok);
-        assert_eq!(status.migration_version, 5);
+        assert_eq!(status.migration_version, 6);
         assert_eq!(status.total_airports, 0);
 
         let snap = snapshot("snap-001");
@@ -3532,7 +4264,7 @@ mod tests {
 
         // Opening with the current code must migrate v1 -> v3 in place.
         let store = WorldStore::open(&path).unwrap();
-        assert_eq!(store.migration_version().unwrap(), 5);
+        assert_eq!(store.migration_version().unwrap(), 6);
         let at = store.query_airports_at(Utc::now()).unwrap();
         assert_eq!(at.len(), 1);
         assert_eq!(at[0].ident, "KSFO");
@@ -3767,6 +4499,8 @@ mod tests {
             retrieved_at: t0,
             revision_kind: RevisionKind::Baseline,
             coverage: Coverage::FullSnapshot,
+            publication_id: None,
+            valid_from: None,
             notes: None,
         };
         let mut v2 = v1.clone();
@@ -4075,5 +4809,661 @@ mod tests {
             .rollback_cycle(&CycleId("2608".into()), Utc::now())
             .unwrap_err();
         assert!(err.to_string().contains("only an Active cycle"), "{err}");
+    }
+
+    // -------------------------------------------------------------------
+    // S7: publications, tombstones, corrections
+    // -------------------------------------------------------------------
+
+    fn s7_wp(id: &str, lat: f64, vf: DateTime<Utc>, snap: &str) -> CanonicalWaypoint {
+        CanonicalWaypoint {
+            object_id: WaypointId(id.to_string()),
+            ident: id.to_string(),
+            name: id.to_string(),
+            latitude: lat,
+            longitude: -100.0,
+            is_enroute: true,
+            region_code: "K2".to_string(),
+            terminal_area_ident: None,
+            waypoint_type: Some(0x202057),
+            temporal: TemporalValidity {
+                valid_from: vf,
+                valid_until: None,
+                source_snapshot_id: SourceSnapshotId(snap.to_string()),
+            },
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn s7_version(
+        provider: &str,
+        dataset: &str,
+        cycle: Option<&str>,
+        sha: &str,
+        kind: RevisionKind,
+        coverage: Coverage,
+        publication_id: &str,
+        vf: DateTime<Utc>,
+        retrieved_at: DateTime<Utc>,
+    ) -> DatasetVersion {
+        DatasetVersion {
+            id: 0,
+            provider: provider.to_string(),
+            dataset: dataset.to_string(),
+            airac_cycle: cycle.map(|s| s.to_string()),
+            content_sha256: sha.to_string(),
+            retrieved_at,
+            revision_kind: kind,
+            coverage,
+            publication_id: Some(publication_id.to_string()),
+            valid_from: Some(vf),
+            notes: None,
+        }
+    }
+
+    #[test]
+    fn test_differential_publication_semantics() {
+        let mut store = WorldStore::open_in_memory().unwrap();
+        store
+            .insert_source_snapshot(&snapshot("snap-base"))
+            .unwrap();
+        store
+            .insert_source_snapshot(&snapshot("snap-delta"))
+            .unwrap();
+        let t0 = Utc::now();
+        let t1 = t0 + Duration::from_secs(3600);
+
+        // Baseline: A B C D.
+        let plan = PublicationPlan {
+            namespace: "faa".to_string(),
+            kind: UpdateKind::FullSnapshot,
+            valid_from: t0,
+            payloads: EntityPayloads {
+                waypoints: vec![
+                    s7_wp("faa:A", 1.0, t0, "snap-base"),
+                    s7_wp("faa:B", 2.0, t0, "snap-base"),
+                    s7_wp("faa:C", 3.0, t0, "snap-base"),
+                    s7_wp("faa:D", 4.0, t0, "snap-base"),
+                ],
+                ..Default::default()
+            },
+            tombstones: vec![],
+            masked_tables: Default::default(),
+            publication_id: "base-1".to_string(),
+        };
+        store.apply_publication(&plan).unwrap();
+
+        // Delta: B changed, D tombstoned, E added. Absence of A/C means
+        // NOTHING.
+        let tomb = Tombstone {
+            provider: "FAA_CIFP".to_string(),
+            dataset: "FAACIFP18".to_string(),
+            entity_table: "waypoints".to_string(),
+            entity_id: "faa:D".to_string(),
+            effective_from: t1,
+            source_snapshot_id: SourceSnapshotId("snap-delta".to_string()),
+            reason: Some("REMOVED".to_string()),
+        };
+        let plan = PublicationPlan {
+            namespace: "faa".to_string(),
+            kind: UpdateKind::Differential,
+            valid_from: t1,
+            payloads: EntityPayloads {
+                waypoints: vec![
+                    s7_wp("faa:B", 2.5, t1, "snap-delta"),
+                    s7_wp("faa:E", 5.0, t1, "snap-delta"),
+                ],
+                ..Default::default()
+            },
+            tombstones: vec![tomb],
+            masked_tables: Default::default(),
+            publication_id: "delta-1".to_string(),
+        };
+        let report = store.apply_publication(&plan).unwrap();
+        assert_eq!(report.rows_closed, 0); // differential NEVER closes absent
+        assert_eq!(report.tombstone_outcomes, vec![TombstoneOutcome::Closed]);
+
+        let at_t1 = store.query_waypoints_at(t1).unwrap();
+        let by_id = |id: &str| at_t1.iter().find(|w| w.ident == id);
+        assert_eq!(by_id("faa:A").unwrap().latitude, 1.0); // unchanged
+        assert_eq!(by_id("faa:B").unwrap().latitude, 2.5); // changed
+        assert_eq!(by_id("faa:C").unwrap().latitude, 3.0); // unchanged
+        assert!(by_id("faa:D").is_none()); // tombstoned
+        assert_eq!(by_id("faa:E").unwrap().latitude, 5.0); // added
+
+        // No new semantic revisions for A/C: exactly one row each.
+        for id in ["faa:A", "faa:C"] {
+            let n: i64 = store
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM waypoints WHERE id = ?1",
+                    params![id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "{id}");
+        }
+        // Observations: the delta observed only what it published.
+        let n: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM entity_observations WHERE source_snapshot_id = 'snap-delta'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 2); // B and E only
+    }
+
+    #[test]
+    fn test_tombstone_unknown_and_idempotent() {
+        let mut store = WorldStore::open_in_memory().unwrap();
+        store
+            .insert_source_snapshot(&snapshot("snap-base"))
+            .unwrap();
+        let t0 = Utc::now();
+        let t1 = t0 + Duration::from_secs(3600);
+        store
+            .apply_publication(&PublicationPlan {
+                namespace: "faa".to_string(),
+                kind: UpdateKind::FullSnapshot,
+                valid_from: t0,
+                payloads: EntityPayloads {
+                    waypoints: vec![s7_wp("faa:X", 1.0, t0, "snap-base")],
+                    ..Default::default()
+                },
+                tombstones: vec![],
+                masked_tables: Default::default(),
+                publication_id: "base-x".to_string(),
+            })
+            .unwrap();
+
+        let tomb = |id: &str| Tombstone {
+            provider: "FAA_CIFP".to_string(),
+            dataset: "FAACIFP18".to_string(),
+            entity_table: "waypoints".to_string(),
+            entity_id: id.to_string(),
+            effective_from: t1,
+            source_snapshot_id: SourceSnapshotId("snap-base".to_string()),
+            reason: None,
+        };
+
+        // Unknown entity: deterministic diagnostic, nothing fabricated.
+        assert_eq!(
+            store.apply_tombstone(&tomb("faa:NOPE")).unwrap(),
+            TombstoneOutcome::Unknown
+        );
+        // Known entity closed; replay is idempotent.
+        assert_eq!(
+            store.apply_tombstone(&tomb("faa:X")).unwrap(),
+            TombstoneOutcome::Closed
+        );
+        assert_eq!(
+            store.apply_tombstone(&tomb("faa:X")).unwrap(),
+            TombstoneOutcome::AlreadyClosed
+        );
+        assert!(store.query_waypoints_at(t1).unwrap().is_empty());
+        assert_eq!(store.query_waypoints_at(t0).unwrap().len(), 1); // history intact
+    }
+
+    #[test]
+    fn test_publication_identity_replay_and_conflict() {
+        let store = WorldStore::open_in_memory().unwrap();
+        store
+            .insert_source_snapshot(&snapshot("snap-base"))
+            .unwrap();
+        let t0 = Utc::now();
+
+        let v = s7_version(
+            "FAA_CIFP",
+            "FAACIFP18",
+            Some("2608"),
+            "a".repeat(64).as_str(),
+            RevisionKind::Baseline,
+            Coverage::FullSnapshot,
+            "pub-1",
+            t0,
+            t0,
+        );
+        assert_eq!(
+            store.record_dataset_publication(&v).unwrap(),
+            PublicationOutcome::Recorded
+        );
+        // Exact replay: Duplicate, no new row.
+        assert_eq!(
+            store.record_dataset_publication(&v).unwrap(),
+            PublicationOutcome::Duplicate
+        );
+        // Same identity, different content, NOT a correction: loud conflict.
+        let mut conflict = v.clone();
+        conflict.content_sha256 = "b".repeat(64);
+        let err = store.record_dataset_publication(&conflict).unwrap_err();
+        assert!(err.to_string().contains("requires a Correction"), "{err}");
+        // Modeled as a Correction: allowed.
+        conflict.revision_kind = RevisionKind::Correction;
+        assert_eq!(
+            store.record_dataset_publication(&conflict).unwrap(),
+            PublicationOutcome::Recorded
+        );
+    }
+
+    #[test]
+    fn test_future_correction_replacement_and_withdrawal() {
+        let mut store = WorldStore::open_in_memory().unwrap();
+        store
+            .insert_source_snapshot(&snapshot("snap-base"))
+            .unwrap();
+        let now = Utc::now();
+        let eff = now + Duration::from_secs(7200);
+        store
+            .apply_publication(&PublicationPlan {
+                namespace: "faa".to_string(),
+                kind: UpdateKind::FullSnapshot,
+                valid_from: eff,
+                payloads: EntityPayloads {
+                    waypoints: vec![
+                        s7_wp("faa:F1", 1.0, eff, "snap-base"),
+                        s7_wp("faa:F2", 2.0, eff, "snap-base"),
+                    ],
+                    ..Default::default()
+                },
+                tombstones: vec![],
+                masked_tables: Default::default(),
+                publication_id: "future-base".to_string(),
+            })
+            .unwrap();
+        // Future tombstone on F3 (also preloaded at eff).
+        store
+            .apply_publication(&PublicationPlan {
+                namespace: "faa".to_string(),
+                kind: UpdateKind::FullSnapshot,
+                valid_from: eff,
+                payloads: EntityPayloads {
+                    waypoints: vec![s7_wp("faa:F3", 3.0, eff, "snap-base")],
+                    ..Default::default()
+                },
+                tombstones: vec![Tombstone {
+                    provider: "FAA_CIFP".to_string(),
+                    dataset: "FAACIFP18".to_string(),
+                    entity_table: "waypoints".to_string(),
+                    entity_id: "faa:F3".to_string(),
+                    effective_from: eff,
+                    source_snapshot_id: SourceSnapshotId("snap-base".to_string()),
+                    reason: Some("withdrawn later".to_string()),
+                }],
+                masked_tables: Default::default(),
+                publication_id: "future-tomb".to_string(),
+            })
+            .unwrap();
+
+        // Case A: future payload change -> replace the not-yet-effective
+        // revision with a corrected one (same valid_from).
+        let corrected = s7_wp("faa:F1", 1.5, eff, "snap-base");
+        store
+            .apply_publication(&PublicationPlan {
+                namespace: "faa".to_string(),
+                kind: UpdateKind::Correction {
+                    coverage: Coverage::FullSnapshot,
+                },
+                valid_from: eff,
+                payloads: EntityPayloads {
+                    waypoints: vec![corrected],
+                    ..Default::default()
+                },
+                tombstones: vec![],
+                masked_tables: Default::default(),
+                publication_id: "corr-1".to_string(),
+            })
+            .unwrap();
+        // Case B: future added entity withdrawn by the correction.
+        assert!(
+            store
+                .withdraw_future_revision(EntityTable::Waypoints, "faa:F2", eff, now)
+                .unwrap()
+        );
+        // Case C: future tombstone withdrawn -> entity re-opens.
+        assert!(
+            store
+                .withdraw_tombstone(
+                    &Tombstone {
+                        provider: "FAA_CIFP".to_string(),
+                        dataset: "FAACIFP18".to_string(),
+                        entity_table: "waypoints".to_string(),
+                        entity_id: "faa:F3".to_string(),
+                        effective_from: eff,
+                        source_snapshot_id: SourceSnapshotId("snap-base".to_string()),
+                        reason: None,
+                    },
+                    now,
+                )
+                .unwrap()
+        );
+
+        let at_eff = store.query_waypoints_at(eff).unwrap();
+        assert!(
+            at_eff
+                .iter()
+                .any(|w| w.ident == "faa:F1" && w.latitude == 1.5)
+        );
+        assert!(!at_eff.iter().any(|w| w.ident == "faa:F2")); // withdrawn
+        assert!(at_eff.iter().any(|w| w.ident == "faa:F3")); // re-opened
+
+        // Case D (implicit): corrected content under one identity — the
+        // withdrawal of effective history is refused.
+        assert!(
+            store
+                .withdraw_future_revision(EntityTable::Waypoints, "faa:F1", now, now)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn test_correction_at_exact_effective_boundary() {
+        let mut store = WorldStore::open_in_memory().unwrap();
+        store
+            .insert_source_snapshot(&snapshot("snap-base"))
+            .unwrap();
+        let now = Utc::now();
+        // eff <= now: an effective instant. A correction claiming the
+        // SAME valid_from would rewrite effective history -> rejected.
+        let eff = now;
+        store
+            .apply_publication(&PublicationPlan {
+                namespace: "faa".to_string(),
+                kind: UpdateKind::FullSnapshot,
+                valid_from: eff,
+                payloads: EntityPayloads {
+                    waypoints: vec![s7_wp("faa:B1", 1.0, eff, "snap-base")],
+                    ..Default::default()
+                },
+                tombstones: vec![],
+                masked_tables: Default::default(),
+                publication_id: "b1".to_string(),
+            })
+            .unwrap();
+        let corrected = s7_wp("faa:B1", 2.0, eff, "snap-base");
+        let err = store
+            .apply_publication(&PublicationPlan {
+                namespace: "faa".to_string(),
+                kind: UpdateKind::Correction {
+                    coverage: Coverage::FullSnapshot,
+                },
+                valid_from: eff,
+                payloads: EntityPayloads {
+                    waypoints: vec![corrected.clone()],
+                    ..Default::default()
+                },
+                tombstones: vec![],
+                masked_tables: Default::default(),
+                publication_id: "b1-corr-same-instant".to_string(),
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("strictly after"), "{err}");
+
+        // Post-effective corrections are NEW revisions at a later instant.
+        let later = eff + Duration::from_secs(1);
+        let corrected = s7_wp("faa:B1", 2.0, later, "snap-base");
+        let report = store
+            .apply_publication(&PublicationPlan {
+                namespace: "faa".to_string(),
+                kind: UpdateKind::Correction {
+                    coverage: Coverage::FullSnapshot,
+                },
+                valid_from: later,
+                payloads: EntityPayloads {
+                    waypoints: vec![corrected],
+                    ..Default::default()
+                },
+                tombstones: vec![],
+                masked_tables: Default::default(),
+                publication_id: "b1-corr-later".to_string(),
+            })
+            .unwrap();
+        assert_eq!(report.updated, 1);
+        let at_later = store.query_waypoints_at(later).unwrap();
+        assert_eq!(at_later[0].latitude, 2.0);
+        // History before the correction instant is unchanged.
+        let at_eff = store.query_waypoints_at(just_before(later)).unwrap();
+        assert_eq!(at_eff[0].latitude, 1.0);
+    }
+
+    #[test]
+    fn test_late_sync_observe_and_atomicity() {
+        let mut store = WorldStore::open_in_memory().unwrap();
+        let now = Utc::now();
+        let past = now - Duration::from_secs(7200);
+        store
+            .insert_cycle(&cycle("2607", Some(past), CycleStatus::Active))
+            .unwrap();
+        store
+            .insert_cycle(&cycle("2608", Some(now), CycleStatus::Preloaded))
+            .unwrap();
+
+        // Late-synced older cycle ingested after the newer one is active:
+        // it must never become observably Active.
+        store
+            .insert_cycle(&cycle(
+                "2606",
+                Some(past - Duration::from_secs(3600)),
+                CycleStatus::Preloaded,
+            ))
+            .unwrap();
+
+        let report = store.observe_cycles(now).unwrap();
+        assert_eq!(report.activated, vec![CycleId("2608".to_string())]);
+        assert!(
+            report
+                .superseded
+                .iter()
+                .any(|c| c.0 == "2607" || c.0 == "2606")
+        );
+        // No activation event for the late older cycle.
+        assert!(
+            !store
+                .query_cycle_events()
+                .unwrap()
+                .iter()
+                .any(|e| e.kind == CycleEventKind::Observed && e.cycle_id.0 == "2606")
+        );
+
+        // Atomicity: transitions inside a rolled-back transaction leave
+        // no partial state. Preload a future cycle, observe inside a
+        // transaction, then roll it back.
+        store
+            .insert_cycle(&cycle(
+                "2609",
+                Some(now + Duration::from_secs(3600)),
+                CycleStatus::Preloaded,
+            ))
+            .unwrap();
+        {
+            let txn = store.conn.transaction().unwrap();
+            let inner = observe_cycles_conn(&txn, now + Duration::from_secs(7200)).unwrap();
+            assert!(inner.activated.iter().any(|c| c.0 == "2609"));
+            drop(txn); // rollback: nothing may have changed
+        }
+        assert_eq!(
+            store
+                .query_cycle(&CycleId("2609".to_string()))
+                .unwrap()
+                .unwrap()
+                .status,
+            CycleStatus::Preloaded // rolled back
+        );
+        assert!(
+            !store
+                .query_cycle_events()
+                .unwrap()
+                .iter()
+                .any(|e| e.kind == CycleEventKind::Observed && e.cycle_id.0 == "2609")
+        );
+    }
+
+    #[test]
+    fn test_rollback_after_deltas_restores_precycle_world() {
+        let mut store = WorldStore::open_in_memory().unwrap();
+        let mut snap_prev = snapshot("snap-2607");
+        snap_prev.provider = "FAA_CIFP".to_string();
+        snap_prev.dataset = "FAACIFP18".to_string();
+        let mut snap_cycle = snapshot("snap-2608");
+        snap_cycle.provider = "FAA_CIFP".to_string();
+        snap_cycle.dataset = "FAACIFP18".to_string();
+        let mut snap_delta = snapshot("snap-2608-delta");
+        snap_delta.provider = "FAA_CIFP".to_string();
+        snap_delta.dataset = "FAACIFP18".to_string();
+        for snap in [&snap_prev, &snap_cycle, &snap_delta] {
+            store.insert_source_snapshot(snap).unwrap();
+        }
+        let t0 = Utc::now();
+        let t1 = t0 + Duration::from_secs(3600);
+        let t2 = t1 + Duration::from_secs(3600);
+        let t3 = t2 + Duration::from_secs(3600);
+        store
+            .insert_cycle(&cycle("2607", Some(t1), CycleStatus::Superseded))
+            .unwrap();
+        store
+            .insert_cycle(&cycle("2608", Some(t2), CycleStatus::Active))
+            .unwrap();
+        store
+            .insert_cycle_snapshot(&CycleId("2608".to_string()), &snap_cycle.id)
+            .unwrap();
+        store
+            .insert_cycle_snapshot(&CycleId("2608".to_string()), &snap_delta.id)
+            .unwrap();
+
+        // Pre-cycle world.
+        store
+            .apply_publication(&PublicationPlan {
+                namespace: "faa".to_string(),
+                kind: UpdateKind::FullSnapshot,
+                valid_from: t1,
+                payloads: EntityPayloads {
+                    waypoints: vec![
+                        s7_wp("faa:W1", 1.0, t1, "snap-2607"),
+                        s7_wp("faa:W2", 2.0, t1, "snap-2607"),
+                    ],
+                    ..Default::default()
+                },
+                tombstones: vec![],
+                masked_tables: Default::default(),
+                publication_id: "prev".to_string(),
+            })
+            .unwrap();
+        // Cycle 2608 baseline: W1 revised, W3 added, W2 removed.
+        store
+            .apply_publication(&PublicationPlan {
+                namespace: "faa".to_string(),
+                kind: UpdateKind::FullSnapshot,
+                valid_from: t2,
+                payloads: EntityPayloads {
+                    waypoints: vec![
+                        s7_wp("faa:W1", 1.5, t2, "snap-2608"),
+                        s7_wp("faa:W3", 3.0, t2, "snap-2608"),
+                    ],
+                    ..Default::default()
+                },
+                tombstones: vec![],
+                masked_tables: Default::default(),
+                publication_id: "cycle-base".to_string(),
+            })
+            .unwrap();
+        // Mid-cycle delta: W1 revised again, W4 added.
+        store
+            .apply_publication(&PublicationPlan {
+                namespace: "faa".to_string(),
+                kind: UpdateKind::Differential,
+                valid_from: t2 + Duration::from_secs(60),
+                payloads: EntityPayloads {
+                    waypoints: vec![
+                        s7_wp(
+                            "faa:W1",
+                            1.9,
+                            t2 + Duration::from_secs(60),
+                            "snap-2608-delta",
+                        ),
+                        s7_wp(
+                            "faa:W4",
+                            4.0,
+                            t2 + Duration::from_secs(60),
+                            "snap-2608-delta",
+                        ),
+                    ],
+                    ..Default::default()
+                },
+                tombstones: vec![],
+                masked_tables: Default::default(),
+                publication_id: "cycle-delta".to_string(),
+            })
+            .unwrap();
+
+        let report = store
+            .rollback_cycle(&CycleId("2608".to_string()), t3)
+            .unwrap();
+        assert!(!report.noop);
+        assert_eq!(report.added_closed, 2); // W3, W4
+        assert_eq!(report.changed_republished, 1); // W1
+        assert_eq!(report.removed_republished, 1); // W2
+
+        let after = store.query_waypoints_at(t3).unwrap();
+        assert!(
+            after
+                .iter()
+                .any(|w| w.ident == "faa:W1" && w.latitude == 1.0)
+        );
+        assert!(after.iter().any(|w| w.ident == "faa:W2"));
+        assert!(!after.iter().any(|w| w.ident == "faa:W3"));
+        assert!(!after.iter().any(|w| w.ident == "faa:W4"));
+    }
+
+    #[test]
+    fn test_differential_never_closes_absent() {
+        let mut store = WorldStore::open_in_memory().unwrap();
+        store
+            .insert_source_snapshot(&snapshot("snap-base"))
+            .unwrap();
+        let t0 = Utc::now();
+        let t1 = t0 + Duration::from_secs(3600);
+        store
+            .apply_publication(&PublicationPlan {
+                namespace: "faa".to_string(),
+                kind: UpdateKind::FullSnapshot,
+                valid_from: t0,
+                payloads: EntityPayloads {
+                    waypoints: vec![
+                        s7_wp("faa:K1", 1.0, t0, "snap-base"),
+                        s7_wp("faa:K2", 2.0, t0, "snap-base"),
+                    ],
+                    ..Default::default()
+                },
+                tombstones: vec![],
+                masked_tables: Default::default(),
+                publication_id: "base-k".to_string(),
+            })
+            .unwrap();
+        // Delta mentions only K1; K2's absence means nothing.
+        let report = store
+            .apply_publication(&PublicationPlan {
+                namespace: "faa".to_string(),
+                kind: UpdateKind::Differential,
+                valid_from: t1,
+                payloads: EntityPayloads {
+                    waypoints: vec![s7_wp("faa:K1", 1.1, t1, "snap-base")],
+                    ..Default::default()
+                },
+                tombstones: vec![],
+                masked_tables: Default::default(),
+                publication_id: "delta-k".to_string(),
+            })
+            .unwrap();
+        assert_eq!(report.rows_closed, 0);
+        assert!(
+            store
+                .query_waypoints_at(t1)
+                .unwrap()
+                .iter()
+                .any(|w| w.ident == "faa:K2")
+        );
+        // validate() proves no differential ran close_absent.
+        assert!(store.validate().unwrap().is_empty());
     }
 }
