@@ -514,3 +514,92 @@ pub struct DatasetVersion {
     pub coverage: Coverage,
     pub notes: Option<String>,
 }
+
+// ---------------------------------------------------------------------------
+// Provider manifest registry (v0.4)
+// ---------------------------------------------------------------------------
+
+/// One published dataset of a provider.
+#[derive(Debug, Clone, Copy)]
+pub struct DatasetManifest {
+    pub name: &'static str,
+    /// Entity tables this dataset writes (store table names).
+    pub entity_tables: &'static [&'static str],
+}
+
+/// Static metadata of one provider: the ownership contract between
+/// providers, object-id namespaces, and entity tables. The object-id
+/// prefix (`<namespace>:` in entity ids) is the ONLY ownership signal in
+/// the store; full-snapshot removal (`close_absent_at`) and rollback
+/// scoping derive from this registry + `cycle_snapshots ->
+/// source_snapshots.provider`.
+#[derive(Debug, Clone, Copy)]
+pub struct ProviderManifest {
+    /// Provider string as stored in `source_snapshots.provider`.
+    pub name: &'static str,
+    /// Object-id namespace prefix (ids are `<namespace>:...`).
+    pub namespace: &'static str,
+    pub datasets: &'static [DatasetManifest],
+}
+
+/// Known providers.
+///
+/// | snapshot.provider | CLI key      | namespace     |
+/// |-------------------|--------------|---------------|
+/// | `OurAirports`     | `ourairports`| `ourairports` |
+/// | `FAA_CIFP`        | `faa_cifp`   | `faa`         |
+pub const PROVIDER_MANIFESTS: &[ProviderManifest] = &[
+    ProviderManifest {
+        name: "OurAirports",
+        namespace: "ourairports",
+        datasets: &[
+            DatasetManifest {
+                name: "airports",
+                entity_tables: &["airports"],
+            },
+            DatasetManifest {
+                name: "runways",
+                entity_tables: &["runways"],
+            },
+            DatasetManifest {
+                name: "navaids",
+                entity_tables: &["navaids"],
+            },
+        ],
+    },
+    ProviderManifest {
+        name: "FAA_CIFP",
+        namespace: "faa",
+        datasets: &[DatasetManifest {
+            name: "FAACIFP18",
+            // The decoder emits waypoints, navaids, airway legs and
+            // procedure legs; PA/PG terminal airports/runways are
+            // explicit Unsupported records, so those tables carry no
+            // CIFP-owned rows today.
+            entity_tables: &["waypoints", "navaids", "airway_legs", "procedure_legs"],
+        }],
+    },
+];
+
+/// Manifest by stored provider string (source_snapshots.provider).
+pub fn manifest_for_provider(provider: &str) -> Option<&'static ProviderManifest> {
+    PROVIDER_MANIFESTS.iter().find(|m| m.name == provider)
+}
+
+/// Namespace prefix by stored provider string.
+pub fn namespace_for_provider(provider: &str) -> Option<&'static str> {
+    manifest_for_provider(provider).map(|m| m.namespace)
+}
+
+/// Entity tables a provider publishes (union over its datasets, sorted).
+pub fn tables_for_provider(provider: &str) -> Option<Vec<&'static str>> {
+    let manifest = manifest_for_provider(provider)?;
+    let mut tables: Vec<&'static str> = manifest
+        .datasets
+        .iter()
+        .flat_map(|d| d.entity_tables.iter().copied())
+        .collect();
+    tables.sort_unstable();
+    tables.dedup();
+    Some(tables)
+}

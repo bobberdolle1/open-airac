@@ -121,6 +121,26 @@ enum CycleCmd {
         #[arg(short, long, default_value = "./data/world.openairac.sqlite")]
         db: PathBuf,
     },
+
+    /// Advance cycle bookkeeping to the current time: activate preloaded
+    /// cycles whose effective date has passed (idempotent), supersede
+    /// replaced cycles, mark expired windows.
+    Observe {
+        #[arg(short, long, default_value = "./data/world.openairac.sqlite")]
+        db: PathBuf,
+    },
+
+    /// Roll an Active cycle back: re-publish the pre-cycle world state as
+    /// new revisions (history is preserved, other providers untouched).
+    Rollback {
+        #[arg(short, long)]
+        cycle: String,
+        #[arg(short, long, default_value = "./data/world.openairac.sqlite")]
+        db: PathBuf,
+        /// Rollback instant (RFC3339); default: now
+        #[arg(long)]
+        at: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -574,6 +594,125 @@ fn main() -> Result<()> {
                     new_count,
                     store.query_cycles()?.len()
                 );
+            }
+            CycleCmd::Observe { db } => {
+                let store = WorldStore::open(db)?;
+                let now = chrono::Utc::now();
+                let cycles = store.query_cycles()?;
+
+                // Activate the newest preloaded cycle whose effective date
+                // has been reached; older preloaded candidates are skipped.
+                let mut candidates: Vec<_> = cycles
+                    .iter()
+                    .filter(|c| {
+                        c.status == openairac_model::CycleStatus::Preloaded
+                            && c.effective_from.map(|e| e <= now).unwrap_or(false)
+                    })
+                    .collect();
+                candidates.sort_by_key(|c| c.effective_from);
+                if let Some(newest) = candidates.pop() {
+                    store.set_cycle_status(&newest.id, openairac_model::CycleStatus::Active)?;
+                    if !store
+                        .has_cycle_event(&newest.id, openairac_model::CycleEventKind::Observed)?
+                    {
+                        store.record_cycle_event(&openairac_model::CycleEvent {
+                            id: 0,
+                            at: now,
+                            kind: openairac_model::CycleEventKind::Observed,
+                            cycle_id: newest.id.clone(),
+                            restored_cycle_id: None,
+                            notes: None,
+                        })?;
+                    }
+                    println!(
+                        "Activated cycle {} (effective {})",
+                        newest.id.0,
+                        newest.effective_from.unwrap()
+                    );
+                    for older in candidates {
+                        store.set_cycle_status(
+                            &older.id,
+                            openairac_model::CycleStatus::Superseded,
+                        )?;
+                        println!(
+                            "  superseded {} (skipped, superseded by {})",
+                            older.id.0, newest.id.0
+                        );
+                    }
+                }
+
+                // Re-read the catalog: supersede older active cycles, mark
+                // expired windows.
+                let cycles = store.query_cycles()?;
+                let mut active: Vec<_> = cycles
+                    .iter()
+                    .filter(|c| c.status == openairac_model::CycleStatus::Active)
+                    .collect();
+                active.sort_by_key(|c| c.effective_from);
+                if let Some(head) = active.pop() {
+                    for older in active {
+                        store.set_cycle_status(
+                            &older.id,
+                            openairac_model::CycleStatus::Superseded,
+                        )?;
+                        println!("  superseded {} (replaced by {})", older.id.0, head.id.0);
+                    }
+                    if head.effective_until.map(|u| u < now).unwrap_or(false) {
+                        store.set_cycle_status(&head.id, openairac_model::CycleStatus::Expired)?;
+                        println!(
+                            "  expired {} (effective window passed, no successor)",
+                            head.id.0
+                        );
+                    }
+                }
+                for cycle in &cycles {
+                    let window_passed = cycle.effective_until.map(|u| u < now).unwrap_or(false);
+                    if window_passed
+                        && matches!(
+                            cycle.status,
+                            openairac_model::CycleStatus::Discovered
+                                | openairac_model::CycleStatus::Preloaded
+                        )
+                    {
+                        store.set_cycle_status(&cycle.id, openairac_model::CycleStatus::Expired)?;
+                        println!(
+                            "  expired {} (window passed without activation)",
+                            cycle.id.0
+                        );
+                    }
+                }
+                println!("Cycle bookkeeping is up to date.");
+            }
+            CycleCmd::Rollback { cycle, db, at } => {
+                let at = match at {
+                    Some(s) => chrono::DateTime::parse_from_rfc3339(s)
+                        .map(|t| t.with_timezone(&chrono::Utc))?,
+                    None => chrono::Utc::now(),
+                };
+                let mut store = WorldStore::open(db)?;
+                let report = store.rollback_cycle(&openairac_model::CycleId(cycle.clone()), at)?;
+                if report.noop {
+                    println!("Cycle {} was already rolled back (no-op).", cycle);
+                } else {
+                    println!("Rolled back cycle {} at {at}.", cycle);
+                    println!(
+                        "  restored: {}",
+                        report
+                            .restored_cycle_id
+                            .as_ref()
+                            .map(|c| c.0.as_str())
+                            .unwrap_or("(no earlier cycle)")
+                    );
+                    println!("  added entities closed: {}", report.added_closed);
+                    println!(
+                        "  changed entities re-published: {}",
+                        report.changed_republished
+                    );
+                    println!(
+                        "  removed entities re-published: {}",
+                        report.removed_republished
+                    );
+                }
             }
             CycleCmd::List { db } => {
                 let store = WorldStore::open(db)?;

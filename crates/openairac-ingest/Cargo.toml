@@ -8,6 +8,7 @@ repository.workspace = true
 [dependencies]
 openairac-model = { path = "../openairac-model" }
 openairac-store = { path = "../openairac-store" }
+rusqlite.workspace = true
 openairac-magnetic = { path = "../openairac-magnetic" }
 openairac-procedures = { path = "../openairac-procedures" }
 csv.workspace = true

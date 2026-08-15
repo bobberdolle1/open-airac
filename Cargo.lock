@@ -1161,6 +1161,7 @@ dependencies = [
  "openairac-procedures",
  "openairac-store",
  "reqwest",
+ "rusqlite",
  "serde",
  "sha2",
  "thiserror",

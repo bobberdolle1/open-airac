@@ -3,6 +3,7 @@ use chrono::{DateTime, Utc};
 use openairac_model::*;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::Serialize;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// Outcome of writing one canonical entity row into the temporal store.
@@ -214,71 +215,32 @@ impl WorldStore {
 
     /// Query airports valid at a given UTC instant.
     pub fn query_airports_at(&self, date: DateTime<Utc>) -> Result<Vec<CanonicalAirport>> {
-        let date_str = rfc3339(date);
-        let mut stmt = self.conn.prepare(&format!(
-            "SELECT id, ident, name, airport_type, latitude_deg, longitude_deg,
-                    elevation_ft, iso_country, municipality, source_snapshot_id,
-                    valid_from, valid_until
-             FROM airports WHERE {VALID_FROM_LE} AND {VALID_UNTIL_GT};"
-        ))?;
-
-        let rows = stmt.query_and_then(params![date_str], |row| -> Result<CanonicalAirport> {
-            let id: String = row.get(0).context("airports.id")?;
-            let temporal = TemporalValidity {
-                valid_from: parse_utc(
-                    &row.get::<_, String>(10).context("valid_from")?,
-                    "valid_from",
-                )?,
-                valid_until: row
-                    .get::<_, Option<String>>(11)
-                    .context("valid_until")?
-                    .map(|s| parse_utc(&s, "valid_until"))
-                    .transpose()?,
-                source_snapshot_id: SourceSnapshotId(row.get(9).context("source_snapshot_id")?),
-            };
-            Ok(CanonicalAirport {
-                id: AirportId(id),
-                ident: row.get(1).context("ident")?,
-                name: row.get(2).context("name")?,
-                airport_type: row.get(3).context("airport_type")?,
-                latitude: row.get(4).context("latitude")?,
-                longitude: row.get(5).context("longitude")?,
-                elevation_ft: row.get(6).context("elevation_ft")?,
-                iso_country: row.get(7).context("iso_country")?,
-                municipality: row.get(8).context("municipality")?,
-                runways: Vec::new(),
-                temporal,
-            })
-        })?;
-
-        let mut airports = Vec::new();
-        for row in rows {
-            let mut airport = row?;
-            airport.runways = self.query_runways_for_airport(&airport.id, date)?;
-            airports.push(airport);
-        }
-        Ok(airports)
+        query_airports_at_conn(&self.conn, date)
     }
+}
 
-    fn query_runways_for_airport(
-        &self,
-        airport_id: &AirportId,
-        date: DateTime<Utc>,
-    ) -> Result<Vec<CanonicalRunway>> {
+/// Runway rows valid at `date`, optionally filtered to one airport.
+/// Standalone form used by rollback re-publication.
+pub fn query_runways_conn(
+    conn: &Connection,
+    date: DateTime<Utc>,
+    airport_id: Option<&AirportId>,
+) -> Result<Vec<CanonicalRunway>> {
+    {
         let date_str = rfc3339(date);
-        let mut stmt = self.conn.prepare(
+        let mut stmt = conn.prepare(
             "SELECT id, airport_id, airport_ident, official_designator,
                     computed_magnetic_designator, true_heading_deg, length_ft,
                     width_ft, surface, le_ident, le_lat, le_lon, le_elevation_ft,
                     he_ident, he_lat, he_lon, he_elevation_ft, source_snapshot_id,
                     valid_from, valid_until
              FROM runways
-             WHERE airport_id = ?1 AND valid_from <= ?2
+             WHERE (?1 IS NULL OR airport_id = ?1) AND valid_from <= ?2
                AND (valid_until IS NULL OR valid_until > ?2);",
         )?;
 
         let rows = stmt.query_and_then(
-            params![airport_id.0, date_str],
+            params![airport_id.map(|a| a.0.as_str()), date_str],
             |row| -> Result<CanonicalRunway> {
                 let id: String = row.get(0).context("runways.id")?;
                 Ok(CanonicalRunway {
@@ -329,123 +291,17 @@ impl WorldStore {
         }
         Ok(runways)
     }
+}
 
+impl WorldStore {
     /// Query navaids valid at a given UTC instant.
     pub fn query_navaids_at(&self, date: DateTime<Utc>) -> Result<Vec<CanonicalNavaid>> {
-        let date_str = rfc3339(date);
-        let mut stmt = self.conn.prepare(&format!(
-            "SELECT id, ident, name, navaid_type, frequency_khz, latitude_deg,
-                    longitude_deg, elevation_ft, region, associated_airport,
-                    magnetic_variation_deg, slaved_variation_deg,
-                    service_volume_nm, dme_paired, associated_runway,
-                    localizer_bearing_true_deg, localizer_bearing_mag_deg,
-                    glideslope_angle_deg, source_snapshot_id, valid_from,
-                    valid_until
-             FROM navaids WHERE {VALID_FROM_LE} AND {VALID_UNTIL_GT};"
-        ))?;
-
-        let rows = stmt.query_and_then(params![date_str], |row| -> Result<CanonicalNavaid> {
-            let id: String = row.get(0).context("navaids.id")?;
-            let type_str: String = row.get(3).context("navaid_type")?;
-            // Fail closed: an unknown stored navaid type is a data defect,
-            // never silently reinterpreted.
-            let kind = NavaidKind::parse(&type_str)
-                .ok_or_else(|| anyhow!("navaid '{id}' has unknown navaid_type '{type_str}'"))?;
-            Ok(CanonicalNavaid {
-                object_id: NavaidId(id),
-                ident: row.get(1).context("ident")?,
-                name: row.get(2).context("name")?,
-                kind,
-                frequency: FrequencyKhz(row.get(4).context("frequency_khz")?),
-                latitude: row.get(5).context("latitude")?,
-                longitude: row.get(6).context("longitude")?,
-                elevation_ft: row
-                    .get::<_, Option<f64>>(7)
-                    .context("elevation_ft")?
-                    .map(|e| e.round() as i32),
-                region_code: row.get(8).context("region")?,
-                associated_airport: row.get(9).context("associated_airport")?,
-                magnetic_variation_deg: row.get(10).context("magnetic_variation_deg")?,
-                slaved_variation_deg: row.get(11).context("slaved_variation_deg")?,
-                service_volume_nm: row.get(12).context("service_volume_nm")?,
-                dme_paired: row.get::<_, i64>(13).context("dme_paired")? != 0,
-                associated_runway: row.get(14).context("associated_runway")?,
-                localizer_bearing_true_deg: row.get(15).context("localizer_bearing_true_deg")?,
-                localizer_bearing_mag_deg: row.get(16).context("localizer_bearing_mag_deg")?,
-                glideslope_angle_deg: row.get(17).context("glideslope_angle_deg")?,
-                temporal: TemporalValidity {
-                    valid_from: parse_utc(
-                        &row.get::<_, String>(19).context("valid_from")?,
-                        "valid_from",
-                    )?,
-                    valid_until: row
-                        .get::<_, Option<String>>(20)
-                        .context("valid_until")?
-                        .map(|s| parse_utc(&s, "valid_until"))
-                        .transpose()?,
-                    source_snapshot_id: SourceSnapshotId(
-                        row.get(18).context("source_snapshot_id")?,
-                    ),
-                },
-            })
-        })?;
-
-        let mut navaids: Vec<CanonicalNavaid> = Vec::new();
-
-        for row in rows {
-            navaids.push(row?);
-        }
-        Ok(navaids)
+        query_navaids_at_conn(&self.conn, date)
     }
 
     /// Query waypoints valid at a given UTC instant.
     pub fn query_waypoints_at(&self, date: DateTime<Utc>) -> Result<Vec<CanonicalWaypoint>> {
-        let date_str = rfc3339(date);
-        let mut stmt = self.conn.prepare(&format!(
-            "SELECT id, ident, name, latitude_deg, longitude_deg, region, is_enroute,
-                    waypoint_type, terminal_area_ident, source_snapshot_id,
-                    valid_from, valid_until
-             FROM waypoints WHERE {VALID_FROM_LE} AND {VALID_UNTIL_GT};"
-        ))?;
-
-        let rows = stmt.query_and_then(params![date_str], |row| -> Result<CanonicalWaypoint> {
-            let id: String = row.get(0).context("waypoints.id")?;
-            Ok(CanonicalWaypoint {
-                object_id: WaypointId(id),
-                ident: row.get(1).context("ident")?,
-                name: row.get(2).context("name")?,
-                latitude: row.get(3).context("latitude")?,
-                longitude: row.get(4).context("longitude")?,
-                region_code: row
-                    .get::<_, Option<String>>(5)
-                    .context("region")?
-                    .unwrap_or_default(),
-                is_enroute: row.get::<_, i64>(6).context("is_enroute")? != 0,
-                waypoint_type: row
-                    .get::<_, Option<i64>>(7)
-                    .context("waypoint_type")?
-                    .map(|v| v as u32),
-                terminal_area_ident: row.get(8).context("terminal_area_ident")?,
-                temporal: TemporalValidity {
-                    valid_from: parse_utc(
-                        &row.get::<_, String>(10).context("valid_from")?,
-                        "valid_from",
-                    )?,
-                    valid_until: row
-                        .get::<_, Option<String>>(11)
-                        .context("valid_until")?
-                        .map(|s| parse_utc(&s, "valid_until"))
-                        .transpose()?,
-                    source_snapshot_id: SourceSnapshotId(row.get(9).context("source_snapshot_id")?),
-                },
-            })
-        })?;
-
-        let mut waypoints = Vec::new();
-        for row in rows {
-            waypoints.push(row?);
-        }
-        Ok(waypoints)
+        query_waypoints_at_conn(&self.conn, date)
     }
 
     /// Query airway legs valid at a given UTC instant.
@@ -506,6 +362,11 @@ impl WorldStore {
         query_cycle_events_conn(&self.conn)
     }
 
+    /// Whether an event of `kind` was already recorded for the cycle.
+    pub fn has_cycle_event(&self, cycle_id: &CycleId, kind: CycleEventKind) -> Result<bool> {
+        has_cycle_event_conn(&self.conn, cycle_id, kind)
+    }
+
     /// Append an observed dataset publication (append-only).
     pub fn insert_dataset_version(&self, version: &DatasetVersion) -> Result<()> {
         insert_dataset_version_conn(&self.conn, version)
@@ -529,6 +390,20 @@ impl WorldStore {
         entity_id: &str,
     ) -> Result<()> {
         insert_entity_alias_conn(&self.conn, table, natural_key, provider, entity_id)
+    }
+
+    /// Roll an Active cycle back at `at` by re-publishing the pre-cycle
+    /// state as new revisions (one transaction). Scope is the cycle's own
+    /// provider/dataset/entity domain; other providers are never touched.
+    pub fn rollback_cycle(
+        &mut self,
+        cycle_id: &CycleId,
+        at: DateTime<Utc>,
+    ) -> Result<RollbackReport> {
+        let txn = self.conn.transaction()?;
+        let report = rollback_cycle_conn(&txn, cycle_id, at)?;
+        txn.commit()?;
+        Ok(report)
     }
 
     /// Structural integrity validation of the canonical store. Returns every
@@ -2283,6 +2158,24 @@ pub fn cycle_snapshot_ids_conn(
     Ok(ids)
 }
 
+/// Whether an event of `kind` was already recorded for the cycle
+/// (idempotency check for Scheduled/Observed bookkeeping).
+pub fn has_cycle_event_conn(
+    conn: &Connection,
+    cycle_id: &CycleId,
+    kind: CycleEventKind,
+) -> Result<bool> {
+    let found = conn
+        .query_row(
+            "SELECT 1 FROM cycle_events WHERE cycle_id = ?1 AND kind = ?2 LIMIT 1",
+            params![cycle_id.0, kind.as_str()],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    Ok(found)
+}
+
 pub fn record_cycle_event_conn(conn: &Connection, event: &CycleEvent) -> Result<i64> {
     conn.execute(
         "INSERT INTO cycle_events (at, kind, cycle_id, restored_cycle_id, notes)
@@ -2398,7 +2291,7 @@ pub fn latest_dataset_version_conn(
 /// Entity tables eligible for full-snapshot close semantics. This is the
 /// closed set of names `close_absent_at`/`close_entity_at` accept — an
 /// arbitrary string can never reach SQL.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum EntityTable {
     Airports,
     Runways,
@@ -2417,6 +2310,18 @@ impl EntityTable {
             EntityTable::Waypoints => "waypoints",
             EntityTable::AirwayLegs => "airway_legs",
             EntityTable::ProcedureLegs => "procedure_legs",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "airports" => Some(EntityTable::Airports),
+            "runways" => Some(EntityTable::Runways),
+            "navaids" => Some(EntityTable::Navaids),
+            "waypoints" => Some(EntityTable::Waypoints),
+            "airway_legs" => Some(EntityTable::AirwayLegs),
+            "procedure_legs" => Some(EntityTable::ProcedureLegs),
+            _ => None,
         }
     }
 
@@ -2532,6 +2437,528 @@ pub fn close_entity_at(
         )
         .with_context(|| format!("tombstone-closing '{id}' in {table}"))?;
     Ok(closed > 0)
+}
+
+// ---------------------------------------------------------------------------
+// Cycle rollback (v0.4): re-publication of the pre-cycle state
+// ---------------------------------------------------------------------------
+
+/// Result of a rollback: how the pre-cycle world was re-published.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RollbackReport {
+    pub cycle_id: CycleId,
+    /// The cycle whose state was re-published (max effective_from < the
+    /// rolled-back cycle's effective_from). None when no earlier cycle
+    /// exists (rolling back the first cycle).
+    pub restored_cycle_id: Option<CycleId>,
+    /// Entities that existed only in the rolled-back cycle: closed.
+    pub added_closed: usize,
+    /// Entities the cycle revised: closed + pre-cycle row re-published.
+    pub changed_republished: usize,
+    /// Entities the cycle removed: pre-cycle row re-published.
+    pub removed_republished: usize,
+    pub at: DateTime<Utc>,
+    /// True when the cycle was already rolled back (idempotent no-op).
+    pub noop: bool,
+}
+
+/// Roll one Active cycle back at instant `at`, restoring the world state
+/// from immediately before the cycle became effective
+/// (`world_at(just_before(effective_from))`), re-published as NEW
+/// revisions with `valid_from = at`. History is never rewritten: rows
+/// valid before `at` are untouched, and re-published rows carry the
+/// historical row's exact provenance (`source_snapshot_id`).
+///
+/// Scope: ONLY the provider/dataset/entity domain owned by the cycle
+/// (derived from `cycle_snapshots -> source_snapshots.provider` +
+/// the provider manifest registry). Changes by other providers during
+/// the cycle's window are never reverted.
+pub fn rollback_cycle_conn(
+    conn: &Connection,
+    cycle_id: &CycleId,
+    at: DateTime<Utc>,
+) -> Result<RollbackReport> {
+    let cycle = query_cycle_conn(conn, cycle_id)?
+        .ok_or_else(|| anyhow::anyhow!("cycle '{}' not in catalog", cycle_id.0))?;
+
+    if cycle.status == CycleStatus::RolledBack {
+        let restored = query_cycle_events_conn(conn)?
+            .into_iter()
+            .rev()
+            .find(|e| e.cycle_id == *cycle_id && e.kind == CycleEventKind::Rollback)
+            .and_then(|e| e.restored_cycle_id);
+        return Ok(RollbackReport {
+            cycle_id: cycle_id.clone(),
+            restored_cycle_id: restored,
+            added_closed: 0,
+            changed_republished: 0,
+            removed_republished: 0,
+            at,
+            noop: true,
+        });
+    }
+    if cycle.status != CycleStatus::Active {
+        anyhow::bail!(
+            "cycle '{}' is {}, only an Active cycle can be rolled back",
+            cycle_id.0,
+            cycle.status.as_str()
+        );
+    }
+    let eff = cycle.effective_from.ok_or_else(|| {
+        anyhow::anyhow!(
+            "cycle '{}' has unconfirmed effective dates; cannot roll back",
+            cycle_id.0
+        )
+    })?;
+
+    // Ownership scope: provider/dataset/entity domain of the cycle.
+    let mut ownership: Vec<(EntityTable, String)> = Vec::new();
+    for snapshot_id in cycle_snapshot_ids_conn(conn, cycle_id)? {
+        let provider: Option<String> = conn
+            .query_row(
+                "SELECT provider FROM source_snapshots WHERE id = ?1",
+                params![snapshot_id.0],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(provider) = provider
+            && let Some(manifest) = openairac_model::manifest_for_provider(&provider)
+        {
+            for table_name in manifest
+                .datasets
+                .iter()
+                .flat_map(|d| d.entity_tables.iter().copied())
+            {
+                let table = EntityTable::parse(table_name).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "manifest table '{table_name}' of '{provider}' cannot be rolled back"
+                    )
+                })?;
+                ownership.push((table, manifest.namespace.to_string()));
+            }
+        }
+    }
+    ownership.sort_by_key(|(t, n)| (t.as_str().to_string(), n.clone()));
+    ownership.dedup();
+    if ownership.is_empty() {
+        anyhow::bail!(
+            "cycle '{}' has no derivable ownership scope (no linked snapshots)",
+            cycle_id.0
+        );
+    }
+
+    // The cycle whose world is restored: latest earlier effective cycle.
+    let restored_cycle_id = query_cycles_conn(conn)?
+        .iter()
+        .filter(|c| c.effective_from.map(|e| e < eff).unwrap_or(false))
+        .max_by_key(|c| c.effective_from)
+        .map(|c| c.id.clone());
+
+    let pre_instant = just_before(eff);
+    let cur_instant = just_before(at);
+
+    let mut added = 0usize;
+    let mut changed = 0usize;
+    let mut removed = 0usize;
+    for (table, namespace) in &ownership {
+        let (a, c, r) = match table {
+            EntityTable::Airports => rollback_table(
+                conn,
+                *table,
+                namespace,
+                eff,
+                at,
+                pre_instant,
+                cur_instant,
+                query_airports_at_conn,
+                |a: &CanonicalAirport| a.id.0.clone(),
+                |a: &CanonicalAirport| a.temporal.valid_from,
+                |a: &CanonicalAirport, vf: DateTime<Utc>| {
+                    let mut c = a.clone();
+                    c.temporal.valid_from = vf;
+                    c.temporal.valid_until = None;
+                    c
+                },
+                insert_airport_row,
+            )?,
+            EntityTable::Runways => rollback_table(
+                conn,
+                *table,
+                namespace,
+                eff,
+                at,
+                pre_instant,
+                cur_instant,
+                |conn: &Connection, t: DateTime<Utc>| query_runways_conn(conn, t, None),
+                |r: &CanonicalRunway| r.id.0.clone(),
+                |r: &CanonicalRunway| r.temporal.valid_from,
+                |r: &CanonicalRunway, vf: DateTime<Utc>| {
+                    let mut c = r.clone();
+                    c.temporal.valid_from = vf;
+                    c.temporal.valid_until = None;
+                    c
+                },
+                insert_runway_row,
+            )?,
+            EntityTable::Navaids => rollback_table(
+                conn,
+                *table,
+                namespace,
+                eff,
+                at,
+                pre_instant,
+                cur_instant,
+                query_navaids_at_conn,
+                |n: &CanonicalNavaid| n.object_id.0.clone(),
+                |n: &CanonicalNavaid| n.temporal.valid_from,
+                |n: &CanonicalNavaid, vf: DateTime<Utc>| {
+                    let mut c = n.clone();
+                    c.temporal.valid_from = vf;
+                    c.temporal.valid_until = None;
+                    c
+                },
+                insert_navaid_row,
+            )?,
+            EntityTable::Waypoints => rollback_table(
+                conn,
+                *table,
+                namespace,
+                eff,
+                at,
+                pre_instant,
+                cur_instant,
+                query_waypoints_at_conn,
+                |w: &CanonicalWaypoint| w.object_id.0.clone(),
+                |w: &CanonicalWaypoint| w.temporal.valid_from,
+                |w: &CanonicalWaypoint, vf: DateTime<Utc>| {
+                    let mut c = w.clone();
+                    c.temporal.valid_from = vf;
+                    c.temporal.valid_until = None;
+                    c
+                },
+                insert_waypoint_row,
+            )?,
+            EntityTable::AirwayLegs => rollback_table(
+                conn,
+                *table,
+                namespace,
+                eff,
+                at,
+                pre_instant,
+                cur_instant,
+                query_airway_legs_at,
+                |l: &CanonicalAirwayLeg| l.object_id.0.clone(),
+                |l: &CanonicalAirwayLeg| l.temporal.valid_from,
+                |l: &CanonicalAirwayLeg, vf: DateTime<Utc>| {
+                    let mut c = l.clone();
+                    c.temporal.valid_from = vf;
+                    c.temporal.valid_until = None;
+                    c
+                },
+                insert_airway_leg_row,
+            )?,
+            EntityTable::ProcedureLegs => rollback_table(
+                conn,
+                *table,
+                namespace,
+                eff,
+                at,
+                pre_instant,
+                cur_instant,
+                query_procedure_legs_at,
+                |l: &CanonicalProcedureLeg| l.object_id.0.clone(),
+                |l: &CanonicalProcedureLeg| l.temporal.valid_from,
+                |l: &CanonicalProcedureLeg, vf: DateTime<Utc>| {
+                    let mut c = l.clone();
+                    c.temporal.valid_from = vf;
+                    c.temporal.valid_until = None;
+                    c
+                },
+                insert_procedure_leg_row,
+            )?,
+        };
+        added += a;
+        changed += c;
+        removed += r;
+    }
+
+    record_cycle_event_conn(
+        conn,
+        &CycleEvent {
+            id: 0,
+            at,
+            kind: CycleEventKind::Rollback,
+            cycle_id: cycle_id.clone(),
+            restored_cycle_id: restored_cycle_id.clone(),
+            notes: Some("re-published pre-cycle state".to_string()),
+        },
+    )?;
+    set_cycle_status_conn(conn, cycle_id, CycleStatus::RolledBack, at)?;
+
+    Ok(RollbackReport {
+        cycle_id: cycle_id.clone(),
+        restored_cycle_id,
+        added_closed: added,
+        changed_republished: changed,
+        removed_republished: removed,
+        at,
+        noop: false,
+    })
+}
+
+/// Generic re-publication over one entity table.
+///
+/// Classes per entity id (cur = row valid at `cur_instant`, pre = row
+/// valid at `pre_instant`):
+/// * Added   (cur owned by the cycle, no pre row): close cur at `at`.
+/// * Changed (cur owned by the cycle, pre row exists): close cur via the
+///   normal revision close + re-publish pre at `at` (exact provenance).
+/// * Removed (pre row exists, no cur row): re-publish pre at `at`.
+/// * Unchanged: untouched.
+///
+/// Rows owned by other providers (namespace mismatch) are never seen:
+/// `load` results are filtered by the id prefix before diffing.
+///
+/// Re-publication uses the raw row-insert primitives (NOT the payload-
+/// comparing insert_*_conn): a Removed entity re-publishes a payload
+/// identical to its closed historical row, which the payload-comparison
+/// would classify as Unchanged and skip — the temporal presence change
+/// would be lost. Raw inserts also record no observations, matching the
+/// design rule that rollback is not an observation of any source file.
+#[allow(clippy::too_many_arguments)]
+fn rollback_table<T: Clone>(
+    conn: &Connection,
+    table: EntityTable,
+    namespace: &str,
+    _eff: DateTime<Utc>,
+    at: DateTime<Utc>,
+    pre_instant: DateTime<Utc>,
+    cur_instant: DateTime<Utc>,
+    load: impl Fn(&Connection, DateTime<Utc>) -> Result<Vec<T>>,
+    id_of: impl Fn(&T) -> String,
+    vf_of: impl Fn(&T) -> DateTime<Utc>,
+    republish: impl Fn(&T, DateTime<Utc>) -> T,
+    force_insert: impl Fn(&Connection, &T, &str, &Option<String>) -> Result<()>,
+) -> Result<(usize, usize, usize)> {
+    let prefix = format!("{namespace}:");
+    let pre: HashMap<String, T> = load(conn, pre_instant)?
+        .into_iter()
+        .filter(|e| id_of(e).starts_with(&prefix))
+        .map(|e| (id_of(&e), e))
+        .collect();
+    let cur: HashMap<String, T> = load(conn, cur_instant)?
+        .into_iter()
+        .filter(|e| id_of(e).starts_with(&prefix))
+        .map(|e| (id_of(&e), e))
+        .collect();
+
+    let eff = _eff;
+    let mut added = 0usize;
+    let mut changed = 0usize;
+    let mut removed = 0usize;
+    let at_str = rfc3339(at);
+
+    for (id, c) in &cur {
+        if vf_of(c) < eff {
+            continue; // not owned by the rolled-back cycle
+        }
+        if let Some(p) = pre.get(id) {
+            changed += 1;
+            // Close the cycle's revision, then re-publish the pre-cycle
+            // row as a brand-new revision at `at`.
+            close_entity_at(conn, table, id, at)?;
+            let row = republish(p, at);
+            force_insert(conn, &row, &at_str, &None)?;
+        } else {
+            added += 1;
+            close_entity_at(conn, table, id, at)?;
+        }
+    }
+    for id in pre.keys() {
+        if !cur.contains_key(id) {
+            removed += 1;
+            let row = republish(&pre[id], at);
+            force_insert(conn, &row, &at_str, &None)?;
+        }
+    }
+
+    Ok((added, changed, removed))
+}
+
+// ---------------------------------------------------------------------------
+// Conn-level entity loaders (delegates for the WorldStore query methods)
+// ---------------------------------------------------------------------------
+
+/// Airports valid at `date`, with nested runways attached.
+pub fn query_airports_at_conn(
+    conn: &Connection,
+    date: DateTime<Utc>,
+) -> Result<Vec<CanonicalAirport>> {
+    let date_str = rfc3339(date);
+    let mut stmt = conn.prepare(&format!(
+        "SELECT id, ident, name, airport_type, latitude_deg, longitude_deg,
+                elevation_ft, iso_country, municipality, source_snapshot_id,
+                valid_from, valid_until
+         FROM airports WHERE {VALID_FROM_LE} AND {VALID_UNTIL_GT};"
+    ))?;
+
+    let rows = stmt.query_and_then(params![date_str], |row| -> Result<CanonicalAirport> {
+        let id: String = row.get(0).context("airports.id")?;
+        let temporal = TemporalValidity {
+            valid_from: parse_utc(
+                &row.get::<_, String>(10).context("valid_from")?,
+                "valid_from",
+            )?,
+            valid_until: row
+                .get::<_, Option<String>>(11)
+                .context("valid_until")?
+                .map(|s| parse_utc(&s, "valid_until"))
+                .transpose()?,
+            source_snapshot_id: SourceSnapshotId(row.get(9).context("source_snapshot_id")?),
+        };
+        Ok(CanonicalAirport {
+            id: AirportId(id),
+            ident: row.get(1).context("ident")?,
+            name: row.get(2).context("name")?,
+            airport_type: row.get(3).context("airport_type")?,
+            latitude: row.get(4).context("latitude")?,
+            longitude: row.get(5).context("longitude")?,
+            elevation_ft: row.get(6).context("elevation_ft")?,
+            iso_country: row.get(7).context("iso_country")?,
+            municipality: row.get(8).context("municipality")?,
+            runways: Vec::new(),
+            temporal,
+        })
+    })?;
+
+    let mut airports = Vec::new();
+    for row in rows {
+        let mut airport = row?;
+        airport.runways = query_runways_conn(conn, date, Some(&airport.id))?;
+        airports.push(airport);
+    }
+    Ok(airports)
+}
+
+/// Navaids valid at `date`.
+pub fn query_navaids_at_conn(
+    conn: &Connection,
+    date: DateTime<Utc>,
+) -> Result<Vec<CanonicalNavaid>> {
+    let date_str = rfc3339(date);
+    let mut stmt = conn.prepare(&format!(
+        "SELECT id, ident, name, navaid_type, frequency_khz, latitude_deg,
+                longitude_deg, elevation_ft, region, associated_airport,
+                magnetic_variation_deg, slaved_variation_deg,
+                service_volume_nm, dme_paired, associated_runway,
+                localizer_bearing_true_deg, localizer_bearing_mag_deg,
+                glideslope_angle_deg, source_snapshot_id, valid_from,
+                valid_until
+         FROM navaids WHERE {VALID_FROM_LE} AND {VALID_UNTIL_GT};"
+    ))?;
+
+    let rows = stmt.query_and_then(params![date_str], |row| -> Result<CanonicalNavaid> {
+        let id: String = row.get(0).context("navaids.id")?;
+        let type_str: String = row.get(3).context("navaid_type")?;
+        // Fail closed: an unknown stored navaid type is a data defect,
+        // never silently reinterpreted.
+        let kind = NavaidKind::parse(&type_str)
+            .ok_or_else(|| anyhow!("navaid '{id}' has unknown navaid_type '{type_str}'"))?;
+        Ok(CanonicalNavaid {
+            object_id: NavaidId(id),
+            ident: row.get(1).context("ident")?,
+            name: row.get(2).context("name")?,
+            kind,
+            frequency: FrequencyKhz(row.get(4).context("frequency_khz")?),
+            latitude: row.get(5).context("latitude")?,
+            longitude: row.get(6).context("longitude")?,
+            elevation_ft: row
+                .get::<_, Option<f64>>(7)
+                .context("elevation_ft")?
+                .map(|e| e.round() as i32),
+            region_code: row.get(8).context("region")?,
+            associated_airport: row.get(9).context("associated_airport")?,
+            magnetic_variation_deg: row.get(10).context("magnetic_variation_deg")?,
+            slaved_variation_deg: row.get(11).context("slaved_variation_deg")?,
+            service_volume_nm: row.get(12).context("service_volume_nm")?,
+            dme_paired: row.get::<_, i64>(13).context("dme_paired")? != 0,
+            associated_runway: row.get(14).context("associated_runway")?,
+            localizer_bearing_true_deg: row.get(15).context("localizer_bearing_true_deg")?,
+            localizer_bearing_mag_deg: row.get(16).context("localizer_bearing_mag_deg")?,
+            glideslope_angle_deg: row.get(17).context("glideslope_angle_deg")?,
+            temporal: TemporalValidity {
+                valid_from: parse_utc(
+                    &row.get::<_, String>(19).context("valid_from")?,
+                    "valid_from",
+                )?,
+                valid_until: row
+                    .get::<_, Option<String>>(20)
+                    .context("valid_until")?
+                    .map(|s| parse_utc(&s, "valid_until"))
+                    .transpose()?,
+                source_snapshot_id: SourceSnapshotId(row.get(18).context("source_snapshot_id")?),
+            },
+        })
+    })?;
+
+    let mut navaids: Vec<CanonicalNavaid> = Vec::new();
+    for row in rows {
+        navaids.push(row?);
+    }
+    Ok(navaids)
+}
+
+/// Waypoints valid at `date`.
+pub fn query_waypoints_at_conn(
+    conn: &Connection,
+    date: DateTime<Utc>,
+) -> Result<Vec<CanonicalWaypoint>> {
+    let date_str = rfc3339(date);
+    let mut stmt = conn.prepare(&format!(
+        "SELECT id, ident, name, latitude_deg, longitude_deg, region, is_enroute,
+                waypoint_type, terminal_area_ident, source_snapshot_id,
+                valid_from, valid_until
+         FROM waypoints WHERE {VALID_FROM_LE} AND {VALID_UNTIL_GT};"
+    ))?;
+
+    let rows = stmt.query_and_then(params![date_str], |row| -> Result<CanonicalWaypoint> {
+        let id: String = row.get(0).context("waypoints.id")?;
+        Ok(CanonicalWaypoint {
+            object_id: WaypointId(id),
+            ident: row.get(1).context("ident")?,
+            name: row.get(2).context("name")?,
+            latitude: row.get(3).context("latitude")?,
+            longitude: row.get(4).context("longitude")?,
+            region_code: row
+                .get::<_, Option<String>>(5)
+                .context("region")?
+                .unwrap_or_default(),
+            is_enroute: row.get::<_, i64>(6).context("is_enroute")? != 0,
+            waypoint_type: row
+                .get::<_, Option<i64>>(7)
+                .context("waypoint_type")?
+                .map(|v| v as u32),
+            terminal_area_ident: row.get(8).context("terminal_area_ident")?,
+            temporal: TemporalValidity {
+                valid_from: parse_utc(
+                    &row.get::<_, String>(10).context("valid_from")?,
+                    "valid_from",
+                )?,
+                valid_until: row
+                    .get::<_, Option<String>>(11)
+                    .context("valid_until")?
+                    .map(|s| parse_utc(&s, "valid_until"))
+                    .transpose()?,
+                source_snapshot_id: SourceSnapshotId(row.get(9).context("source_snapshot_id")?),
+            },
+        })
+    })?;
+
+    let mut waypoints = Vec::new();
+    for row in rows {
+        waypoints.push(row?);
+    }
+    Ok(waypoints)
 }
 
 /// Query airway legs valid at a given UTC instant, ordered by route.
@@ -3455,5 +3882,198 @@ mod tests {
             .transact(|conn| close_entity_at(conn, EntityTable::Airports, "faa:A", t1))
             .unwrap();
         assert!(!again);
+    }
+
+    #[test]
+    fn test_rollback_cycle_classes_and_isolation() {
+        let mut store = WorldStore::open_in_memory().unwrap();
+        let t0 = Utc::now();
+        let t1 = t0 + Duration::from_secs(3600); // 2607 effective
+        let t15 = t1 + Duration::from_secs(1800); // provider B update inside 2608 window
+        let t2 = t1 + Duration::from_secs(3600); // 2608 effective
+        let t3 = t2 + Duration::from_secs(3600); // rollback instant
+
+        // Snapshots: two FAA_CIFP cycles + OurAirports provider B.
+        let mut snap_a = snapshot("snap-2607");
+        snap_a.provider = "FAA_CIFP".to_string();
+        snap_a.dataset = "FAACIFP18".to_string();
+        let mut snap_b = snapshot("snap-2608");
+        snap_b.provider = "FAA_CIFP".to_string();
+        snap_b.dataset = "FAACIFP18".to_string();
+        let mut snap_b_oa = snapshot("snap-B");
+        snap_b_oa.provider = "OurAirports".to_string();
+        snap_b_oa.dataset = "navaids".to_string();
+        for snap in [&snap_a, &snap_b, &snap_b_oa] {
+            store.insert_source_snapshot(snap).unwrap();
+        }
+        store
+            .insert_cycle(&cycle("2607", Some(t1), CycleStatus::Superseded))
+            .unwrap();
+        store
+            .insert_cycle(&cycle("2608", Some(t2), CycleStatus::Active))
+            .unwrap();
+        store
+            .insert_cycle_snapshot(&CycleId("2608".into()), &snap_b.id)
+            .unwrap();
+
+        let wp = |id: &str, lat: f64, vf: DateTime<Utc>, snap: &str| CanonicalWaypoint {
+            object_id: WaypointId(id.to_string()),
+            ident: id.to_string(),
+            name: id.to_string(),
+            latitude: lat,
+            longitude: -100.0,
+            is_enroute: true,
+            region_code: "K2".to_string(),
+            terminal_area_ident: None,
+            waypoint_type: Some(0x202057),
+            temporal: TemporalValidity {
+                valid_from: vf,
+                valid_until: None,
+                source_snapshot_id: SourceSnapshotId(snap.to_string()),
+            },
+        };
+
+        // 2607 world (namespace faa).
+        store
+            .insert_waypoint(&wp("faa:WP_CHG", 10.0, t1, "snap-2607"))
+            .unwrap();
+        store
+            .insert_waypoint(&wp("faa:WP_REM", 11.0, t1, "snap-2607"))
+            .unwrap();
+        store
+            .insert_waypoint(&wp("faa:WP_KEEP", 12.0, t1, "snap-2607"))
+            .unwrap();
+        // Provider B updates its own namespace during 2608's window.
+        store
+            .insert_waypoint(&wp("ourairports:WP_B", 50.0, t0, "snap-B"))
+            .unwrap();
+        store
+            .insert_waypoint(&wp("ourairports:WP_B", 51.0, t15, "snap-B"))
+            .unwrap();
+
+        // 2608: CHG revised, ADD introduced, REM gone from the snapshot.
+        store
+            .insert_waypoint(&wp("faa:WP_CHG", 20.0, t2, "snap-2608"))
+            .unwrap();
+        store
+            .insert_waypoint(&wp("faa:WP_ADD", 21.0, t2, "snap-2608"))
+            .unwrap();
+        store
+            .transact(|conn| {
+                close_absent_at(
+                    conn,
+                    EntityTable::Waypoints,
+                    "faa",
+                    t2,
+                    &[
+                        "faa:WP_CHG".to_string(),
+                        "faa:WP_KEEP".to_string(),
+                        "faa:WP_ADD".to_string(),
+                    ],
+                )
+            })
+            .unwrap();
+
+        // Sanity: the 2608 world is as expected.
+        let at_2608 = store
+            .query_waypoints_at(t2 + Duration::from_secs(60))
+            .unwrap();
+        assert!(
+            at_2608
+                .iter()
+                .any(|w| w.ident == "faa:WP_CHG" && w.latitude == 20.0)
+        );
+        assert!(!at_2608.iter().any(|w| w.ident == "faa:WP_REM"));
+
+        let report = store.rollback_cycle(&CycleId("2608".into()), t3).unwrap();
+        assert!(!report.noop);
+        assert_eq!(report.restored_cycle_id, Some(CycleId("2607".into())));
+        assert_eq!(report.added_closed, 1); // WP_ADD
+        assert_eq!(report.changed_republished, 1); // WP_CHG
+        assert_eq!(report.removed_republished, 1); // WP_REM
+
+        // Post-rollback world: 2607 state, not the 2608 state.
+        let after = store.query_waypoints_at(t3).unwrap();
+        assert!(
+            after
+                .iter()
+                .any(|w| w.ident == "faa:WP_CHG" && w.latitude == 10.0)
+        );
+        assert!(after.iter().any(|w| w.ident == "faa:WP_REM"));
+        assert!(!after.iter().any(|w| w.ident == "faa:WP_ADD"));
+        assert!(after.iter().any(|w| w.ident == "faa:WP_KEEP"));
+        // Isolation: provider B's mid-window update is untouched.
+        let wp_b = after
+            .iter()
+            .find(|w| w.ident == "ourairports:WP_B")
+            .unwrap();
+        assert_eq!(wp_b.latitude, 51.0);
+        assert_eq!(wp_b.temporal.valid_from, t15);
+
+        // History before the rollback instant is unchanged.
+        let historic = store
+            .query_waypoints_at(t2 + Duration::from_secs(60))
+            .unwrap();
+        assert!(
+            historic
+                .iter()
+                .any(|w| w.ident == "faa:WP_CHG" && w.latitude == 20.0)
+        );
+
+        // Provenance equality: republished rows keep the historical
+        // snapshot id, and no observations are fabricated for them.
+        let prov: String = store
+            .conn
+            .query_row(
+                "SELECT source_snapshot_id FROM waypoints WHERE id = 'faa:WP_CHG' AND valid_from = ?1",
+                params![t3.to_rfc3339()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(prov, "snap-2607");
+        let obs: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM entity_observations WHERE entity_id = 'faa:WP_CHG' AND valid_from = ?1",
+                params![t3.to_rfc3339()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(obs, 0);
+
+        // Journal + status.
+        assert!(
+            store
+                .query_cycle_events()
+                .unwrap()
+                .iter()
+                .any(|e| e.kind == CycleEventKind::Rollback
+                    && e.cycle_id.0 == "2608"
+                    && e.restored_cycle_id.as_ref().map(|c| c.0.as_str()) == Some("2607"))
+        );
+        assert_eq!(
+            store
+                .query_cycle(&CycleId("2608".into()))
+                .unwrap()
+                .unwrap()
+                .status,
+            CycleStatus::RolledBack
+        );
+
+        // Idempotent: a second rollback is a no-op.
+        let second = store.rollback_cycle(&CycleId("2608".into()), t3).unwrap();
+        assert!(second.noop);
+    }
+
+    #[test]
+    fn test_rollback_requires_active_cycle() {
+        let mut store = WorldStore::open_in_memory().unwrap();
+        store
+            .insert_cycle(&cycle("2608", Some(Utc::now()), CycleStatus::Discovered))
+            .unwrap();
+        let err = store
+            .rollback_cycle(&CycleId("2608".into()), Utc::now())
+            .unwrap_err();
+        assert!(err.to_string().contains("only an Active cycle"), "{err}");
     }
 }

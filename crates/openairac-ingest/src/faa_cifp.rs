@@ -45,6 +45,7 @@ use chrono::{DateTime, Utc};
 use openairac_model::*;
 use openairac_store::WorldStore;
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
 
 // ---------------------------------------------------------------------------
 // Layer 1: fixed-width decoding
@@ -302,6 +303,8 @@ pub enum CifpRecord {
         record_type: String,
         section: char,
         subsection: char,
+        /// Kind discriminator for polymorphic P-blank records (col 13).
+        kind: char,
         reason: &'static str,
         raw: String,
     },
@@ -319,6 +322,7 @@ pub fn decode_line(line: &str) -> Result<CifpRecord> {
             record_type: record_type.clone(),
             section,
             subsection,
+            kind: cifp.field(13, 13).chars().next().unwrap_or(' '),
             reason,
             raw: line.to_string(),
         })
@@ -674,7 +678,13 @@ pub enum CifpInterpretation {
     Navaid(CanonicalNavaid),
     AirwayLeg(CanonicalAirwayLeg),
     ProcedureLeg(CanonicalProcedureLeg),
-    Unsupported { reason: String, raw: String },
+    Unsupported {
+        reason: String,
+        raw: String,
+        section: char,
+        subsection: char,
+        kind: char,
+    },
 }
 
 fn navaid_kind_from_class(class: &str) -> Option<NavaidKind> {
@@ -785,6 +795,9 @@ pub fn interpret(
                 return vec![CifpInterpretation::Unsupported {
                     reason: format!("unrecognized navaid class '{class}'"),
                     raw: record_to_raw(record),
+                    section: 'D',
+                    subsection: ' ',
+                    kind: ' ',
                 }];
             };
             let associated_airport = (!airport_ident.is_empty()).then(|| airport_ident.clone());
@@ -896,6 +909,9 @@ pub fn interpret(
         CifpRecord::Airway { .. } => vec![CifpInterpretation::Unsupported {
             reason: "airway segment (chained by the scanner)".to_string(),
             raw: record_to_raw(record),
+            section: 'E',
+            subsection: 'R',
+            kind: ' ',
         }],
         CifpRecord::ProcedureLeg {
             record_type,
@@ -963,9 +979,19 @@ pub fn interpret(
             raw: raw.clone(),
             temporal,
         })],
-        CifpRecord::Unsupported { reason, raw, .. } => vec![CifpInterpretation::Unsupported {
+        CifpRecord::Unsupported {
+            reason,
+            raw,
+            section,
+            subsection,
+            kind,
+            ..
+        } => vec![CifpInterpretation::Unsupported {
             reason: reason.to_string(),
             raw: raw.clone(),
+            section: *section,
+            subsection: *subsection,
+            kind: *kind,
         }],
     }
 }
@@ -996,6 +1022,10 @@ pub struct CifpScanReport {
     pub unsupported_records: usize,
     pub decode_errors: usize,
     pub unsupported_reasons: Vec<String>,
+    /// Structured (section, subsection, kind) of unsupported record
+    /// classes — the basis for close_absent masking (a parser failure
+    /// must never silently become a source deletion).
+    pub unsupported_classes: Vec<(char, char, char)>,
 }
 
 pub struct FaaCifpAdapter;
@@ -1107,8 +1137,15 @@ impl FaaCifpAdapter {
                                 report.procedure_legs_decoded += 1;
                                 procedure_legs.push(leg);
                             }
-                            CifpInterpretation::Unsupported { reason, raw } => {
+                            CifpInterpretation::Unsupported {
+                                reason,
+                                raw,
+                                section,
+                                subsection,
+                                kind,
+                            } => {
                                 report.unsupported_records += 1;
+                                report.unsupported_classes.push((section, subsection, kind));
                                 if report.unsupported_reasons.len() < 1000 {
                                     report
                                         .unsupported_reasons
@@ -1145,19 +1182,7 @@ impl FaaCifpAdapter {
             Self::parse_cifp_content(content, snapshot_id, valid_from);
 
         store.transact(|conn| {
-            for wp in &waypoints {
-                openairac_store::insert_waypoint_conn(conn, wp)?;
-            }
-            for nav in &navaids {
-                openairac_store::insert_navaid_conn(conn, nav)?;
-            }
-            for leg in &airway_legs {
-                openairac_store::insert_airway_leg_conn(conn, leg)?;
-            }
-            for leg in &procedure_legs {
-                openairac_store::insert_procedure_leg_conn(conn, leg)?;
-            }
-            Ok(())
+            insert_cifp_entities_conn(conn, &waypoints, &navaids, &airway_legs, &procedure_legs)
         })?;
 
         Ok(report)
@@ -1166,6 +1191,94 @@ impl FaaCifpAdapter {
 
 /// Documented FAA CIFP download directory.
 pub const FAA_CIFP_BASE_URL: &str = "https://aeronav.faa.gov/Upload_313-d/cifp";
+
+/// Insert decoded CIFP entities into the store (connection-level,
+/// shared by the direct adapter and the provider orchestration).
+pub fn insert_cifp_entities_conn(
+    conn: &rusqlite::Connection,
+    waypoints: &[CanonicalWaypoint],
+    navaids: &[CanonicalNavaid],
+    airway_legs: &[CanonicalAirwayLeg],
+    procedure_legs: &[CanonicalProcedureLeg],
+) -> Result<()> {
+    for wp in waypoints {
+        openairac_store::insert_waypoint_conn(conn, wp)?;
+    }
+    for nav in navaids {
+        openairac_store::insert_navaid_conn(conn, nav)?;
+    }
+    for leg in airway_legs {
+        openairac_store::insert_airway_leg_conn(conn, leg)?;
+    }
+    for leg in procedure_legs {
+        openairac_store::insert_procedure_leg_conn(conn, leg)?;
+    }
+    Ok(())
+}
+
+/// CIFP entity tables eligible for full-snapshot close semantics.
+pub const CIFP_ENTITY_TABLES: [openairac_store::EntityTable; 4] = [
+    openairac_store::EntityTable::Waypoints,
+    openairac_store::EntityTable::Navaids,
+    openairac_store::EntityTable::AirwayLegs,
+    openairac_store::EntityTable::ProcedureLegs,
+];
+
+/// Which CIFP entity tables must SKIP full-snapshot close semantics for
+/// this publication, because unsupported/undecodable records could mask a
+/// removal (a parser failure must never silently become a source
+/// deletion). Terminal airports (PA) and runways (PG) are known-inert:
+/// they never map to CIFP entity tables.
+pub fn masked_tables(scan: &CifpScanReport) -> BTreeSet<openairac_store::EntityTable> {
+    use openairac_store::EntityTable;
+    let mut masked = BTreeSet::new();
+    if scan.decode_errors > 0 {
+        masked.insert(EntityTable::Waypoints);
+        masked.insert(EntityTable::Navaids);
+        masked.insert(EntityTable::AirwayLegs);
+        masked.insert(EntityTable::ProcedureLegs);
+    }
+    for &(section, subsection, kind) in &scan.unsupported_classes {
+        match (section, subsection, kind) {
+            // Terminal airports/runways: never entity rows in our tables.
+            ('P', ' ', 'A') | ('P', ' ', 'G') => {}
+            // Terminal NDBs map to navaids.
+            ('P', 'N', _) => {
+                masked.insert(EntityTable::Navaids);
+            }
+            // Terminal waypoints.
+            ('P', ' ', 'C') => {
+                masked.insert(EntityTable::Waypoints);
+            }
+            // Procedure legs.
+            ('P', ' ', 'D' | 'E' | 'F') => {
+                masked.insert(EntityTable::ProcedureLegs);
+            }
+            // Unknown P-blank kind: could be waypoint- or leg-shaped.
+            ('P', ' ', _) => {
+                masked.insert(EntityTable::Waypoints);
+                masked.insert(EntityTable::ProcedureLegs);
+            }
+            ('P', _, _) => {
+                masked.insert(EntityTable::Waypoints);
+                masked.insert(EntityTable::ProcedureLegs);
+            }
+            // Enroute-section records could be waypoints or airway legs.
+            ('E', _, _) => {
+                masked.insert(EntityTable::Waypoints);
+                masked.insert(EntityTable::AirwayLegs);
+            }
+            // Navaid sections.
+            ('D', _, _) | ('B', _, _) => {
+                masked.insert(EntityTable::Navaids);
+            }
+            // Holds, MSAs, airports, runways, unknown sections: never map
+            // to CIFP entity tables.
+            _ => {}
+        }
+    }
+    masked
+}
 
 /// The FAA CIFP as a cycle-aware [`DataProvider`].
 ///
@@ -1260,8 +1373,98 @@ impl crate::provider::DataProvider for CifpProvider {
         };
         store.insert_source_snapshot(&snapshot)?;
 
-        let scan =
-            FaaCifpAdapter::ingest_cifp(&dataset.raw_content, &snapshot_id, valid_from, store)?;
+        // The catalog is the authority on the cycle: cross-check the
+        // confirmed effective date (defense in depth behind the CLI).
+        let cycle_id = CycleId(cycle.clone());
+        let catalog = store.query_cycle(&cycle_id)?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "cycle '{cycle}' is not in the catalog; run `openairac cycle discover` first"
+            )
+        })?;
+        match catalog.effective_from {
+            Some(e) if e == valid_from => {}
+            Some(e) => {
+                anyhow::bail!(
+                    "catalog effective_from {e} does not match dataset valid_from {valid_from}"
+                );
+            }
+            None => {
+                anyhow::bail!("cycle '{cycle}' has UNCONFIRMED effective dates; cannot ingest");
+            }
+        }
+
+        let (waypoints, navaids, airway_legs, procedure_legs, scan) =
+            FaaCifpAdapter::parse_cifp_content(&dataset.raw_content, &snapshot_id, valid_from);
+
+        // Full-snapshot removal semantics: build the per-table seen sets
+        // from EVERY identified record (decoded entities). Unsupported
+        // classes that could mask a removal are computed structurally.
+        let masked = masked_tables(&scan);
+        let mut seen: BTreeMap<openairac_store::EntityTable, Vec<String>> = BTreeMap::new();
+        let mut push = |table: openairac_store::EntityTable, ids: Vec<String>| {
+            seen.insert(table, ids);
+        };
+        push(
+            openairac_store::EntityTable::Waypoints,
+            waypoints.iter().map(|w| w.object_id.0.clone()).collect(),
+        );
+        push(
+            openairac_store::EntityTable::Navaids,
+            navaids.iter().map(|n| n.object_id.0.clone()).collect(),
+        );
+        push(
+            openairac_store::EntityTable::AirwayLegs,
+            airway_legs.iter().map(|l| l.object_id.0.clone()).collect(),
+        );
+        push(
+            openairac_store::EntityTable::ProcedureLegs,
+            procedure_legs
+                .iter()
+                .map(|l| l.object_id.0.clone())
+                .collect(),
+        );
+
+        let start = std::time::Instant::now();
+        let mut closed_rows = 0usize;
+        store.transact(|conn| {
+            insert_cifp_entities_conn(conn, &waypoints, &navaids, &airway_legs, &procedure_legs)?;
+            if dataset.coverage == crate::provider::Coverage::FullSnapshot {
+                for table in CIFP_ENTITY_TABLES {
+                    if masked.contains(&table) {
+                        continue;
+                    }
+                    let seen_ids = seen.get(&table).cloned().unwrap_or_default();
+                    closed_rows += openairac_store::close_absent_at(
+                        conn, table, "faa", valid_from, &seen_ids,
+                    )?;
+                }
+            }
+            // Cycle bookkeeping: link the snapshot, record the schedule
+            // intent once, advance Discovered -> Preloaded.
+            openairac_store::insert_cycle_snapshot_conn(conn, &cycle_id, &snapshot_id)?;
+            if !openairac_store::has_cycle_event_conn(conn, &cycle_id, CycleEventKind::Scheduled)? {
+                openairac_store::record_cycle_event_conn(
+                    conn,
+                    &CycleEvent {
+                        id: 0,
+                        at: Utc::now(),
+                        kind: CycleEventKind::Scheduled,
+                        cycle_id: cycle_id.clone(),
+                        restored_cycle_id: None,
+                        notes: Some(format!("ingested {}", dataset.content_sha256)),
+                    },
+                )?;
+            }
+            if catalog.status == CycleStatus::Discovered {
+                openairac_store::set_cycle_status_conn(
+                    conn,
+                    &cycle_id,
+                    CycleStatus::Preloaded,
+                    Utc::now(),
+                )?;
+            }
+            Ok(())
+        })?;
 
         let mut report = IngestReport::new("FAA_CIFP", "FAACIFP18", &dataset.content_sha256);
         report.records_seen = scan.lines_seen;
@@ -1281,10 +1484,35 @@ impl crate::provider::DataProvider for CifpProvider {
         report.records_rejected = scan.decode_errors;
         report.records_quarantined = scan.unsupported_records;
         report.warnings = scan.unsupported_reasons;
-        // The fixed-width decoder identifies every record it rejects by
-        // record type at minimum; entity-level identification for
-        // close_absent semantics is wired with the full-snapshot ingest.
-        report.unidentifiable_rejections = 0;
+        // Rejections that mask close_absent semantics: decode failures
+        // and unsupported classes mapping to entity tables.
+        report.unidentifiable_rejections = scan.decode_errors
+            + scan
+                .unsupported_classes
+                .iter()
+                .filter(|c| !matches!(c, ('P', ' ', 'A') | ('P', ' ', 'G')))
+                .count();
+        if dataset.coverage == crate::provider::Coverage::FullSnapshot {
+            for table in CIFP_ENTITY_TABLES {
+                if masked.contains(&table) {
+                    report.warnings.push(format!(
+                        "full-snapshot close skipped for {}: unsupported record classes could mask removals",
+                        table.as_str()
+                    ));
+                } else if seen.get(&table).map(|v| v.len()).unwrap_or(0) == 0 && closed_rows == 0 {
+                    report.warnings.push(format!(
+                        "full-snapshot close for {} had an empty seen set",
+                        table.as_str()
+                    ));
+                }
+            }
+        }
+        if closed_rows > 0 {
+            report.warnings.push(format!(
+                "{closed_rows} entity row(s) closed as absent from the snapshot"
+            ));
+        }
+        report.duration_ms = start.elapsed().as_millis() as u64;
         Ok(report)
     }
 }
@@ -1865,6 +2093,20 @@ mod tests {
         };
         let mut provider_store = WorldStore::open_in_memory().unwrap();
         provider_store.migrate().unwrap();
+        // The provider path requires the cycle in the catalog with a
+        // confirmed effective date matching the dataset valid_from.
+        provider_store
+            .insert_cycle(&AiracCycle {
+                id: CycleId("2608".to_string()),
+                effective_from: Some(vf),
+                effective_until: None,
+                status: CycleStatus::Discovered,
+                source_uri: Some("fixture".to_string()),
+                created_at: vf,
+                updated_at: vf,
+                notes: None,
+            })
+            .unwrap();
         let provider = CifpProvider;
         let report = crate::provider::DataProvider::parse_and_ingest(
             &provider,
@@ -1872,6 +2114,30 @@ mod tests {
             &mut provider_store,
         )
         .unwrap();
+
+        // Bookkeeping: snapshot linked, Scheduled recorded, Preloaded.
+        assert_eq!(
+            provider_store
+                .cycle_snapshot_ids(&CycleId("2608".to_string()))
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            provider_store
+                .query_cycle_events()
+                .unwrap()
+                .iter()
+                .any(|e| e.kind == CycleEventKind::Scheduled)
+        );
+        assert_eq!(
+            provider_store
+                .query_cycle(&CycleId("2608".to_string()))
+                .unwrap()
+                .unwrap()
+                .status,
+            CycleStatus::Preloaded
+        );
 
         assert_eq!(
             report.kind_counts.get("waypoints").copied(),
@@ -1903,5 +2169,233 @@ mod tests {
                 scan.airway_legs_decoded
             );
         }
+    }
+
+    fn catalog_cycle(id: &str, eff: DateTime<Utc>, status: CycleStatus) -> AiracCycle {
+        AiracCycle {
+            id: CycleId(id.to_string()),
+            effective_from: Some(eff),
+            effective_until: None,
+            status,
+            source_uri: Some("fixture".to_string()),
+            created_at: eff,
+            updated_at: eff,
+            notes: None,
+        }
+    }
+
+    fn cifp_dataset(
+        content: &str,
+        cycle: &str,
+        vf: DateTime<Utc>,
+    ) -> crate::provider::FetchedDataset {
+        crate::provider::FetchedDataset {
+            provider_name: "FAA_CIFP".to_string(),
+            dataset_name: "FAACIFP18".to_string(),
+            source_uri: "fixture".to_string(),
+            content_sha256: crate::provider::sha256_hex(content.as_bytes()),
+            retrieved_at: vf,
+            provider_revision: Some(cycle.to_string()),
+            airac_cycle: Some(cycle.to_string()),
+            revision_kind: crate::provider::RevisionKind::Baseline,
+            coverage: crate::provider::Coverage::FullSnapshot,
+            valid_from: Some(vf),
+            raw_content: content.to_string(),
+        }
+    }
+
+    #[test]
+    fn test_cifp_ingest_full_snapshot_closes_absent_waypoint() {
+        let t0 = Utc::now();
+        let eff = t0 + chrono::TimeDelta::seconds(3600);
+        let mut store = WorldStore::open_in_memory().unwrap();
+        store.migrate().unwrap();
+        store
+            .insert_cycle(&catalog_cycle("2608", eff, CycleStatus::Discovered))
+            .unwrap();
+        store
+            .insert_source_snapshot(&SourceSnapshot {
+                id: SourceSnapshotId("snap-old".to_string()),
+                provider: "FAA_CIFP".to_string(),
+                dataset: "FAACIFP18".to_string(),
+                provider_revision: Some("2607".to_string()),
+                airac_cycle: Some("2607".to_string()),
+                effective_from: Some(t0),
+                effective_until: None,
+                retrieved_at: t0,
+                source_uri: "fixture".to_string(),
+                content_sha256: "0".repeat(64),
+                license_id: None,
+                license_notes: None,
+                parser_version: "test".to_string(),
+            })
+            .unwrap();
+
+        // A waypoint from the previous cycle that vanishes in 2608.
+        let old_wp = CanonicalWaypoint {
+            object_id: WaypointId("faa:SUSA:K :OLDWP".to_string()),
+            ident: "OLDWP".to_string(),
+            name: "OLDWP".to_string(),
+            latitude: 30.0,
+            longitude: -80.0,
+            is_enroute: true,
+            region_code: "K ".to_string(),
+            terminal_area_ident: None,
+            waypoint_type: Some(0x202057),
+            temporal: TemporalValidity {
+                valid_from: t0,
+                valid_until: None,
+                source_snapshot_id: SourceSnapshotId("snap-old".to_string()),
+            },
+        };
+        store
+            .transact(|conn| openairac_store::insert_waypoint_conn(conn, &old_wp))
+            .unwrap();
+
+        let provider = CifpProvider;
+        let report = crate::provider::DataProvider::parse_and_ingest(
+            &provider,
+            &cifp_dataset(EA_AAARG, "2608", eff),
+            &mut store,
+        )
+        .unwrap();
+
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.contains("closed as absent")),
+            "{:?}",
+            report.warnings
+        );
+        // OLDWP closed at eff; AAARG present.
+        let at_eff = store.query_waypoints_at(eff).unwrap();
+        assert!(at_eff.iter().any(|w| w.ident == "AAARG"));
+        assert!(!at_eff.iter().any(|w| w.ident == "OLDWP"));
+        // History intact before eff.
+        let before = store
+            .query_waypoints_at(openairac_store::just_before(eff))
+            .unwrap();
+        assert!(before.iter().any(|w| w.ident == "OLDWP"));
+    }
+
+    #[test]
+    fn test_cifp_ingest_masked_skip_keeps_entities() {
+        let t0 = Utc::now();
+        let eff = t0 + chrono::TimeDelta::seconds(3600);
+        let mut store = WorldStore::open_in_memory().unwrap();
+        store.migrate().unwrap();
+        store
+            .insert_cycle(&catalog_cycle("2608", eff, CycleStatus::Discovered))
+            .unwrap();
+        store
+            .insert_source_snapshot(&SourceSnapshot {
+                id: SourceSnapshotId("snap-old".to_string()),
+                provider: "FAA_CIFP".to_string(),
+                dataset: "FAACIFP18".to_string(),
+                provider_revision: Some("2607".to_string()),
+                airac_cycle: Some("2607".to_string()),
+                effective_from: Some(t0),
+                effective_until: None,
+                retrieved_at: t0,
+                source_uri: "fixture".to_string(),
+                content_sha256: "0".repeat(64),
+                license_id: None,
+                license_notes: None,
+                parser_version: "test".to_string(),
+            })
+            .unwrap();
+
+        let old_wp = CanonicalWaypoint {
+            object_id: WaypointId("faa:SUSA:K :OLDWP".to_string()),
+            ident: "OLDWP".to_string(),
+            name: "OLDWP".to_string(),
+            latitude: 30.0,
+            longitude: -80.0,
+            is_enroute: true,
+            region_code: "K ".to_string(),
+            terminal_area_ident: None,
+            waypoint_type: Some(0x202057),
+            temporal: TemporalValidity {
+                valid_from: t0,
+                valid_until: None,
+                source_snapshot_id: SourceSnapshotId("snap-old".to_string()),
+            },
+        };
+        store
+            .transact(|conn| openairac_store::insert_waypoint_conn(conn, &old_wp))
+            .unwrap();
+
+        // A polymorphic P-blank record with unknown kind 'Z': unsupported
+        // and waypoint/leg-shaped -> masks close_absent for those tables.
+        let mut pz_line: Vec<char> = PA_AIRPORT.chars().collect();
+        pz_line[12] = 'Z';
+        let content = format!("{EA_AAARG}\n{}\n", pz_line.iter().collect::<String>());
+
+        let provider = CifpProvider;
+        let report = crate::provider::DataProvider::parse_and_ingest(
+            &provider,
+            &cifp_dataset(&content, "2608", eff),
+            &mut store,
+        )
+        .unwrap();
+
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.contains("close skipped") && w.contains("waypoints")),
+            "{:?}",
+            report.warnings
+        );
+        assert!(report.unidentifiable_rejections >= 1);
+        // Fail-closed: the old waypoint must NOT have been deleted by a
+        // publication whose parsing could not account for every record.
+        let at_eff = store.query_waypoints_at(eff).unwrap();
+        assert!(at_eff.iter().any(|w| w.ident == "OLDWP"));
+    }
+
+    #[test]
+    fn test_cifp_ingest_rejects_catalog_mismatch() {
+        let t0 = Utc::now();
+        let eff = t0 + chrono::TimeDelta::seconds(3600);
+        let mut store = WorldStore::open_in_memory().unwrap();
+        store.migrate().unwrap();
+        store
+            .insert_cycle(&catalog_cycle("2608", eff, CycleStatus::Discovered))
+            .unwrap();
+
+        let provider = CifpProvider;
+        // valid_from != catalog effective_from.
+        let err = crate::provider::DataProvider::parse_and_ingest(
+            &provider,
+            &cifp_dataset(EA_AAARG, "2608", eff + chrono::TimeDelta::seconds(1)),
+            &mut store,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("does not match"), "{err}");
+
+        // Unconfirmed catalog cycle.
+        let mut store2 = WorldStore::open_in_memory().unwrap();
+        store2.migrate().unwrap();
+        store2
+            .insert_cycle(&AiracCycle {
+                id: CycleId("2608".to_string()),
+                effective_from: None,
+                effective_until: None,
+                status: CycleStatus::Discovered,
+                source_uri: None,
+                created_at: t0,
+                updated_at: t0,
+                notes: None,
+            })
+            .unwrap();
+        let err = crate::provider::DataProvider::parse_and_ingest(
+            &provider,
+            &cifp_dataset(EA_AAARG, "2608", eff),
+            &mut store2,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("UNCONFIRMED"), "{err}");
     }
 }
