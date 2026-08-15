@@ -13,6 +13,25 @@ pub fn sha256_hex(content: &[u8]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+/// Explicit, unambiguous fetch target for cycle-aware providers.
+///
+/// Cycle identity, download location, and the confirmed effective date are
+/// three separate facts and MUST NOT be confused: `cycle_ident` is the
+/// AIRAC ident, `source_uri` is where the file comes from, and
+/// `effective_from` is the confirmed validity start.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CycleSelector {
+    /// AIRAC cycle ident (e.g. `2608`).
+    pub cycle_ident: String,
+    /// Download location: file stem (`CIFP_260806`) or full URL.
+    pub source_uri: String,
+    /// Confirmed effective date. `None` = unconfirmed: cycle-aware
+    /// providers MUST reject the fetch (fail-closed; preloading an
+    /// unconfirmed cycle would make its data effective at an unknown
+    /// instant).
+    pub effective_from: Option<DateTime<Utc>>,
+}
+
 /// Metadata and payload of a fetched raw dataset.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FetchedDataset {
@@ -135,9 +154,9 @@ pub trait DataProvider: Send + Sync {
     fn datasets(&self) -> &'static [&'static str];
 
     /// Fetch one raw dataset over the network (or a documented local
-    /// mirror). `cycle` is a provider-defined selector: AIRAC cycle ident
-    /// for cycle-aware providers, ignored by cycle-less ones.
-    fn fetch(&self, dataset: &str, cycle: Option<&str>) -> Result<FetchedDataset>;
+    /// mirror). `cycle` is `Some` for cycle-aware providers and MUST be
+    /// `None` for cycle-less ones (implementations reject mismatches).
+    fn fetch(&self, dataset: &str, cycle: Option<&CycleSelector>) -> Result<FetchedDataset>;
 
     /// Parse the fetched content and write it into the temporal store as one
     /// transaction.

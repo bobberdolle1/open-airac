@@ -369,8 +369,22 @@ fn main() -> Result<()> {
                             "cycle '{cycle_ident}' is not in the catalog; run `openairac cycle discover --db <db>` first"
                         )
                     })?;
-                let Some(selector) = catalog_cycle.source_uri.as_deref() else {
+                let Some(source_uri) = catalog_cycle.source_uri.as_deref() else {
                     anyhow::bail!("cycle '{cycle_ident}' has no source URI");
+                };
+                // Fail-closed: never sync/preload a cycle whose effective
+                // date is unconfirmed — the data would land at the wrong
+                // instant.
+                let Some(effective_from) = catalog_cycle.effective_from else {
+                    anyhow::bail!(
+                        "cycle '{cycle_ident}' has UNCONFIRMED effective dates; \
+                         confirm them before syncing/preloading"
+                    );
+                };
+                let selector = openairac_ingest::provider::CycleSelector {
+                    cycle_ident: cycle_ident.to_string(),
+                    source_uri: source_uri.to_string(),
+                    effective_from: Some(effective_from),
                 };
                 let provider = openairac_ingest::faa_cifp::CifpProvider;
                 let requested: Vec<String> = datasets
@@ -382,7 +396,7 @@ fn main() -> Result<()> {
                     let dataset = openairac_ingest::provider::DataProvider::fetch(
                         &provider,
                         &dataset_name,
-                        Some(selector),
+                        Some(&selector),
                     )?;
                     println!(
                         "    fetched {} bytes from {}",

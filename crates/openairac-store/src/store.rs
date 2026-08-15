@@ -2112,12 +2112,15 @@ pub fn query_procedure_legs_at(
 
 /// The instant strictly before `t` in the store's RFC3339 representation.
 ///
-/// `rfc3339` serializes timestamps lexicographically ordered by UTC time,
-/// so `t - 1s` compares strictly less than `t`. Use this for every
-/// "world at effective_from − ε" probe; do NOT hand-roll sub-second
-/// arithmetic elsewhere.
+/// One nanosecond — the smallest representable temporal step — so
+/// `just_before(t)` is the latest instant that still compares strictly
+/// less than `t` in the store's string serialization. Correct even at
+/// sub-second boundaries (e.g. a cycle effective at
+/// `09:00:00.000000001` probes the world at `09:00:00.000000000`).
+/// Use this for every "world at effective_from − ε" probe; do NOT
+/// hand-roll epsilon arithmetic elsewhere.
 pub fn just_before(t: DateTime<Utc>) -> DateTime<Utc> {
-    t - chrono::TimeDelta::seconds(1)
+    t - chrono::TimeDelta::nanoseconds(1)
 }
 
 pub fn insert_cycle_conn(conn: &Connection, cycle: &AiracCycle) -> Result<()> {
@@ -2392,6 +2395,43 @@ pub fn latest_dataset_version_conn(
     Ok(None)
 }
 
+/// Entity tables eligible for full-snapshot close semantics. This is the
+/// closed set of names `close_absent_at`/`close_entity_at` accept — an
+/// arbitrary string can never reach SQL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntityTable {
+    Airports,
+    Runways,
+    Navaids,
+    Waypoints,
+    AirwayLegs,
+    ProcedureLegs,
+}
+
+impl EntityTable {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            EntityTable::Airports => "airports",
+            EntityTable::Runways => "runways",
+            EntityTable::Navaids => "navaids",
+            EntityTable::Waypoints => "waypoints",
+            EntityTable::AirwayLegs => "airway_legs",
+            EntityTable::ProcedureLegs => "procedure_legs",
+        }
+    }
+
+    pub fn all() -> &'static [EntityTable] {
+        &[
+            EntityTable::Airports,
+            EntityTable::Runways,
+            EntityTable::Navaids,
+            EntityTable::Waypoints,
+            EntityTable::AirwayLegs,
+            EntityTable::ProcedureLegs,
+        ]
+    }
+}
+
 pub fn insert_entity_alias_conn(
     conn: &Connection,
     table: &str,
@@ -2433,7 +2473,7 @@ pub fn insert_entity_alias_conn(
 /// giant NOT IN list so large datasets stay scalable.
 pub fn close_absent_at(
     conn: &Connection,
-    table: &str,
+    table: EntityTable,
     namespace: &str,
     valid_from: DateTime<Utc>,
     seen_ids: &[String],
@@ -2444,8 +2484,7 @@ pub fn close_absent_at(
     {
         anyhow::bail!("namespace '{namespace}' must be [a-z_]+");
     }
-    // Table names are hardcoded constants, never user input.
-    let _ = table;
+    let table = table.as_str();
     conn.execute_batch("CREATE TEMP TABLE ingest_seen (id TEXT PRIMARY KEY)")?;
     {
         let mut insert = conn.prepare("INSERT OR IGNORE INTO ingest_seen (id) VALUES (?1)")?;
@@ -2478,10 +2517,11 @@ pub fn close_absent_at(
 /// a second call returns false.
 pub fn close_entity_at(
     conn: &Connection,
-    table: &str,
+    table: EntityTable,
     id: &str,
     at: DateTime<Utc>,
 ) -> Result<bool> {
+    let table = table.as_str();
     let closed = conn
         .execute(
             &format!(
@@ -3162,12 +3202,23 @@ mod tests {
 
     #[test]
     fn test_just_before_is_strictly_before() {
+        // Sub-second boundaries: the smallest representable epsilon must
+        // still land strictly before the instant in string form.
         let samples = [
             Utc::now(),
             DateTime::parse_from_rfc3339("2026-08-06T09:00:00Z")
                 .unwrap()
                 .with_timezone(&Utc),
             DateTime::parse_from_rfc3339("2026-08-06T09:00:00.5Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            // One nanosecond after a whole second: the probe must be the
+            // whole second itself, not the previous second.
+            DateTime::parse_from_rfc3339("2026-08-06T09:00:00.000000001Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            // Nanosecond value with trailing-zero elision.
+            DateTime::parse_from_rfc3339("2026-08-06T09:00:00.100000000Z")
                 .unwrap()
                 .with_timezone(&Utc),
         ];
@@ -3178,6 +3229,11 @@ mod tests {
                 rfc3339(before) < rfc3339(t),
                 "rfc3339({before}) < rfc3339({t})"
             );
+            // The probe lands within the same second when t has a
+            // sub-second component (smallest-epsilon property).
+            if t.timestamp_subsec_nanos() > 0 {
+                assert_eq!(before.timestamp(), t.timestamp());
+            }
         }
     }
 
@@ -3330,7 +3386,7 @@ mod tests {
             .transact(|conn| {
                 close_absent_at(
                     conn,
-                    "airports",
+                    EntityTable::Airports,
                     "faa",
                     t1,
                     &["faa:A".to_string(), "faa:E".to_string()],
@@ -3350,7 +3406,7 @@ mod tests {
             .transact(|conn| {
                 close_absent_at(
                     conn,
-                    "airports",
+                    EntityTable::Airports,
                     "faa",
                     t1,
                     &["faa:A".to_string(), "faa:E".to_string()],
@@ -3365,7 +3421,7 @@ mod tests {
             .transact(|conn| {
                 close_absent_at(
                     conn,
-                    "airports",
+                    EntityTable::Airports,
                     "faa",
                     t1,
                     &["faa:A".to_string(), "faa:E".to_string()],
@@ -3388,7 +3444,7 @@ mod tests {
             .unwrap();
 
         let closed = store
-            .transact(|conn| close_entity_at(conn, "airports", "faa:A", t1))
+            .transact(|conn| close_entity_at(conn, EntityTable::Airports, "faa:A", t1))
             .unwrap();
         assert!(closed);
         assert!(store.query_airports_at(t1).unwrap().is_empty());
@@ -3396,7 +3452,7 @@ mod tests {
 
         // Idempotent.
         let again = store
-            .transact(|conn| close_entity_at(conn, "airports", "faa:A", t1))
+            .transact(|conn| close_entity_at(conn, EntityTable::Airports, "faa:A", t1))
             .unwrap();
         assert!(!again);
     }

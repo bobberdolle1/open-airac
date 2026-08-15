@@ -130,7 +130,16 @@ impl DataProvider for OurAirportsProvider {
         &["airports", "runways", "navaids"]
     }
 
-    fn fetch(&self, dataset: &str, _cycle: Option<&str>) -> Result<FetchedDataset> {
+    fn fetch(
+        &self,
+        dataset: &str,
+        cycle: Option<&crate::provider::CycleSelector>,
+    ) -> Result<FetchedDataset> {
+        if cycle.is_some() {
+            return Err(anyhow!(
+                "OurAirports is cycle-less: fetch must not receive a cycle selector"
+            ));
+        }
         let url = match dataset {
             "airports" => AIRPORTS_URL,
             "runways" => RUNWAYS_URL,

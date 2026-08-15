@@ -1167,19 +1167,6 @@ impl FaaCifpAdapter {
 /// Documented FAA CIFP download directory.
 pub const FAA_CIFP_BASE_URL: &str = "https://aeronav.faa.gov/Upload_313-d/cifp";
 
-/// Extract the AIRAC cycle ident from a CIFP file stem
-/// (`CIFP_260806` -> `2608`).
-pub fn cycle_ident_from_stem(selector: &str) -> Option<&str> {
-    let name = selector.rsplit('/').next().unwrap_or(selector);
-    let rest = name.strip_prefix("CIFP_")?;
-    let digits = rest.strip_suffix(".zip").unwrap_or(rest);
-    if digits.len() == 6 && digits.chars().all(|c| c.is_ascii_digit()) {
-        Some(&digits[..4])
-    } else {
-        None
-    }
-}
-
 /// The FAA CIFP as a cycle-aware [`DataProvider`].
 ///
 /// Fetch selector is provider-defined and produced by cycle discovery:
@@ -1198,27 +1185,35 @@ impl crate::provider::DataProvider for CifpProvider {
         &["FAACIFP18"]
     }
 
-    fn fetch(&self, dataset: &str, cycle: Option<&str>) -> Result<crate::provider::FetchedDataset> {
+    fn fetch(
+        &self,
+        dataset: &str,
+        cycle: Option<&crate::provider::CycleSelector>,
+    ) -> Result<crate::provider::FetchedDataset> {
         if dataset != "FAACIFP18" {
             anyhow::bail!("unknown FAA CIFP dataset '{dataset}'");
         }
         let selector = cycle.ok_or_else(|| {
-            anyhow::anyhow!(
-                "FAA CIFP is cycle-aware: fetch requires a cycle selector \
-                 (file stem like CIFP_260806 or a full URL)"
-            )
+            anyhow::anyhow!("FAA CIFP is cycle-aware: fetch requires an explicit CycleSelector")
         })?;
-        let url = if selector.starts_with("http://") || selector.starts_with("https://") {
-            selector.to_string()
+        // Fail-closed: an unconfirmed cycle must never be fetched for
+        // preload — its data would become effective at an unknown instant.
+        let Some(effective_from) = selector.effective_from else {
+            anyhow::bail!(
+                "cycle '{}' has unconfirmed effective dates; confirm the \
+                 effective date before fetching/preloading",
+                selector.cycle_ident
+            );
+        };
+        let uri = &selector.source_uri;
+        let url = if uri.starts_with("http://") || uri.starts_with("https://") {
+            uri.to_string()
         } else {
-            format!("{FAA_CIFP_BASE_URL}/{selector}.zip")
+            format!("{FAA_CIFP_BASE_URL}/{uri}.zip")
         };
         let mut ds = crate::provider::fetch_url("FAA_CIFP", dataset, &url, Utc::now())?;
-        ds.airac_cycle = Some(
-            cycle_ident_from_stem(selector)
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| selector.to_string()),
-        );
+        ds.airac_cycle = Some(selector.cycle_ident.clone());
+        ds.valid_from = Some(effective_from);
         Ok(ds)
     }
 
@@ -1231,8 +1226,18 @@ impl crate::provider::DataProvider for CifpProvider {
         if dataset.dataset_name != "FAACIFP18" {
             anyhow::bail!("unknown FAA CIFP dataset '{}'", dataset.dataset_name);
         }
-        let valid_from = dataset.valid_from.unwrap_or_else(Utc::now);
-        let cycle = dataset.airac_cycle.clone().unwrap_or_default();
+        // Cycle-aware ingest NEVER infers validity from the wall clock:
+        // preloading must land on the confirmed effective_from, or fail.
+        let Some(valid_from) = dataset.valid_from else {
+            anyhow::bail!(
+                "FAA CIFP ingest requires an explicit valid_from (the cycle's \
+                 confirmed effective_from); never inferred from Utc::now()"
+            );
+        };
+        let cycle = dataset
+            .airac_cycle
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("FAA CIFP ingest requires an explicit airac_cycle"))?;
         let snapshot_id = SourceSnapshotId(format!(
             "faa_cifp:{}:{}",
             cycle,
@@ -1753,15 +1758,67 @@ mod tests {
     }
 
     #[test]
-    fn test_cycle_ident_from_stem() {
-        assert_eq!(cycle_ident_from_stem("CIFP_260806"), Some("2608"));
-        assert_eq!(cycle_ident_from_stem("CIFP_260806.zip"), Some("2608"));
-        assert_eq!(
-            cycle_ident_from_stem("https://aeronav.faa.gov/Upload_313-d/cifp/CIFP_260806.zip"),
-            Some("2608")
+    fn test_cifp_fetch_rejects_unconfirmed_cycle() {
+        // No network is touched: the unconfirmed selector is rejected
+        // before any request is built.
+        let selector = crate::provider::CycleSelector {
+            cycle_ident: "2608".to_string(),
+            source_uri: "CIFP_260806".to_string(),
+            effective_from: None,
+        };
+        let provider = CifpProvider;
+        let err = crate::provider::DataProvider::fetch(&provider, "FAACIFP18", Some(&selector))
+            .unwrap_err();
+        assert!(err.to_string().contains("unconfirmed"), "{err}");
+
+        // Missing selector entirely.
+        let err = crate::provider::DataProvider::fetch(&provider, "FAACIFP18", None).unwrap_err();
+        assert!(err.to_string().contains("CycleSelector"), "{err}");
+
+        // Unknown dataset.
+        let confirmed = crate::provider::CycleSelector {
+            cycle_ident: "2608".to_string(),
+            source_uri: "CIFP_260806".to_string(),
+            effective_from: Some(Utc::now()),
+        };
+        let err =
+            crate::provider::DataProvider::fetch(&provider, "nope", Some(&confirmed)).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown FAA CIFP dataset"),
+            "{err}"
         );
-        assert_eq!(cycle_ident_from_stem("CIFP_26XX06"), None);
-        assert_eq!(cycle_ident_from_stem("other"), None);
+    }
+
+    #[test]
+    fn test_cifp_ingest_never_infers_valid_from() {
+        let mut store = WorldStore::open_in_memory().unwrap();
+        store.migrate().unwrap();
+        let content = EA_AAARG.to_string();
+        let dataset = crate::provider::FetchedDataset {
+            provider_name: "FAA_CIFP".to_string(),
+            dataset_name: "FAACIFP18".to_string(),
+            source_uri: "fixture".to_string(),
+            content_sha256: crate::provider::sha256_hex(content.as_bytes()),
+            retrieved_at: Utc::now(),
+            provider_revision: Some("2608".to_string()),
+            airac_cycle: Some("2608".to_string()),
+            revision_kind: crate::provider::RevisionKind::Baseline,
+            coverage: crate::provider::Coverage::FullSnapshot,
+            valid_from: None, // <- must be rejected, never inferred
+            raw_content: content,
+        };
+        let provider = CifpProvider;
+        let err = crate::provider::DataProvider::parse_and_ingest(&provider, &dataset, &mut store)
+            .unwrap_err();
+        assert!(err.to_string().contains("valid_from"), "{err}");
+
+        // Missing cycle ident is rejected too.
+        let mut ds2 = dataset.clone();
+        ds2.valid_from = Some(Utc::now());
+        ds2.airac_cycle = None;
+        let err = crate::provider::DataProvider::parse_and_ingest(&provider, &ds2, &mut store)
+            .unwrap_err();
+        assert!(err.to_string().contains("airac_cycle"), "{err}");
     }
 
     #[test]
