@@ -6,13 +6,17 @@ use serde::{Deserialize, Serialize};
 pub struct AirportId(pub String);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct NavaidId(pub String);
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RunwayId(pub String);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct NavaidId(pub String);
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct WaypointId(pub String);
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct AirwayLegId(pub String);
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SourceSnapshotId(pub String);
 
@@ -68,6 +72,7 @@ pub struct TemporalValidity {
     pub valid_until: Option<DateTime<Utc>>,
     pub source_snapshot_id: SourceSnapshotId,
 }
+
 /// Canonical Waypoint (Fix)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CanonicalWaypoint {
@@ -139,6 +144,18 @@ pub struct CanonicalNavaid {
     pub region_code: Option<String>,
     pub associated_airport: Option<String>,
     pub magnetic_variation_deg: Option<f64>,
+    /// Direction of the 0 radial in true degrees (the XPNAV1200 "slaved
+    /// variation"), only when the source published it. Exporters MUST NOT
+    /// substitute station declination for this value.
+    pub slaved_variation_deg: Option<f64>,
+    /// Service volume / class in nautical miles (XPNAV1200 class field:
+    /// VOR 25/40/130/125, NDB 15/25/50/75, DME 25/40/70/120/125/130/150).
+    /// Mapped at ingest from provider class data; `None` = source silent.
+    pub service_volume_nm: Option<u16>,
+    /// True when this DME row is the paired component of a VOR/ILS/TACAN
+    /// (XPNAV1200 row 12, chart frequency suppressed). Standalone DMEs and
+    /// NDB-DME components use row 13.
+    pub dme_paired: bool,
     /// ILS-specific data. `None` when the kind is not an ILS component or the
     /// source did not provide the value; exporters MUST NOT fabricate it.
     pub associated_runway: Option<String>,
@@ -186,6 +203,33 @@ pub struct CanonicalAirport {
     pub temporal: TemporalValidity,
 }
 
+/// Canonical Airway Segment (one leg of an enroute airway, ARINC 424 `ER`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CanonicalAirwayLeg {
+    pub object_id: AirwayLegId,
+    /// Route identifier (e.g. `J1`, `V257`, `A315`).
+    pub route_ident: String,
+    /// ARINC 424 route type: `O` conventional, `R` RNAV.
+    pub route_type: String,
+    /// Published level: `H`igh, `L`ow, or `None` when the source does not
+    /// say (exporters must not guess).
+    pub level: Option<char>,
+    /// Position of the END fix within the route (starts at 2: segment 1
+    /// connects sequence 1 to sequence 2).
+    pub sequence_number: u32,
+    pub start_fix: String,
+    pub start_icao_code: String,
+    pub end_fix: String,
+    pub end_icao_code: String,
+    /// Directional restriction: `N` none, `F` forward, `B` backward.
+    pub direction: char,
+    /// Segment minimum enroute altitude, feet (ARINC 5.30 MEA).
+    pub minimum_altitude_ft: Option<u32>,
+    /// Segment maximum authorized altitude, feet.
+    pub maximum_altitude_ft: Option<u32>,
+    pub temporal: TemporalValidity,
+}
+
 /// Database & Storage Status Summary
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoreStatus {
@@ -199,4 +243,5 @@ pub struct StoreStatus {
     pub total_runways: usize,
     pub total_navaids: usize,
     pub total_waypoints: usize,
+    pub total_airway_legs: usize,
 }

@@ -135,7 +135,12 @@ impl WorldStore {
                 .execute_batch(include_str!("../migrations/v2_temporal_revisions.sql"))
                 .context("Failed to execute database migration v2_temporal_revisions.sql")?;
         }
-        self.conn.pragma_update(None, "user_version", 2)?;
+        if version < 3 {
+            self.conn
+                .execute_batch(include_str!("../migrations/v3_source_observations.sql"))
+                .context("Failed to execute database migration v3_source_observations.sql")?;
+        }
+        self.conn.pragma_update(None, "user_version", 3)?;
         Ok(())
     }
 
@@ -321,7 +326,8 @@ impl WorldStore {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT id, ident, name, navaid_type, frequency_khz, latitude_deg,
                     longitude_deg, elevation_ft, region, associated_airport,
-                    magnetic_variation_deg, associated_runway,
+                    magnetic_variation_deg, slaved_variation_deg,
+                    service_volume_nm, dme_paired, associated_runway,
                     localizer_bearing_true_deg, localizer_bearing_mag_deg,
                     glideslope_angle_deg, source_snapshot_id, valid_from,
                     valid_until
@@ -350,22 +356,25 @@ impl WorldStore {
                 region_code: row.get(8).context("region")?,
                 associated_airport: row.get(9).context("associated_airport")?,
                 magnetic_variation_deg: row.get(10).context("magnetic_variation_deg")?,
-                associated_runway: row.get(11).context("associated_runway")?,
-                localizer_bearing_true_deg: row.get(12).context("localizer_bearing_true_deg")?,
-                localizer_bearing_mag_deg: row.get(13).context("localizer_bearing_mag_deg")?,
-                glideslope_angle_deg: row.get(14).context("glideslope_angle_deg")?,
+                slaved_variation_deg: row.get(11).context("slaved_variation_deg")?,
+                service_volume_nm: row.get(12).context("service_volume_nm")?,
+                dme_paired: row.get::<_, i64>(13).context("dme_paired")? != 0,
+                associated_runway: row.get(14).context("associated_runway")?,
+                localizer_bearing_true_deg: row.get(15).context("localizer_bearing_true_deg")?,
+                localizer_bearing_mag_deg: row.get(16).context("localizer_bearing_mag_deg")?,
+                glideslope_angle_deg: row.get(17).context("glideslope_angle_deg")?,
                 temporal: TemporalValidity {
                     valid_from: parse_utc(
-                        &row.get::<_, String>(16).context("valid_from")?,
+                        &row.get::<_, String>(19).context("valid_from")?,
                         "valid_from",
                     )?,
                     valid_until: row
-                        .get::<_, Option<String>>(17)
+                        .get::<_, Option<String>>(20)
                         .context("valid_until")?
                         .map(|s| parse_utc(&s, "valid_until"))
                         .transpose()?,
                     source_snapshot_id: SourceSnapshotId(
-                        row.get(15).context("source_snapshot_id")?,
+                        row.get(18).context("source_snapshot_id")?,
                     ),
                 },
             })
@@ -427,6 +436,11 @@ impl WorldStore {
         Ok(waypoints)
     }
 
+    /// Query airway legs valid at a given UTC instant.
+    pub fn query_airway_legs_at(&self, date: DateTime<Utc>) -> Result<Vec<CanonicalAirwayLeg>> {
+        query_airway_legs_at(&self.conn, date)
+    }
+
     /// Structural integrity validation of the canonical store. Returns every
     /// issue found (empty = clean). Deterministic ordering by (table, id).
     pub fn validate(&self) -> Result<Vec<StoreIssue>> {
@@ -441,7 +455,7 @@ impl WorldStore {
         };
 
         // 1. Provenance: every entity row must reference an existing snapshot.
-        for table in ["airports", "runways", "navaids", "waypoints"] {
+        for table in ["airports", "runways", "navaids", "waypoints", "airway_legs"] {
             let sql = format!(
                 "SELECT t.id FROM {table} t
                  WHERE t.source_snapshot_id NOT IN (SELECT id FROM source_snapshots)
@@ -495,7 +509,7 @@ impl WorldStore {
         }
 
         // 4. Impossible temporal ranges.
-        for table in ["airports", "runways", "navaids", "waypoints"] {
+        for table in ["airports", "runways", "navaids", "waypoints", "airway_legs"] {
             let sql = format!(
                 "SELECT id FROM {table}
                  WHERE valid_until IS NOT NULL AND valid_until <= valid_from
@@ -516,7 +530,7 @@ impl WorldStore {
         }
 
         // 5. Overlapping open revisions (more than one row without valid_until).
-        for table in ["airports", "runways", "navaids", "waypoints"] {
+        for table in ["airports", "runways", "navaids", "waypoints", "airway_legs"] {
             let sql = format!(
                 "SELECT id FROM {table} WHERE valid_until IS NULL
                  GROUP BY id HAVING COUNT(*) > 1 ORDER BY id LIMIT 20"
@@ -648,6 +662,11 @@ impl WorldStore {
             total_runways,
             total_navaids,
             total_waypoints,
+            total_airway_legs: self.conn.query_row(
+                "SELECT COUNT(*) FROM airway_legs;",
+                [],
+                |r| r.get(0),
+            )?,
         })
     }
 }
@@ -713,8 +732,7 @@ pub fn insert_airport_conn(conn: &Connection, airport: &CanonicalAirport) -> Res
     let existing = conn
         .query_row(
             "SELECT ident, name, airport_type, latitude_deg, longitude_deg,
-                    elevation_ft, iso_country, municipality, source_snapshot_id,
-                    valid_from
+                    elevation_ft, iso_country, municipality, valid_from
              FROM airports WHERE id = ?1 ORDER BY valid_from DESC LIMIT 1",
             params![id],
             |row| {
@@ -728,13 +746,14 @@ pub fn insert_airport_conn(conn: &Connection, airport: &CanonicalAirport) -> Res
                     row.get::<_, Option<String>>(6)?,
                     row.get::<_, Option<String>>(7)?,
                     row.get::<_, String>(8)?,
-                    row.get::<_, String>(9)?,
                 ))
             },
         )
         .optional()?;
 
-    if let Some((ident, name, atype, lat, lon, elev, country, muni, snap, prev_vf)) = existing {
+    let write = if let Some((ident, name, atype, lat, lon, elev, country, muni, prev_vf)) = existing
+    {
+        // Payload comparison excludes provenance (see entity_observations).
         let unchanged = ident == airport.ident
             && name == airport.name
             && atype == airport.airport_type
@@ -742,23 +761,32 @@ pub fn insert_airport_conn(conn: &Connection, airport: &CanonicalAirport) -> Res
             && lon == airport.longitude
             && elev == airport.elevation_ft
             && country == airport.iso_country
-            && muni == airport.municipality
-            && snap == airport.temporal.source_snapshot_id.0;
+            && muni == airport.municipality;
         if unchanged {
-            return Ok(EntityWrite::Unchanged);
+            EntityWrite::Unchanged
+        } else {
+            if prev_vf >= vf {
+                return Err(anyhow!(
+                    "airport '{id}': new valid_from {vf} must be strictly after existing revision {prev_vf}"
+                ));
+            }
+            close_open_revision(conn, "airports", id, &prev_vf, &vf)?;
+            insert_airport_row(conn, airport, &vf, &vu)?;
+            EntityWrite::Updated
         }
-        if prev_vf >= vf {
-            return Err(anyhow!(
-                "airport '{id}': new valid_from {vf} must be strictly after existing revision {prev_vf}"
-            ));
-        }
-        close_open_revision(conn, "airports", id, &prev_vf, &vf)?;
+    } else {
         insert_airport_row(conn, airport, &vf, &vu)?;
-        return Ok(EntityWrite::Updated);
-    }
+        EntityWrite::Created
+    };
 
-    insert_airport_row(conn, airport, &vf, &vu)?;
-    Ok(EntityWrite::Created)
+    record_observation(
+        conn,
+        "airports",
+        id,
+        &airport.temporal.source_snapshot_id.0,
+        &vf,
+    )?;
+    Ok(write)
 }
 
 fn insert_airport_row(
@@ -804,8 +832,7 @@ pub fn insert_runway_conn(conn: &Connection, runway: &CanonicalRunway) -> Result
             "SELECT airport_id, airport_ident, official_designator,
                     computed_magnetic_designator, true_heading_deg, length_ft,
                     width_ft, surface, le_ident, le_lat, le_lon, le_elevation_ft,
-                    he_ident, he_lat, he_lon, he_elevation_ft, source_snapshot_id,
-                    valid_from
+                    he_ident, he_lat, he_lon, he_elevation_ft, valid_from
              FROM runways WHERE id = ?1 ORDER BY valid_from DESC LIMIT 1",
             params![id],
             |row| {
@@ -827,13 +854,12 @@ pub fn insert_runway_conn(conn: &Connection, runway: &CanonicalRunway) -> Result
                     row.get::<_, f64>(14)?,
                     row.get::<_, Option<f64>>(15)?,
                     row.get::<_, String>(16)?,
-                    row.get::<_, String>(17)?,
                 ))
             },
         )
         .optional()?;
 
-    if let Some((
+    let write = if let Some((
         airport_id,
         airport_ident,
         official,
@@ -850,10 +876,10 @@ pub fn insert_runway_conn(conn: &Connection, runway: &CanonicalRunway) -> Result
         he_lat,
         he_lon,
         he_elev,
-        snap,
         prev_vf,
     )) = existing
     {
+        // Payload comparison excludes provenance (see entity_observations).
         let unchanged = airport_id.as_deref() == Some(runway.airport_id.0.as_str())
             && airport_ident == runway.airport_ident
             && official == runway.official_designator
@@ -869,25 +895,33 @@ pub fn insert_runway_conn(conn: &Connection, runway: &CanonicalRunway) -> Result
             && he_ident == runway.he_ident
             && he_lat == runway.he_lat
             && he_lon == runway.he_lon
-            && he_elev == runway.he_elevation_ft
-            && snap == runway.temporal.source_snapshot_id.0;
+            && he_elev == runway.he_elevation_ft;
         if unchanged {
-            return Ok(EntityWrite::Unchanged);
+            EntityWrite::Unchanged
+        } else {
+            if prev_vf >= vf {
+                return Err(anyhow!(
+                    "runway '{id}': new valid_from {vf} must be strictly after existing revision {prev_vf}"
+                ));
+            }
+            close_open_revision(conn, "runways", id, &prev_vf, &vf)?;
+            insert_runway_row(conn, runway, &vf, &vu)?;
+            EntityWrite::Updated
         }
-        if prev_vf >= vf {
-            return Err(anyhow!(
-                "runway '{id}': new valid_from {vf} must be strictly after existing revision {prev_vf}"
-            ));
-        }
-        close_open_revision(conn, "runways", id, &prev_vf, &vf)?;
+    } else {
         insert_runway_row(conn, runway, &vf, &vu)?;
-        return Ok(EntityWrite::Updated);
-    }
+        EntityWrite::Created
+    };
 
-    insert_runway_row(conn, runway, &vf, &vu)?;
-    Ok(EntityWrite::Created)
+    record_observation(
+        conn,
+        "runways",
+        id,
+        &runway.temporal.source_snapshot_id.0,
+        &vf,
+    )?;
+    Ok(write)
 }
-
 fn insert_runway_row(
     conn: &Connection,
     runway: &CanonicalRunway,
@@ -943,9 +977,10 @@ pub fn insert_navaid_conn(conn: &Connection, navaid: &CanonicalNavaid) -> Result
         .query_row(
             "SELECT ident, name, navaid_type, frequency_khz, latitude_deg,
                     longitude_deg, elevation_ft, region, associated_airport,
-                    magnetic_variation_deg, associated_runway,
+                    magnetic_variation_deg, slaved_variation_deg,
+                    service_volume_nm, dme_paired, associated_runway,
                     localizer_bearing_true_deg, localizer_bearing_mag_deg,
-                    glideslope_angle_deg, source_snapshot_id, valid_from
+                    glideslope_angle_deg, valid_from
              FROM navaids WHERE id = ?1 ORDER BY valid_from DESC LIMIT 1",
             params![id],
             |row| {
@@ -960,18 +995,20 @@ pub fn insert_navaid_conn(conn: &Connection, navaid: &CanonicalNavaid) -> Result
                     row.get::<_, Option<String>>(7)?,
                     row.get::<_, Option<String>>(8)?,
                     row.get::<_, Option<f64>>(9)?,
-                    row.get::<_, Option<String>>(10)?,
-                    row.get::<_, Option<f64>>(11)?,
-                    row.get::<_, Option<f64>>(12)?,
-                    row.get::<_, Option<f64>>(13)?,
-                    row.get::<_, String>(14)?,
-                    row.get::<_, String>(15)?,
+                    row.get::<_, Option<f64>>(10)?,
+                    row.get::<_, Option<i64>>(11)?,
+                    row.get::<_, i64>(12)?,
+                    row.get::<_, Option<String>>(13)?,
+                    row.get::<_, Option<f64>>(14)?,
+                    row.get::<_, Option<f64>>(15)?,
+                    row.get::<_, Option<f64>>(16)?,
+                    row.get::<_, String>(17)?,
                 ))
             },
         )
         .optional()?;
 
-    if let Some((
+    let write = if let Some((
         ident,
         name,
         type_str,
@@ -982,14 +1019,20 @@ pub fn insert_navaid_conn(conn: &Connection, navaid: &CanonicalNavaid) -> Result
         region,
         assoc_ap,
         magvar,
+        slaved,
+        volume,
+        paired,
         assoc_rwy,
         loc_true,
         loc_mag,
         gs,
-        snap,
         prev_vf,
     )) = existing
     {
+        // Payload comparison deliberately excludes the source snapshot id:
+        // provenance is tracked separately in entity_observations, so a new
+        // dataset snapshot does not create semantic revisions for unchanged
+        // entities.
         let unchanged = ident == navaid.ident
             && name == navaid.name
             && type_str == navaid.kind.as_str()
@@ -1000,26 +1043,38 @@ pub fn insert_navaid_conn(conn: &Connection, navaid: &CanonicalNavaid) -> Result
             && region == navaid.region_code
             && assoc_ap == navaid.associated_airport
             && magvar == navaid.magnetic_variation_deg
+            && slaved == navaid.slaved_variation_deg
+            && volume.map(|v| v as u16) == navaid.service_volume_nm
+            && (paired != 0) == navaid.dme_paired
             && assoc_rwy == navaid.associated_runway
             && loc_true == navaid.localizer_bearing_true_deg
             && loc_mag == navaid.localizer_bearing_mag_deg
-            && gs == navaid.glideslope_angle_deg
-            && snap == navaid.temporal.source_snapshot_id.0;
+            && gs == navaid.glideslope_angle_deg;
         if unchanged {
-            return Ok(EntityWrite::Unchanged);
+            EntityWrite::Unchanged
+        } else {
+            if prev_vf >= vf {
+                return Err(anyhow!(
+                    "navaid '{id}': new valid_from {vf} must be strictly after existing revision {prev_vf}"
+                ));
+            }
+            close_open_revision(conn, "navaids", id, &prev_vf, &vf)?;
+            insert_navaid_row(conn, navaid, &vf, &vu)?;
+            EntityWrite::Updated
         }
-        if prev_vf >= vf {
-            return Err(anyhow!(
-                "navaid '{id}': new valid_from {vf} must be strictly after existing revision {prev_vf}"
-            ));
-        }
-        close_open_revision(conn, "navaids", id, &prev_vf, &vf)?;
+    } else {
         insert_navaid_row(conn, navaid, &vf, &vu)?;
-        return Ok(EntityWrite::Updated);
-    }
+        EntityWrite::Created
+    };
 
-    insert_navaid_row(conn, navaid, &vf, &vu)?;
-    Ok(EntityWrite::Created)
+    record_observation(
+        conn,
+        "navaids",
+        id,
+        &navaid.temporal.source_snapshot_id.0,
+        &vf,
+    )?;
+    Ok(write)
 }
 
 fn insert_navaid_row(
@@ -1032,11 +1087,12 @@ fn insert_navaid_row(
         "INSERT INTO navaids (
             id, ident, name, navaid_type, frequency_khz, latitude_deg,
             longitude_deg, elevation_ft, region, associated_airport,
-            magnetic_variation_deg, associated_runway, localizer_bearing_true_deg,
+            magnetic_variation_deg, slaved_variation_deg, service_volume_nm,
+            dme_paired, associated_runway, localizer_bearing_true_deg,
             localizer_bearing_mag_deg, glideslope_angle_deg,
             source_snapshot_id, valid_from, valid_until
         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                  ?15, ?16, ?17, ?18)",
+                  ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
         params![
             navaid.object_id.0,
             navaid.ident,
@@ -1049,6 +1105,9 @@ fn insert_navaid_row(
             navaid.region_code,
             navaid.associated_airport,
             navaid.magnetic_variation_deg,
+            navaid.slaved_variation_deg,
+            navaid.service_volume_nm,
+            navaid.dme_paired as i64,
             navaid.associated_runway,
             navaid.localizer_bearing_true_deg,
             navaid.localizer_bearing_mag_deg,
@@ -1057,6 +1116,25 @@ fn insert_navaid_row(
             vf,
             vu,
         ],
+    )?;
+    Ok(())
+}
+
+/// Log that `snapshot_id` observed entity `id` of `table` with this
+/// `valid_from`. Provenance observations are separate from payload
+/// revisions: re-observing an unchanged entity does not re-revise it.
+pub fn record_observation(
+    conn: &Connection,
+    table: &str,
+    entity_id: &str,
+    snapshot_id: &str,
+    valid_from: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO entity_observations
+            (source_snapshot_id, entity_table, entity_id, valid_from)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![snapshot_id, table, entity_id, valid_from],
     )?;
     Ok(())
 }
@@ -1074,7 +1152,7 @@ pub fn insert_waypoint_conn(
     let existing = conn
         .query_row(
             "SELECT ident, name, latitude_deg, longitude_deg, region, is_enroute,
-                    waypoint_type, source_snapshot_id, valid_from
+                    waypoint_type, valid_from
              FROM waypoints WHERE id = ?1 ORDER BY valid_from DESC LIMIT 1",
             params![id],
             |row| {
@@ -1087,38 +1165,46 @@ pub fn insert_waypoint_conn(
                     row.get::<_, i64>(5)?,
                     row.get::<_, Option<i64>>(6)?,
                     row.get::<_, String>(7)?,
-                    row.get::<_, String>(8)?,
                 ))
             },
         )
         .optional()?;
 
-    if let Some((ident, name, lat, lon, region, enroute, wptype, snap, prev_vf)) = existing {
+    let write = if let Some((ident, name, lat, lon, region, enroute, wptype, prev_vf)) = existing {
+        // Payload comparison excludes provenance (see entity_observations).
         let unchanged = ident == waypoint.ident
             && name == waypoint.name
             && lat == waypoint.latitude
             && lon == waypoint.longitude
             && region.as_deref().unwrap_or("") == waypoint.region_code
             && (enroute != 0) == waypoint.is_enroute
-            && wptype.map(|v| v as u32) == waypoint.waypoint_type
-            && snap == waypoint.temporal.source_snapshot_id.0;
+            && wptype.map(|v| v as u32) == waypoint.waypoint_type;
         if unchanged {
-            return Ok(EntityWrite::Unchanged);
+            EntityWrite::Unchanged
+        } else {
+            if prev_vf >= vf {
+                return Err(anyhow!(
+                    "waypoint '{id}': new valid_from {vf} must be strictly after existing revision {prev_vf}"
+                ));
+            }
+            close_open_revision(conn, "waypoints", id, &prev_vf, &vf)?;
+            insert_waypoint_row(conn, waypoint, &vf, &vu)?;
+            EntityWrite::Updated
         }
-        if prev_vf >= vf {
-            return Err(anyhow!(
-                "waypoint '{id}': new valid_from {vf} must be strictly after existing revision {prev_vf}"
-            ));
-        }
-        close_open_revision(conn, "waypoints", id, &prev_vf, &vf)?;
+    } else {
         insert_waypoint_row(conn, waypoint, &vf, &vu)?;
-        return Ok(EntityWrite::Updated);
-    }
+        EntityWrite::Created
+    };
 
-    insert_waypoint_row(conn, waypoint, &vf, &vu)?;
-    Ok(EntityWrite::Created)
+    record_observation(
+        conn,
+        "waypoints",
+        id,
+        &waypoint.temporal.source_snapshot_id.0,
+        &vf,
+    )?;
+    Ok(write)
 }
-
 fn insert_waypoint_row(
     conn: &Connection,
     waypoint: &CanonicalWaypoint,
@@ -1147,6 +1233,216 @@ fn insert_waypoint_row(
     Ok(())
 }
 
+pub fn insert_airway_leg_conn(conn: &Connection, leg: &CanonicalAirwayLeg) -> Result<EntityWrite> {
+    validate_temporal(&leg.temporal)?;
+    let id = &leg.object_id.0;
+    let vf = rfc3339(leg.temporal.valid_from);
+    let vu = leg.temporal.valid_until.map(rfc3339);
+
+    let existing = conn
+        .query_row(
+            "SELECT route_ident, route_type, level, sequence_number,
+                    start_fix, start_icao_code, end_fix, end_icao_code,
+                    direction, minimum_altitude_ft, maximum_altitude_ft,
+                    valid_from
+             FROM airway_legs WHERE id = ?1 ORDER BY valid_from DESC LIMIT 1",
+            params![id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, u32>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, Option<i64>>(9)?,
+                    row.get::<_, Option<i64>>(10)?,
+                    row.get::<_, String>(11)?,
+                ))
+            },
+        )
+        .optional()?;
+
+    let write = if let Some((
+        route_ident,
+        route_type,
+        level,
+        sequence_number,
+        start_fix,
+        start_icao_code,
+        end_fix,
+        end_icao_code,
+        direction,
+        min_alt,
+        max_alt,
+        prev_vf,
+    )) = existing
+    {
+        let unchanged = route_ident == leg.route_ident
+            && route_type == leg.route_type
+            && level.as_deref() == leg.level.map(|c| c.to_string()).as_deref()
+            && sequence_number == leg.sequence_number
+            && start_fix == leg.start_fix
+            && start_icao_code == leg.start_icao_code
+            && end_fix == leg.end_fix
+            && end_icao_code == leg.end_icao_code
+            && direction == leg.direction.to_string()
+            && min_alt.map(|v| v as u32) == leg.minimum_altitude_ft
+            && max_alt.map(|v| v as u32) == leg.maximum_altitude_ft;
+        if unchanged {
+            EntityWrite::Unchanged
+        } else {
+            if prev_vf >= vf {
+                return Err(anyhow!(
+                    "airway leg '{id}': new valid_from {vf} must be strictly after existing revision {prev_vf}"
+                ));
+            }
+            close_open_revision(conn, "airway_legs", id, &prev_vf, &vf)?;
+            insert_airway_leg_row(conn, leg, &vf, &vu)?;
+            EntityWrite::Updated
+        }
+    } else {
+        insert_airway_leg_row(conn, leg, &vf, &vu)?;
+        EntityWrite::Created
+    };
+
+    record_observation(
+        conn,
+        "airway_legs",
+        id,
+        &leg.temporal.source_snapshot_id.0,
+        &vf,
+    )?;
+    Ok(write)
+}
+
+fn insert_airway_leg_row(
+    conn: &Connection,
+    leg: &CanonicalAirwayLeg,
+    vf: &str,
+    vu: &Option<String>,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO airway_legs (
+            id, route_ident, route_type, level, sequence_number,
+            start_fix, start_icao_code, end_fix, end_icao_code,
+            direction, minimum_altitude_ft, maximum_altitude_ft,
+            source_snapshot_id, valid_from, valid_until
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+        params![
+            leg.object_id.0,
+            leg.route_ident,
+            leg.route_type,
+            leg.level.map(|c| c.to_string()),
+            leg.sequence_number,
+            leg.start_fix,
+            leg.start_icao_code,
+            leg.end_fix,
+            leg.end_icao_code,
+            leg.direction.to_string(),
+            leg.minimum_altitude_ft,
+            leg.maximum_altitude_ft,
+            leg.temporal.source_snapshot_id.0,
+            vf,
+            vu,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Insert an entity revision, replacing a preloaded FUTURE revision with the
+/// same `valid_from` (a correction made before the data became effective).
+/// Once a revision is effective (valid_from <= now) it is immutable: a
+/// conflicting write returns an error from the underlying insert.
+pub fn insert_with_future_correction(
+    conn: &Connection,
+    table: &str,
+    id: &str,
+    valid_from: DateTime<Utc>,
+    now: DateTime<Utc>,
+    insert: impl FnOnce(&Connection) -> Result<EntityWrite>,
+) -> Result<EntityWrite> {
+    if valid_from > now {
+        let vf = rfc3339(valid_from);
+        let exists: bool = conn
+            .query_row(
+                &format!("SELECT 1 FROM {table} WHERE id = ?1 AND valid_from = ?2 LIMIT 1"),
+                params![id, vf],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if exists {
+            conn.execute(
+                &format!("DELETE FROM {table} WHERE id = ?1 AND valid_from = ?2"),
+                params![id, vf],
+            )?;
+        }
+    }
+    insert(conn)
+}
+
+/// Query airway legs valid at a given UTC instant, ordered by route.
+pub fn query_airway_legs_at(
+    conn: &Connection,
+    date: DateTime<Utc>,
+) -> Result<Vec<CanonicalAirwayLeg>> {
+    let date_str = rfc3339(date);
+    let mut stmt = conn.prepare(&format!(
+        "SELECT id, route_ident, route_type, level, sequence_number,
+                start_fix, start_icao_code, end_fix, end_icao_code,
+                direction, minimum_altitude_ft, maximum_altitude_ft,
+                source_snapshot_id, valid_from, valid_until
+         FROM airway_legs WHERE {VALID_FROM_LE} AND {VALID_UNTIL_GT}
+         ORDER BY route_ident, sequence_number;"
+    ))?;
+
+    let rows = stmt.query_and_then(params![date_str], |row| -> Result<CanonicalAirwayLeg> {
+        Ok(CanonicalAirwayLeg {
+            object_id: AirwayLegId(row.get(0).context("airway_legs.id")?),
+            route_ident: row.get(1).context("route_ident")?,
+            route_type: row.get(2).context("route_type")?,
+            level: row
+                .get::<_, Option<String>>(3)
+                .context("level")?
+                .and_then(|s| s.chars().next()),
+            sequence_number: row.get(4).context("sequence_number")?,
+            start_fix: row.get(5).context("start_fix")?,
+            start_icao_code: row.get(6).context("start_icao_code")?,
+            end_fix: row.get(7).context("end_fix")?,
+            end_icao_code: row.get(8).context("end_icao_code")?,
+            direction: row
+                .get::<_, String>(9)
+                .context("direction")?
+                .chars()
+                .next()
+                .unwrap_or('N'),
+            minimum_altitude_ft: row.get(10).context("minimum_altitude_ft")?,
+            maximum_altitude_ft: row.get(11).context("maximum_altitude_ft")?,
+            temporal: TemporalValidity {
+                valid_from: parse_utc(
+                    &row.get::<_, String>(13).context("valid_from")?,
+                    "valid_from",
+                )?,
+                valid_until: row
+                    .get::<_, Option<String>>(14)
+                    .context("valid_until")?
+                    .map(|s| parse_utc(&s, "valid_until"))
+                    .transpose()?,
+                source_snapshot_id: SourceSnapshotId(row.get(12).context("source_snapshot_id")?),
+            },
+        })
+    })?;
+
+    let mut legs = Vec::new();
+    for row in rows {
+        legs.push(row?);
+    }
+    Ok(legs)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1222,7 +1518,7 @@ mod tests {
         let store = WorldStore::open_in_memory().unwrap();
         let status = store.status().unwrap();
         assert!(status.integrity_ok);
-        assert_eq!(status.migration_version, 2);
+        assert_eq!(status.migration_version, 3);
         assert_eq!(status.total_airports, 0);
 
         let snap = snapshot("snap-001");
@@ -1376,5 +1672,223 @@ mod tests {
 
         assert_eq!(store.query_airports_at(t0).unwrap().len(), 0);
         assert_eq!(store.query_airports_at(t_future).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_snapshot_change_does_not_revise_unchanged_entities() {
+        let mut store = WorldStore::open_in_memory().unwrap();
+        store.insert_source_snapshot(&snapshot("snap-A")).unwrap();
+        store.insert_source_snapshot(&snapshot("snap-B")).unwrap();
+
+        let t0 = Utc::now();
+        let t1 = t0 + Duration::from_secs(3600);
+
+        // Snapshot A: 100 airports.
+        store
+            .transact(|conn| {
+                for i in 0..100 {
+                    let ap = airport(&format!("APT{i:03}"), &format!("APT{i:03}"), t0, "snap-A");
+                    insert_airport_conn(conn, &ap)?;
+                }
+                Ok(())
+            })
+            .unwrap();
+
+        // Snapshot B: same payloads, new snapshot id, one airport changed.
+        store
+            .transact(|conn| {
+                for i in 0..100 {
+                    let mut ap =
+                        airport(&format!("APT{i:03}"), &format!("APT{i:03}"), t1, "snap-B");
+                    if i == 42 {
+                        ap.name = "Changed Airport".to_string();
+                    }
+                    insert_airport_conn(conn, &ap)?;
+                }
+                Ok(())
+            })
+            .unwrap();
+
+        // Only ONE new payload revision, not 100.
+        let total: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM airports", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(total, 101);
+
+        // Provenance: snapshot B observed all 100 entities.
+        let observed: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM entity_observations WHERE source_snapshot_id = 'snap-B'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(observed, 100);
+
+        // The changed entity has two revisions; an unchanged one has one.
+        let revisions_changed: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM airports WHERE id = 'APT042'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(revisions_changed, 2);
+        let revisions_same: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM airports WHERE id = 'APT000'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(revisions_same, 1);
+    }
+
+    #[test]
+    fn test_future_preload_correction() {
+        let mut store = WorldStore::open_in_memory().unwrap();
+        store.insert_source_snapshot(&snapshot("snap-001")).unwrap();
+
+        let now = Utc::now();
+        let t_future = now + Duration::from_secs(3600);
+
+        // Preload a future revision.
+        let ap = airport("KSFO", "KSFO", t_future, "snap-001");
+        assert_eq!(store.insert_airport(&ap).unwrap(), EntityWrite::Created);
+
+        // Correct it before it becomes effective: same valid_from replaced.
+        let mut corrected = airport("KSFO", "KSFO", t_future, "snap-001");
+        corrected.latitude = 37.7;
+        store
+            .transact(|conn| {
+                insert_with_future_correction(
+                    conn,
+                    "airports",
+                    "KSFO",
+                    t_future,
+                    now,
+                    |c| -> Result<EntityWrite> { insert_airport_conn(c, &corrected) },
+                )
+            })
+            .unwrap();
+        let mut store = store;
+
+        let total: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM airports WHERE id = 'KSFO'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(total, 1);
+        let at = store.query_airports_at(t_future).unwrap();
+        assert_eq!(at[0].latitude, 37.7);
+
+        // Once effective, a same-valid_from rewrite must fail.
+        let mut late = airport("KSFO", "KSFO", t_future, "snap-001");
+        late.latitude = 37.8;
+        let result = store.transact(|conn| {
+            insert_with_future_correction(
+                conn,
+                "airports",
+                "KSFO",
+                t_future,
+                t_future + Duration::from_secs(10),
+                |c| insert_airport_conn(c, &late),
+            )
+        });
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_v1_database_migrates_to_v3() {
+        // Build a genuine v1 database with the historical schema and data.
+        let path = std::env::temp_dir().join(format!(
+            "openairac_v1_migration_{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(include_str!("../migrations/v1_init.sql"))
+                .unwrap();
+            conn.pragma_update(None, "user_version", 1).unwrap();
+            conn.execute(
+                "INSERT INTO source_snapshots
+                    (id, provider, dataset, retrieved_at, source_uri, content_sha256, parser_version)
+                 VALUES ('snap-v1', 'Test', 'airports', '2026-01-01T00:00:00+00:00',
+                         'http://v1', 'hash', '0.1.0')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO airports
+                    (id, ident, name, airport_type, latitude_deg, longitude_deg,
+                     source_snapshot_id, valid_from, valid_until)
+                 VALUES ('KSFO', 'KSFO', 'San Francisco', 'large_airport', 37.6188, -122.375,
+                         'snap-v1', '2026-01-01T00:00:00+00:00', NULL)",
+                [],
+            )
+            .unwrap();
+        }
+
+        // Opening with the current code must migrate v1 -> v3 in place.
+        let store = WorldStore::open(&path).unwrap();
+        assert_eq!(store.migration_version().unwrap(), 3);
+        let at = store.query_airports_at(Utc::now()).unwrap();
+        assert_eq!(at.len(), 1);
+        assert_eq!(at[0].ident, "KSFO");
+
+        // The migrated database accepts new temporal revisions.
+        store.insert_source_snapshot(&snapshot("snap-v2")).unwrap();
+        let t = Utc::now();
+        let ap = airport("KSFO", "KSFO", t, "snap-v2");
+        assert_eq!(store.insert_airport(&ap).unwrap(), EntityWrite::Updated);
+        assert!(store.validate().unwrap().is_empty());
+
+        drop(store);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+    }
+
+    #[test]
+    fn test_airway_leg_roundtrip() {
+        let mut store = WorldStore::open_in_memory().unwrap();
+        store.insert_source_snapshot(&snapshot("snap-001")).unwrap();
+
+        let t = Utc::now();
+        let leg = CanonicalAirwayLeg {
+            object_id: AirwayLegId("faa:ER:V257:2".to_string()),
+            route_ident: "V257".to_string(),
+            route_type: "O".to_string(),
+            level: Some('L'),
+            sequence_number: 2,
+            start_fix: "AADCO".to_string(),
+            start_icao_code: "K2".to_string(),
+            end_fix: "LOLIC".to_string(),
+            end_icao_code: "K2".to_string(),
+            direction: 'N',
+            minimum_altitude_ft: Some(11_500),
+            maximum_altitude_ft: Some(17_500),
+            temporal: TemporalValidity {
+                valid_from: t,
+                valid_until: None,
+                source_snapshot_id: SourceSnapshotId("snap-001".to_string()),
+            },
+        };
+        store
+            .transact(|conn| insert_airway_leg_conn(conn, &leg))
+            .unwrap();
+
+        let legs = query_airway_legs_at(&store.conn, t).unwrap();
+        assert_eq!(legs.len(), 1);
+        assert_eq!(legs[0].route_ident, "V257");
+        assert_eq!(legs[0].end_fix, "LOLIC");
+        assert_eq!(store.status().unwrap().total_airway_legs, 1);
+        assert!(store.validate().unwrap().is_empty());
     }
 }
