@@ -8,7 +8,7 @@ repository.workspace = true
 [dependencies]
 openairac-model = { path = "../openairac-model" }
 openairac-store = { path = "../openairac-store" }
-openairac-magnetic = { path = "../openairac-magnetic" }
 anyhow.workspace = true
 chrono.workspace = true
+serde.workspace = true
 tracing.workspace = true
