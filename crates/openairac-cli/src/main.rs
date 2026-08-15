@@ -3,15 +3,15 @@ use chrono::{Datelike, NaiveDate, Utc};
 use clap::{Parser, Subcommand};
 use openairac_export_xplane::XPlane12Exporter;
 use openairac_ingest::ourairports::OurAirportsImporter;
-use openairac_ingest::provider::FetchedDataset;
+use openairac_ingest::provider::{DataProvider, FetchedDataset, sha256_hex};
 use openairac_magnetic::{Wmm2025, analyze_runway_magnetic_drift, wmm2025_metadata};
 use openairac_store::WorldStore;
 use std::path::PathBuf;
+
 #[derive(Parser)]
 #[command(name = "openairac")]
 #[command(
-    about = "✈️ OpenAIRAC — The open navigation data engine for flight simulation. Install once, navigate forever.",
-    long_about = None
+    about = "OpenAIRAC — The open navigation data engine for flight simulation. Install once, navigate forever."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -28,9 +28,9 @@ enum Commands {
 
     /// Calculate WMM2025 magnetic field & variation for location and date
     Magnetic {
-        #[arg(short = 'l', long)]
+        #[arg(short = 'l', long, allow_negative_numbers = true)]
         lat: f64,
-        #[arg(short = 'o', long)]
+        #[arg(short = 'o', long, allow_negative_numbers = true)]
         lon: f64,
         #[arg(short, long, default_value_t = 0.0)]
         alt_ft: f64,
@@ -40,9 +40,9 @@ enum Commands {
 
     /// Alias for magnetic command
     Magvar {
-        #[arg(short = 'l', long)]
+        #[arg(short = 'l', long, allow_negative_numbers = true)]
         lat: f64,
-        #[arg(short = 'o', long)]
+        #[arg(short = 'o', long, allow_negative_numbers = true)]
         lon: f64,
         #[arg(short, long, default_value_t = 0.0)]
         alt_ft: f64,
@@ -54,15 +54,17 @@ enum Commands {
     Magdrift {
         #[arg(short, long)]
         designator: String,
-        #[arg(short = 't', long)]
+        #[arg(short = 't', long, allow_negative_numbers = true)]
         heading: f64,
-        #[arg(short = 'l', long)]
+        #[arg(short = 'l', long, allow_negative_numbers = true)]
         lat: f64,
-        #[arg(short = 'o', long)]
+        #[arg(short = 'o', long, allow_negative_numbers = true)]
         lon: f64,
         #[arg(long, default_value = "2026-08-12")]
         date: String,
     },
+
+    /// Synchronize navigation data from a provider
     Sync {
         #[arg(short, long, default_value = "ourairports")]
         provider: String,
@@ -71,6 +73,9 @@ enum Commands {
         /// Use offline sample fixture content instead of live network
         #[arg(long, default_value_t = false)]
         fixture: bool,
+        /// Comma-separated datasets (default: all supported by the provider)
+        #[arg(long)]
+        datasets: Option<String>,
     },
 
     /// Display local world database revision, entity counts, and status
@@ -78,6 +83,13 @@ enum Commands {
         #[arg(short, long, default_value = "./data/world.openairac.sqlite")]
         db: PathBuf,
     },
+
+    /// Validate the canonical store's structural integrity
+    Validate {
+        #[arg(short, long, default_value = "./data/world.openairac.sqlite")]
+        db: PathBuf,
+    },
+
     /// Export canonical navigation data into simulator format
     Export {
         #[command(subcommand)]
@@ -93,8 +105,13 @@ enum ExportTarget {
         db: PathBuf,
         #[arg(short, long, default_value = "./dist/xplane")]
         out: PathBuf,
-        #[arg(long, default_value = "2026-08-12")]
-        date: String,
+        /// Effective date for the export (YYYY-MM-DD or RFC3339)
+        #[arg(long)]
+        date: Option<String>,
+        /// Allow exporting an empty nav layer (DANGEROUS: overwrites the
+        /// simulator's navaids/fixes with an empty file)
+        #[arg(long, default_value_t = false)]
+        allow_empty: bool,
     },
 }
 
@@ -102,18 +119,71 @@ fn parse_iso_date_to_year_decimal(date_str: &str) -> Result<f64> {
     if let Ok(year_dec) = date_str.parse::<f64>() {
         return Ok(year_dec);
     }
-    let d = NaiveDate::parse_from_str(date_str, "%Y-%m-%d").with_context(|| {
-        format!(
-            "Invalid ISO date format '{}' (expected YYYY-MM-DD)",
-            date_str
-        )
-    })?;
+    let d = NaiveDate::parse_from_str(date_str, "%Y-%m-%d")
+        .with_context(|| format!("Invalid ISO date format '{date_str}' (expected YYYY-MM-DD)"))?;
 
     let year = d.year() as f64;
     let day_of_year = d.ordinal() as f64;
     let days_in_year = if d.leap_year() { 366.0 } else { 365.0 };
 
     Ok(year + (day_of_year - 1.0) / days_in_year)
+}
+
+fn parse_export_date(date: &Option<String>) -> Result<chrono::DateTime<Utc>> {
+    match date {
+        None => Ok(Utc::now()),
+        Some(s) => {
+            if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+                return Ok(dt.with_timezone(&Utc));
+            }
+            let d = NaiveDate::parse_from_str(s, "%Y-%m-%d")
+                .with_context(|| format!("Invalid export date '{s}' (expected YYYY-MM-DD)"))?;
+            let dt = d.and_hms_opt(9, 0, 0).context("building export datetime")?;
+            Ok(chrono::DateTime::from_naive_utc_and_offset(dt, Utc))
+        }
+    }
+}
+
+fn sync_fixture(store: &mut WorldStore) -> Result<()> {
+    let sample_airports = r#"id,ident,type,name,latitude_deg,longitude_deg,elevation_ft,iso_country,municipality
+1,KSFO,large_airport,San Francisco International Airport,37.6188,-122.3750,13,US,San Francisco
+2,KJFK,large_airport,John F Kennedy International Airport,40.6398,-73.7789,13,US,New York
+3,BAD,,Airport With Bad Latitude,95.0,-122.3750,13,US,Nowhere
+"#;
+    let sample_runways = r#"id,airport_ref,airport_ident,length_ft,width_ft,surface,le_ident,le_latitude_deg,le_longitude_deg,le_elevation_ft,le_heading_degT,he_ident,he_latitude_deg,he_longitude_deg,he_elevation_ft
+101,1,KSFO,11870,200,ASP,28R,37.6188,-122.3750,13,284.0,10L,37.6140,-122.3900,11
+102,2,KJFK,14511,200,ASP,13L,40.6398,-73.7789,13,,31R,40.6200,-73.7500,11
+"#;
+    let sample_navaids = r#"id,filename,ident,name,type,frequency_khz,latitude_deg,longitude_deg,elevation_ft,associated_airport,magnetic_variation_deg
+201,SFO.navaid,SFO,San Francisco VOR-DME,VOR-DME,115800,37.6195,-122.3739,13,KSFO,-13.0
+202,JFK.navaid,JFK,Kennedy VOR-DME,VOR-DME,115900,40.6397,-73.7789,13,KJFK,-13.0
+"#;
+
+    for (dataset, content) in [
+        ("airports", sample_airports),
+        ("runways", sample_runways),
+        ("navaids", sample_navaids),
+    ] {
+        let dataset = FetchedDataset {
+            provider_name: "OurAirports".to_string(),
+            dataset_name: dataset.to_string(),
+            source_uri: "offline fixture".to_string(),
+            content_sha256: sha256_hex(content.as_bytes()),
+            retrieved_at: Utc::now(),
+            provider_revision: Some("fixture".to_string()),
+            raw_content: content.to_string(),
+        };
+        let report = OurAirportsImporter::ingest_dataset(&dataset, store)?;
+        println!(
+            "  {}: accepted {}, unchanged {}, quarantined {}, rejected {}",
+            report.dataset_name,
+            report.records_accepted(),
+            report.records_unchanged,
+            report.records_quarantined,
+            report.records_rejected
+        );
+    }
+    Ok(())
 }
 
 #[tokio::main]
@@ -123,14 +193,14 @@ async fn main() -> Result<()> {
 
     match &cli.command {
         Commands::Doctor { db } => {
-            println!("🏥 OpenAIRAC System Doctor");
-            println!("==========================");
+            println!("OpenAIRAC System Doctor");
+            println!("======================");
             println!("  CLI Version: {}", env!("CARGO_PKG_VERSION"));
             let meta = wmm2025_metadata();
             println!("  Magnetic Model: {} (Epoch {})", meta.model, meta.epoch);
 
             if !db.exists() {
-                println!("  Database: ❌ Not found at {:?}", db);
+                println!("  Database: NOT FOUND at {:?}", db);
                 println!("  Run `openairac sync` to initialize local database.");
                 std::process::exit(1);
             }
@@ -138,14 +208,10 @@ async fn main() -> Result<()> {
             match WorldStore::open(db) {
                 Ok(store) => match store.status() {
                     Ok(status) => {
-                        println!("  Database Open: ✅ Success ({:?})", db);
+                        println!("  Database Open: OK ({:?})", db);
                         println!(
                             "  Integrity Check: {}",
-                            if status.integrity_ok {
-                                "✅ OK"
-                            } else {
-                                "❌ FAILED"
-                            }
+                            if status.integrity_ok { "OK" } else { "FAILED" }
                         );
                         println!("  Migration Version: {}", status.migration_version);
                         println!(
@@ -162,12 +228,12 @@ async fn main() -> Result<()> {
                         }
                     }
                     Err(e) => {
-                        println!("  Database Status Query: ❌ Error ({})", e);
+                        println!("  Database Status Query: ERROR ({e})");
                         std::process::exit(1);
                     }
                 },
                 Err(e) => {
-                    println!("  Database Connection: ❌ Failed ({})", e);
+                    println!("  Database Connection: FAILED ({e})");
                     std::process::exit(1);
                 }
             }
@@ -188,10 +254,10 @@ async fn main() -> Result<()> {
             let year = parse_iso_date_to_year_decimal(date)?;
             let res = Wmm2025::calculate_checked(*lat, *lon, *alt_ft, year)?;
             println!("WMM2025 Calculation Result:");
-            println!("  Date: {} (Decimal Year {:.4})", date, year);
-            println!("  Latitude: {:.4}°", lat);
-            println!("  Longitude: {:.4}°", lon);
-            println!("  Altitude: {:.1} ft", alt_ft);
+            println!("  Date: {date} (Decimal Year {year:.4})");
+            println!("  Latitude: {lat:.4}°");
+            println!("  Longitude: {lon:.4}°");
+            println!("  Altitude: {alt_ft:.1} ft");
             println!("  Declination (MagVar): {:.4}°", res.declination_deg);
             println!("  Inclination: {:.4}°", res.inclination_deg);
             println!("  North Component (X): {:.1} nT", res.north_component_nt);
@@ -237,9 +303,9 @@ async fn main() -> Result<()> {
             println!(
                 "  Redesignation Suggested: {}",
                 if analysis.is_redesignation_suggested {
-                    "⚠️ YES (Candidate mismatch detected)"
+                    "YES (Candidate mismatch detected)"
                 } else {
-                    "✅ NO"
+                    "NO"
                 }
             );
         }
@@ -248,80 +314,70 @@ async fn main() -> Result<()> {
             provider,
             db,
             fixture,
+            datasets,
         } => {
-            println!("🔄 Synchronizing OpenAIRAC Navigation Data...");
-            println!("  Provider: {}", provider);
+            println!("Synchronizing OpenAIRAC Navigation Data...");
+            println!("  Provider: {provider}");
             println!("  Database: {:?}", db);
 
-            let store = WorldStore::open(db)?;
+            let mut store = WorldStore::open(db)?;
 
-            if *fixture || provider == "ourairports" {
-                let sample_airports = r#"id,ident,airport_type,name,latitude_deg,longitude_deg,elevation_ft,iso_country,municipality
-1,KSFO,large_airport,San Francisco International Airport,37.6188,-122.3750,13,US,San Francisco
-2,KJFK,large_airport,John F Kennedy International Airport,40.6398,-73.7789,13,US,New York
-"#;
-                let sample_runways = r#"id,airport_ident,length_ft,width_ft,surface,le_ident,le_latitude_deg,le_longitude_deg,le_elevation_ft,le_heading_degT,he_ident,he_latitude_deg,he_longitude_deg,he_elevation_ft
-101,KSFO,11870,200,ASP,28R,37.6188,-122.3750,13,284.0,10L,37.6140,-122.3900,11
-102,KJFK,14511,200,ASP,13L,40.6398,-73.7789,13,134.0,31R,40.6200,-73.7500,11
-"#;
-                let sample_navaids = r#"id,filename,ident,name,navaid_type,frequency_khz,latitude_deg,longitude_deg,elevation_ft,associated_airport,magnetic_variation_deg
-201,SFO.navaid,SFO,San Francisco VOR-DME,VOR-DME,115800,37.6195,-122.3739,13,KSFO,-13.0
-202,JFK.navaid,JFK,Kennedy VOR-DME,VOR-DME,115900,40.6397,-73.7789,13,KJFK,-13.0
-"#;
-
-                let dataset_ap = FetchedDataset {
-                    provider_name: "OurAirports".to_string(),
-                    dataset_name: "airports".to_string(),
-                    source_uri: "https://davidmegginson.github.io/ourairports-data/airports.csv"
-                        .to_string(),
-                    content_sha256: "f0a1b2c3d4e5".to_string(),
-                    retrieved_at: Utc::now(),
-                    provider_revision: Some("2026-08-12".to_string()),
-                    raw_content: sample_airports.to_string(),
-                };
-                let r_ap = OurAirportsImporter::ingest_dataset(&dataset_ap, &store)?;
-
-                let dataset_rwy = FetchedDataset {
-                    provider_name: "OurAirports".to_string(),
-                    dataset_name: "runways".to_string(),
-                    source_uri: "https://davidmegginson.github.io/ourairports-data/runways.csv"
-                        .to_string(),
-                    content_sha256: "f0a1b2c3d4e6".to_string(),
-                    retrieved_at: Utc::now(),
-                    provider_revision: Some("2026-08-12".to_string()),
-                    raw_content: sample_runways.to_string(),
-                };
-                let r_rwy = OurAirportsImporter::ingest_dataset(&dataset_rwy, &store)?;
-
-                let dataset_nav = FetchedDataset {
-                    provider_name: "OurAirports".to_string(),
-                    dataset_name: "navaids".to_string(),
-                    source_uri: "https://davidmegginson.github.io/ourairports-data/navaids.csv"
-                        .to_string(),
-                    content_sha256: "f0a1b2c3d4e7".to_string(),
-                    retrieved_at: Utc::now(),
-                    provider_revision: Some("2026-08-12".to_string()),
-                    raw_content: sample_navaids.to_string(),
-                };
-                let r_nav = OurAirportsImporter::ingest_dataset(&dataset_nav, &store)?;
-
-                println!("  Sync Report:");
-                println!(
-                    "    Airports: Accepted {}, Rejected {}",
-                    r_ap.records_accepted, r_ap.records_rejected
-                );
-                println!(
-                    "    Runways: Accepted {}, Rejected {}",
-                    r_rwy.records_accepted, r_rwy.records_rejected
-                );
-                println!(
-                    "    Navaids: Accepted {}, Rejected {}",
-                    r_nav.records_accepted, r_nav.records_rejected
-                );
-                println!("✅ Synchronization completed successfully.");
-            } else {
-                println!("  Unknown provider: {}", provider);
+            if provider != "ourairports" {
+                anyhow::bail!("Unknown provider '{provider}' (supported: ourairports)");
             }
+
+            if *fixture {
+                println!("  Using offline fixture content.");
+                sync_fixture(&mut store)?;
+            } else {
+                let importer = openairac_ingest::ourairports::OurAirportsProvider;
+                let requested: Vec<String> = datasets
+                    .as_deref()
+                    .map(|d| d.split(',').map(|s| s.trim().to_string()).collect())
+                    .unwrap_or_else(|| {
+                        vec![
+                            "airports".to_string(),
+                            "runways".to_string(),
+                            "navaids".to_string(),
+                        ]
+                    });
+                for dataset_name in requested {
+                    println!("  Fetching {dataset_name}...");
+                    let dataset = importer.fetch(&dataset_name)?;
+                    println!(
+                        "    fetched {} bytes from {}",
+                        dataset.raw_content.len(),
+                        dataset.source_uri
+                    );
+                    let report = importer.parse_and_ingest(&dataset, &mut store)?;
+                    println!(
+                        "    {}: seen {}, accepted {}, unchanged {}, quarantined {}, rejected {}, {} ms",
+                        report.dataset_name,
+                        report.records_seen,
+                        report.records_accepted(),
+                        report.records_unchanged,
+                        report.records_quarantined,
+                        report.records_rejected,
+                        report.duration_ms
+                    );
+                    for warning in report.warnings.iter().take(5) {
+                        println!("    warning: {warning}");
+                    }
+                    if report.warnings.len() > 5 {
+                        println!("    ... {} more warnings", report.warnings.len() - 5);
+                    }
+                    for error in &report.errors {
+                        println!("    error: {error}");
+                    }
+                }
+            }
+
+            let status = store.status()?;
+            println!("Synchronization completed.");
+            println!("  Airports: {}", status.total_airports);
+            println!("  Runways: {}", status.total_runways);
+            println!("  Navaids: {}", status.total_navaids);
+            println!("  Waypoints: {}", status.total_waypoints);
         }
 
         Commands::Status { db } => {
@@ -356,19 +412,66 @@ async fn main() -> Result<()> {
             );
         }
 
+        Commands::Validate { db } => {
+            if !db.exists() {
+                println!("Database not found at {:?}", db);
+                std::process::exit(1);
+            }
+            let store = WorldStore::open(db)?;
+            let issues = store.validate()?;
+            if issues.is_empty() {
+                println!("Canonical store is structurally valid.");
+            } else {
+                println!("Found {} structural issue(s):", issues.len());
+                for issue in &issues {
+                    println!(
+                        "  [{}] {} {}: {}",
+                        issue.severity, issue.table, issue.id, issue.message
+                    );
+                }
+                std::process::exit(1);
+            }
+        }
+
         Commands::Export { target } => match target {
-            ExportTarget::Xplane { db, out, date: _ } => {
-                let utc_date = Utc::now();
-                println!("🛫 Exporting X-Plane 12 Navigation Data...");
+            ExportTarget::Xplane {
+                db,
+                out,
+                date,
+                allow_empty,
+            } => {
+                let export_date = parse_export_date(date)?;
+                println!("Exporting X-Plane 12 Navigation Data...");
                 println!("  Database: {:?}", db);
                 println!("  Output Directory: {:?}", out);
+                println!(
+                    "  Effective Date: {}",
+                    export_date.format("%Y-%m-%d %H:%M UTC")
+                );
 
                 let store = WorldStore::open(db)?;
-                let (wp_cnt, nav_cnt) = XPlane12Exporter::export_from_db(&store, utc_date, out)?;
+                let report =
+                    XPlane12Exporter::export_from_db(&store, export_date, out, *allow_empty)?;
 
-                println!("  Exported {} waypoints to earth_fix.dat", wp_cnt);
-                println!("  Exported {} navaids to earth_nav.dat", nav_cnt);
-                println!("✅ X-Plane 12 export complete.");
+                println!(
+                    "  Exported {} waypoints to earth_fix.dat",
+                    report.fixes_written
+                );
+                println!(
+                    "  Exported {} navaids to earth_nav.dat",
+                    report.navaids_written
+                );
+                println!(
+                    "  Skipped {} fixes, {} navaids",
+                    report.fixes_skipped, report.navaids_skipped
+                );
+                for diagnostic in report.diagnostics.iter().take(20) {
+                    println!("  diagnostic: {diagnostic}");
+                }
+                if report.diagnostics.len() > 20 {
+                    println!("  ... {} more diagnostics", report.diagnostics.len() - 20);
+                }
+                println!("X-Plane 12 export complete.");
             }
         },
     }
@@ -387,5 +490,14 @@ mod tests {
 
         let dec_raw = parse_iso_date_to_year_decimal("2026.5").unwrap();
         assert_eq!(dec_raw, 2026.5);
+    }
+
+    #[test]
+    fn test_parse_export_date() {
+        let dt = parse_export_date(&Some("2026-08-06".to_string())).unwrap();
+        assert_eq!(dt.format("%Y-%m-%d").to_string(), "2026-08-06");
+        let dt = parse_export_date(&Some("2026-08-06T12:00:00Z".to_string())).unwrap();
+        assert_eq!(dt.format("%Y-%m-%d").to_string(), "2026-08-06");
+        assert!(parse_export_date(&Some("garbage".to_string())).is_err());
     }
 }
