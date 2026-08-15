@@ -188,6 +188,9 @@ impl OurAirportsImporter {
                 id: AirportId(format!("ourairports:{}", rec.id)),
                 ident: rec.ident,
                 name: rec.name,
+                // Classification: benign representation default. The schema
+                // column is NOT NULL and the value is descriptive metadata
+                // only — it feeds no navigation computation.
                 airport_type: rec.airport_type.unwrap_or_default(),
                 latitude: lat,
                 longitude: lon,
@@ -416,13 +419,17 @@ impl OurAirportsImporter {
 
             // Paired DME component: VOR-DME/VORTAC/NDB-DME facilities carry
             // the DME frequency and position in dedicated columns.
-            let has_dme = rec.dme_frequency_khz.is_some_and(|f| f > 0);
             let dme_component =
                 matches!(kind, NavaidKind::Vordme | NavaidKind::Vortac) || is_ndb_dme;
-            if dme_component && has_dme {
-                let dme_freq = rec.dme_frequency_khz.unwrap_or(freq_khz);
-                // The DME of a colocated facility sits at the facility
-                // position; the source DME coordinates take precedence.
+            if dme_component {
+                let Some(dme_freq) = rec.dme_frequency_khz.filter(|f| *f > 0) else {
+                    // The source does not publish the DME component: no DME
+                    // row is emitted (fail closed; nothing is invented).
+                    continue;
+                };
+                // ARINC 424-18 5.41/5.42: a blank DME position means the DME
+                // is colocated with the VOR. The dedicated columns take
+                // precedence when the source provides them.
                 let dme_lat = rec
                     .dme_latitude_deg
                     .filter(|v| (-90.0..=90.0).contains(v))
@@ -431,6 +438,8 @@ impl OurAirportsImporter {
                     .dme_longitude_deg
                     .filter(|v| (-180.0..=180.0).contains(v))
                     .unwrap_or(lon);
+                // ARINC 424-18 5.40: a blank DME elevation means the DME
+                // elevation equals the VOR elevation.
                 let dme_elevation = rec.dme_elevation_ft.or(rec.elevation_ft);
                 let dme_volume = rec
                     .power

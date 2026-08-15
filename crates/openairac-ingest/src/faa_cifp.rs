@@ -472,13 +472,19 @@ fn navaid_kind_from_class(class: &str) -> Option<NavaidKind> {
 }
 
 /// XPNAV1200 class/volume mapping derived from the source class field.
-/// The mapping table was verified against Laminar convert424toxplane v12.4
-/// output for the same records (CIFP cycle 2608).
+/// The altitude/service class character is ALWAYS column 30 (index 2) of the
+/// D-record class field (columns 28-30). Column 29 carries the facility or
+/// colocated-component type (V/D/T/I/O). Mapping verified against
+/// convert424toxplane v12.4 output row-by-row on CIFP cycle 2608:
+/// H -> 130, L -> 40, T -> 25, U -> 150 (VOR family) / 125 (DME).
+/// NDB: column 30 'L' -> 15 (locator), 'M' -> 25, blank -> 50. The official
+/// tool refines locator classification further with data outside the D
+/// record; those cases remain unknown here and export as None (skipped).
 fn service_volume_from_cifp_class(kind: NavaidKind, class: &str) -> Option<u16> {
     let b = class.as_bytes();
     match kind {
         NavaidKind::Vor | NavaidKind::Vordme | NavaidKind::Vortac | NavaidKind::Dme => {
-            match b.get(1).copied() {
+            match b.get(2).copied() {
                 Some(b'H') => Some(130),
                 Some(b'L') => Some(40),
                 Some(b'T') => Some(25),
@@ -487,10 +493,10 @@ fn service_volume_from_cifp_class(kind: NavaidKind, class: &str) -> Option<u16> 
             }
         }
         NavaidKind::IlsLocalizer => None,
-        NavaidKind::Ndb => match b.first().copied() {
-            Some(b'H') | Some(b'D') => Some(50),
-            Some(b'M') => Some(25),
+        NavaidKind::Ndb => match b.get(2).copied() {
             Some(b'L') => Some(15),
+            Some(b'M') => Some(25),
+            Some(b' ') | None => Some(50),
             _ => None,
         },
         _ => None,
@@ -613,8 +619,10 @@ pub fn interpret(
                     associated_airport: associated_airport.clone(),
                     magnetic_variation_deg: *magnetic_variation_deg,
                     slaved_variation_deg: None,
-                    service_volume_nm: service_volume_from_cifp_class(NavaidKind::Dme, class)
-                        .or(Some(25)),
+                    // Source-derived only: the class mapping (verified against
+                    // convert424toxplane output) maps 'H'/'L'/'T'/'U'. No
+                    // fallback value is fabricated here.
+                    service_volume_nm: service_volume_from_cifp_class(NavaidKind::Dme, class),
                     dme_paired: true,
                     associated_runway: None,
                     localizer_bearing_true_deg: None,
@@ -1071,7 +1079,7 @@ mod tests {
         };
         assert_eq!(vor.kind, NavaidKind::Vortac);
         assert_eq!(vor.slaved_variation_deg, Some(10.0));
-        assert_eq!(vor.service_volume_nm, Some(25)); // class 'VTH' col29 = T (terminal)
+        assert_eq!(vor.service_volume_nm, Some(130)); // class 'VTH' col 30 = H (high)
         let dme = match &out[1] {
             CifpInterpretation::Navaid(n) => n.clone(),
             other => panic!("expected paired DME, got {other:?}"),
@@ -1093,6 +1101,65 @@ mod tests {
         assert_eq!(dme.kind, NavaidKind::Dme);
         assert!(dme.dme_paired);
         assert_eq!(dme.associated_airport.as_deref(), Some("KSFO"));
+    }
+
+    #[test]
+    fn test_ils_dme_service_volume_from_class_mapping() {
+        // The ILS-DME row's class is ' IT' (column 30 = 'T'): the mapping
+        // yields 25, verified against convert424toxplane's ILS-DME rows.
+        // No fabricated fallback may appear.
+        let snapshot_id = SourceSnapshotId("snap-faa".to_string());
+        let rec = decode_line(D_ISFO_ILS).unwrap();
+        let out = interpret(&rec, &snapshot_id, Utc::now());
+        let dme = match &out[1] {
+            CifpInterpretation::Navaid(n) => n.clone(),
+            other => panic!("expected DME-ILS, got {other:?}"),
+        };
+        assert_eq!(dme.kind, NavaidKind::Dme);
+        assert_eq!(dme.service_volume_nm, Some(25));
+    }
+
+    #[test]
+    fn test_unmapped_class_yields_none_service_volume() {
+        // A class code the mapping does not know must yield None (the
+        // exporter will skip the row), never an invented value.
+        assert_eq!(service_volume_from_cifp_class(NavaidKind::Vor, "VXZ"), None);
+        assert_eq!(
+            service_volume_from_cifp_class(NavaidKind::Dme, " IT"),
+            Some(25)
+        );
+        assert_eq!(
+            service_volume_from_cifp_class(NavaidKind::Vortac, "VTH"),
+            Some(130)
+        );
+        assert_eq!(
+            service_volume_from_cifp_class(NavaidKind::Ndb, "HOL"),
+            Some(15)
+        );
+    }
+
+    #[test]
+    fn test_interpret_to_canonical() {
+        let snapshot_id = SourceSnapshotId("snap-faa".to_string());
+        let valid_from = Utc::now();
+
+        let wp_rec = decode_line(EA_AAARG).unwrap();
+        match &interpret(&wp_rec, &snapshot_id, valid_from)[0] {
+            CifpInterpretation::Waypoint(wp) => {
+                assert_eq!(wp.object_id.0, "faa:SUSA:K :AAARG");
+                assert!(wp.is_enroute);
+            }
+            other => panic!("expected waypoint, got {other:?}"),
+        }
+
+        let vor_rec = decode_line(D_ABI_VORTAC).unwrap();
+        match &interpret(&vor_rec, &snapshot_id, valid_from)[0] {
+            CifpInterpretation::Navaid(nav) => {
+                assert_eq!(nav.kind, NavaidKind::Vortac);
+                assert_eq!(nav.object_id.0, "faa:SUSA:K4:ABI");
+            }
+            other => panic!("expected navaid, got {other:?}"),
+        }
     }
 
     #[test]
