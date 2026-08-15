@@ -241,10 +241,10 @@ impl WorldQuery {
             if leg.airport_ident != airport_ident {
                 continue;
             }
-            if let Some(k) = kind {
-                if ProcedureKind::from_arinc(leg.procedure_kind) != Some(k) {
-                    continue;
-                }
+            if let Some(k) = kind
+                && ProcedureKind::from_arinc(leg.procedure_kind) != Some(k)
+            {
+                continue;
             }
             match summaries.iter_mut().find(|s| {
                 s.ident == leg.procedure_ident && s.kind == leg.procedure_kind.to_string()

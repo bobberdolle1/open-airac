@@ -555,7 +555,7 @@ mod tests {
     fn canonical(overrides: &[(String, String)]) -> CanonicalProcedureLeg {
         // Real PD/PE/PF field values are injected as (field, value)
         // pairs over a CIITY3-like baseline.
-        let mut get = |field: &str, default: &str| -> String {
+        let get = |field: &str, default: &str| -> String {
             overrides
                 .iter()
                 .find(|(f, _)| f == field)

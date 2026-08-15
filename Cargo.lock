@@ -1168,6 +1168,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "openairac-integration"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "openairac-model",
+ "openairac-procedures",
+ "openairac-routing",
+ "openairac-store",
+ "serde",
+]
+
+[[package]]
 name = "openairac-magnetic"
 version = "0.2.0"
 dependencies = [
@@ -1211,8 +1224,24 @@ name = "openairac-routing"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "geo",
  "openairac-model",
+ "serde",
+ "tracing",
+]
+
+[[package]]
+name = "openairac-service"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "openairac-integration",
+ "openairac-model",
+ "openairac-procedures",
+ "openairac-routing",
+ "openairac-store",
  "serde",
 ]
 

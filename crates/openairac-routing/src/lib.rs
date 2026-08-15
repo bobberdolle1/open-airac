@@ -132,7 +132,12 @@ impl NodeId {
 
     /// Display form for diagnostics.
     pub fn display(&self) -> String {
-        format!("{}/{}/{}", self.ident, self.region.trim(), kind_str(self.kind))
+        format!(
+            "{}/{}/{}",
+            self.ident,
+            self.region.trim(),
+            kind_str(self.kind)
+        )
     }
 }
 
@@ -283,7 +288,11 @@ impl AirwayGraph {
             let (Some(from), Some(to)) = (nodes.get(&start), nodes.get(&end)) else {
                 diagnostics.push(format!(
                     "airway {}: endpoint {}/{} or {}/{} not in node set",
-                    leg.route_ident, leg.start_fix, leg.start_icao_code, leg.end_fix, leg.end_icao_code
+                    leg.route_ident,
+                    leg.start_fix,
+                    leg.start_icao_code,
+                    leg.end_fix,
+                    leg.end_icao_code
                 ));
                 continue;
             };
@@ -360,15 +369,15 @@ impl AirwayGraph {
             return false;
         }
         if let Some(alt) = request.cruise_altitude_ft {
-            if let Some(min) = edge.minimum_altitude_ft {
-                if alt < min {
-                    return false;
-                }
+            if let Some(min) = edge.minimum_altitude_ft
+                && alt < min
+            {
+                return false;
             }
-            if let Some(max) = edge.maximum_altitude_ft {
-                if alt > max {
-                    return false;
-                }
+            if let Some(max) = edge.maximum_altitude_ft
+                && alt > max
+            {
+                return false;
             }
         }
         if request
@@ -420,7 +429,10 @@ impl AirwayGraph {
             };
         };
         let Some(end_node) = self.nodes.get(&destination) else {
-            diagnostics.push(format!("destination {} not in graph", destination.display()));
+            diagnostics.push(format!(
+                "destination {} not in graph",
+                destination.display()
+            ));
             return RouteResult {
                 success: false,
                 legs: Vec::new(),
@@ -589,9 +601,7 @@ pub fn build_graph_or_bail(
 mod tests {
     use super::*;
     use chrono::TimeDelta;
-    use openairac_model::{
-        AirwayLegId, NavaidId, NavaidKind, SourceSnapshotId, TemporalValidity, WaypointId,
-    };
+    use openairac_model::{AirwayLegId, SourceSnapshotId, TemporalValidity, WaypointId};
 
     fn temporal(t: DateTime<Utc>) -> TemporalValidity {
         TemporalValidity {
@@ -616,6 +626,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn leg(
         route: &str,
         start: &str,
@@ -674,8 +685,30 @@ mod tests {
             fix("CCC", "K1", 42.0, -82.0, t),
         ];
         let legs = vec![
-            leg("V1", "AAA", "K1", "BBB", "K1", Some('L'), 'N', None, None, t),
-            leg("V2", "BBB", "K1", "CCC", "K1", Some('L'), 'N', None, None, t),
+            leg(
+                "V1",
+                "AAA",
+                "K1",
+                "BBB",
+                "K1",
+                Some('L'),
+                'N',
+                None,
+                None,
+                t,
+            ),
+            leg(
+                "V2",
+                "BBB",
+                "K1",
+                "CCC",
+                "K1",
+                Some('L'),
+                'N',
+                None,
+                None,
+                t,
+            ),
         ];
         let (graph, diagnostics) = AirwayGraph::build(&fixes, &[], &legs, t);
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
@@ -697,15 +730,37 @@ mod tests {
     #[test]
     fn test_direction_restriction_honored() {
         let t = Utc::now();
-        let fixes = vec![fix("AAA", "K1", 40.0, -80.0, t), fix("BBB", "K1", 41.0, -81.0, t)];
-        let legs = vec![leg("V9", "AAA", "K1", "BBB", "K1", Some('L'), 'F', None, None, t)];
+        let fixes = vec![
+            fix("AAA", "K1", 40.0, -80.0, t),
+            fix("BBB", "K1", 41.0, -81.0, t),
+        ];
+        let legs = vec![leg(
+            "V9",
+            "AAA",
+            "K1",
+            "BBB",
+            "K1",
+            Some('L'),
+            'F',
+            None,
+            None,
+            t,
+        )];
         let (graph, _) = AirwayGraph::build(&fixes, &[], &legs, t);
         assert_eq!(graph.edge_count(), 1);
 
-        let forward = graph.route(&request(NodeId::fix("AAA", "K1"), NodeId::fix("BBB", "K1"), t));
+        let forward = graph.route(&request(
+            NodeId::fix("AAA", "K1"),
+            NodeId::fix("BBB", "K1"),
+            t,
+        ));
         assert!(forward.success);
 
-        let backward = graph.route(&request(NodeId::fix("BBB", "K1"), NodeId::fix("AAA", "K1"), t));
+        let backward = graph.route(&request(
+            NodeId::fix("BBB", "K1"),
+            NodeId::fix("AAA", "K1"),
+            t,
+        ));
         assert!(!backward.success);
     }
 
@@ -719,9 +774,31 @@ mod tests {
         ];
         let legs = vec![
             // low airway: usable below 10000 ft
-            leg("V1", "AAA", "K1", "BBB", "K1", Some('L'), 'N', Some(3000), Some(10000), t),
+            leg(
+                "V1",
+                "AAA",
+                "K1",
+                "BBB",
+                "K1",
+                Some('L'),
+                'N',
+                Some(3000),
+                Some(10000),
+                t,
+            ),
             // high airway: usable at/above 18000 ft
-            leg("J1", "BBB", "K1", "CCC", "K1", Some('H'), 'N', Some(18000), Some(45000), t),
+            leg(
+                "J1",
+                "BBB",
+                "K1",
+                "CCC",
+                "K1",
+                Some('H'),
+                'N',
+                Some(18000),
+                Some(45000),
+                t,
+            ),
         ];
         let (graph, _) = AirwayGraph::build(&fixes, &[], &legs, t);
 
@@ -736,7 +813,11 @@ mod tests {
         assert!(!high.success, "20000 ft cannot use the V1 segment");
 
         // No cruise altitude: any path is allowed.
-        let any = graph.route(&request(NodeId::fix("AAA", "K1"), NodeId::fix("CCC", "K1"), t));
+        let any = graph.route(&request(
+            NodeId::fix("AAA", "K1"),
+            NodeId::fix("CCC", "K1"),
+            t,
+        ));
         assert!(any.success);
     }
 
@@ -750,10 +831,54 @@ mod tests {
             fix("DDD", "K1", 43.0, -83.0, t),
         ];
         let legs = vec![
-            leg("V1", "AAA", "K1", "BBB", "K1", Some('L'), 'N', None, None, t),
-            leg("V2", "BBB", "K1", "CCC", "K1", Some('L'), 'N', None, None, t),
-            leg("V2", "CCC", "K1", "DDD", "K1", Some('L'), 'N', None, None, t),
-            leg("V3", "BBB", "K1", "DDD", "K1", Some('L'), 'N', None, None, t),
+            leg(
+                "V1",
+                "AAA",
+                "K1",
+                "BBB",
+                "K1",
+                Some('L'),
+                'N',
+                None,
+                None,
+                t,
+            ),
+            leg(
+                "V2",
+                "BBB",
+                "K1",
+                "CCC",
+                "K1",
+                Some('L'),
+                'N',
+                None,
+                None,
+                t,
+            ),
+            leg(
+                "V2",
+                "CCC",
+                "K1",
+                "DDD",
+                "K1",
+                Some('L'),
+                'N',
+                None,
+                None,
+                t,
+            ),
+            leg(
+                "V3",
+                "BBB",
+                "K1",
+                "DDD",
+                "K1",
+                Some('L'),
+                'N',
+                None,
+                None,
+                t,
+            ),
         ];
         let (graph, _) = AirwayGraph::build(&fixes, &[], &legs, t);
 
@@ -769,8 +894,22 @@ mod tests {
     #[test]
     fn test_rnav_capability_gate() {
         let t = Utc::now();
-        let fixes = vec![fix("AAA", "K1", 40.0, -80.0, t), fix("BBB", "K1", 41.0, -81.0, t)];
-        let mut rnaav_leg = leg("Q1", "AAA", "K1", "BBB", "K1", Some('H'), 'N', None, None, t);
+        let fixes = vec![
+            fix("AAA", "K1", 40.0, -80.0, t),
+            fix("BBB", "K1", 41.0, -81.0, t),
+        ];
+        let mut rnaav_leg = leg(
+            "Q1",
+            "AAA",
+            "K1",
+            "BBB",
+            "K1",
+            Some('H'),
+            'N',
+            None,
+            None,
+            t,
+        );
         rnaav_leg.route_type = "R".to_string();
         let (graph, _) = AirwayGraph::build(&fixes, &[], &[rnaav_leg], t);
 
@@ -792,7 +931,18 @@ mod tests {
         // through a graph built from `t0` entities.
         let fixes_t0 = vec![fix("AAA", "K1", 40.0, -80.0, t0)];
         let fixes_future = vec![fix("BBB", "K1", 41.0, -81.0, t_future)];
-        let legs_t0 = vec![leg("V1", "AAA", "K1", "BBB", "K1", Some('L'), 'N', None, None, t0)];
+        let legs_t0 = vec![leg(
+            "V1",
+            "AAA",
+            "K1",
+            "BBB",
+            "K1",
+            Some('L'),
+            'N',
+            None,
+            None,
+            t0,
+        )];
         let (graph, diagnostics) = AirwayGraph::build(&fixes_t0, &[], &legs_t0, t0);
         // The leg's end fix is missing from the t0 node set -> skipped.
         assert_eq!(diagnostics.len(), 1);
@@ -815,7 +965,18 @@ mod tests {
             fix("CCC", "K1", 42.0, -82.0, t),
             fix("DDD", "K1", 43.0, -83.0, t),
         ];
-        let legs = vec![leg("V1", "AAA", "K1", "BBB", "K1", Some('L'), 'N', None, None, t)];
+        let legs = vec![leg(
+            "V1",
+            "AAA",
+            "K1",
+            "BBB",
+            "K1",
+            Some('L'),
+            'N',
+            None,
+            None,
+            t,
+        )];
         let (graph, _) = AirwayGraph::build(&fixes, &[], &legs, t);
         let components = graph.disconnected_components();
         assert_eq!(components.len(), 3); // {AAA,BBB}, {CCC}, {DDD}

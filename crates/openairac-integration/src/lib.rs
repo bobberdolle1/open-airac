@@ -76,10 +76,8 @@ fn route_enroute(
     store: &WorldStore,
     t: DateTime<Utc>,
     request: &FlightPlanRequest,
-    origin_fix: &str,
-    origin_region: &str,
-    destination_fix: &str,
-    destination_region: &str,
+    (origin_fix, origin_region): (&str, &str),
+    (destination_fix, destination_region): (&str, &str),
     diagnostics: &mut Vec<String>,
 ) -> Result<RouteResult> {
     let (graph, graph_diagnostics) = AirwayGraph::build(
@@ -327,13 +325,11 @@ impl<'a> Planner<'a> {
                 };
                 match (region_of(&sid.exit_fix), region_of(&star.entry_fix)) {
                     (Some(origin_region), Some(destination_region)) => route_enroute(
-                        &self.store,
+                        self.store,
                         t,
                         request,
-                        &sid.exit_fix,
-                        &origin_region,
-                        &star.entry_fix,
-                        &destination_region,
+                        (&sid.exit_fix, &origin_region),
+                        (&star.entry_fix, &destination_region),
                         &mut diagnostics,
                     )?,
                     _ => {
@@ -455,6 +451,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn procedure_leg(
         airport: &str,
         kind: char,
