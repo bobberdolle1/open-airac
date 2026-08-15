@@ -166,7 +166,7 @@ fn test_fixture_to_export_pipeline() {
     let report = XPlane12Exporter::export_from_db(&store, export_date, &out_dir, false).unwrap();
     assert_eq!(report.fixes_written, 4); // AABBZ K5, SWIMM K7, ZBV MY, TINKY K-blank
     assert_eq!(report.navaids_written, 2); // ABI VORTAC + ABI DME (KENIE NDB: no elevation -> skipped)
-    assert_eq!(report.airway_legs_written, 2);
+    assert_eq!(report.airway_rows_written, 2);
     assert_eq!(report.navaids_skipped, 5);
 
     let fix_content = std::fs::read_to_string(out_dir.join("earth_fix.dat")).unwrap();

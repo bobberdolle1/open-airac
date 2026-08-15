@@ -40,9 +40,9 @@ Traditional flight simulation navigation relies on expensive recurring subscript
 | **Temporal SQLite Store (revisioned `world_at`) & Migrations** | **Implemented** | `openairac-store` |
 | **Transactional, Fail-Closed Ingestion + Diagnostics** | **Implemented** | `openairac-ingest` |
 | **OurAirports Ingestion (live fetch: Airports/Runways/Navaids)** | **Implemented** | `openairac-ingest` |
-| **Experimental FAA CIFP ARINC 424 Adapter (EA/D/DB/PN records)** | **Experimental** | `openairac-ingest` |
+| **Experimental FAA CIFP ARINC 424 Adapter (EA/D/DB/PN/ER records)** | **Experimental** | `openairac-ingest` |
 | **Geodesic Direct Route Engine (WGS84)** | **Implemented** | `openairac-routing` |
-| **X-Plane 12 dat Exporter (`earth_fix`/`earth_nav`, staged & fail-closed)** | **Implemented** | `openairac-export-xplane` |
+| **X-Plane 12 dat Exporter (`earth_fix`/`earth_nav`/`earth_awy`, staged & fail-closed)** | **Experimental** | `openairac-export-xplane` |
 | **Full SID / STAR / Approach Leg Execution** | *Planned* | `openairac-procedures` |
 | **MSFS 2024 Packager** | *Planned* | Roadmap |
 | **Flight Deck EFB Interface** | *Planned* | Roadmap |
@@ -105,15 +105,18 @@ openairac export xplane --db ./data/world.openairac.sqlite --out ./dist/xplane
 ```
 The exporter is fail-closed and layer-aware: it writes `earth_fix.dat`,
 `earth_nav.dat` and `earth_awy.dat` plus a checksummed `manifest.json`,
-stages them and swaps them in atomically. Records missing fields the
-X-Plane format requires (ICAO region, elevation, slaved variation, service
-class, waypoint type, localizer bearings, airway endpoint references) are
-skipped with diagnostics instead of being fabricated. An incomplete layer —
-including a missing or empty `earth_awy.dat`, which breaks X-Plane's
-referential integrity — is refused unless `--allow-empty` is passed.
-**OpenAIRAC does not yet install into a live simulator installation**; the
-output is for validation and testing. Row conventions are cross-checked
-against Laminar convert424toxplane v12.4 output for the same FAA CIFP input.
+stages them and swaps them into place file-by-file (the multi-file swap is
+not atomic as a set; a transactional backup/rollback install is designed
+but intentionally not exposed). Records missing fields the X-Plane format
+requires (ICAO region, elevation, slaved variation, service class, waypoint
+type, localizer bearings, airway level, altitudes or endpoint references)
+are skipped with diagnostics instead of being fabricated. An incomplete
+layer — including a missing or empty `earth_awy.dat`, which breaks
+X-Plane's referential integrity — is refused unless `--allow-empty` is
+passed. **OpenAIRAC does not yet install into a live simulator
+installation**; the output is for validation and testing. Row conventions
+are cross-checked against Laminar convert424toxplane v12.4 output for the
+same FAA CIFP input.
 ---
 
 ## 📄 License
