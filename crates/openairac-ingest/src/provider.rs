@@ -47,6 +47,8 @@ pub struct IngestReport {
     pub source_checksum: String,
 }
 
+const MAX_WARNINGS: usize = 1000;
+
 impl IngestReport {
     pub fn new(provider: &str, dataset: &str, checksum: &str) -> Self {
         Self {
@@ -84,13 +86,17 @@ impl IngestReport {
     /// Questionable record: dropped from the store with a diagnostic.
     pub fn record_quarantined(&mut self, reason: String) {
         self.records_quarantined += 1;
-        self.warnings.push(reason);
+        if self.warnings.len() < MAX_WARNINGS {
+            self.warnings.push(reason);
+        }
     }
 
     /// Invalid record: dropped from the store with a diagnostic.
     pub fn record_rejected(&mut self, reason: String) {
         self.records_rejected += 1;
-        self.warnings.push(reason);
+        if self.warnings.len() < MAX_WARNINGS {
+            self.warnings.push(reason);
+        }
     }
 
     /// Fatal problem (usually I/O or store level, not a single record).
