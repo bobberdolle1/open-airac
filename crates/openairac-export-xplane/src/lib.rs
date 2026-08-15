@@ -16,9 +16,11 @@
 //!   than convert424toxplane, which defaults unknown elevations to 0; the
 //!   divergence is deliberate and documented.
 //! * Files are generated into a staging directory, recorded in a manifest,
-//!   and swapped in atomically only when every file succeeded.
-//! * An export that would produce an incomplete layer (any of the three
-//!   files empty, or airway endpoints missing) is refused unless
+//!   and then swapped into place file-by-file only when every file
+//!   succeeded. The multi-file swap is STAGED, not atomic as a set: a
+//!   crash between swaps can leave a mixed layer. True transactional
+//!   directory install (backup + rollback) is designed (`InstallPlan`) but
+//!   intentionally not implemented or exposed yet.
 //!   `allow_empty`, so an incomplete world database can never silently
 //!   destroy a working simulator installation.
 //! * A full X-Plane layer requires `earth_awy.dat` plus cycle-consistent
@@ -34,14 +36,19 @@ use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-/// Deterministic export outcome report.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ExportReport {
+    /// Physical rows serialized into the staged files.
     pub fixes_written: usize,
-    pub fixes_skipped: usize,
     pub navaids_written: usize,
+    /// Airway LEGS accepted for the layer (before merging).
+    pub airway_legs_accepted: usize,
+    /// Physical merged segment rows written to `earth_awy.dat`. This is the
+    /// number the manifest records; it differs from `airway_legs_accepted`
+    /// whenever several airways share a segment.
+    pub airway_rows_written: usize,
+    pub fixes_skipped: usize,
     pub navaids_skipped: usize,
-    pub airway_legs_written: usize,
     pub airway_legs_skipped: usize,
     /// First skipped records with reasons (bounded; see MAX_DIAGNOSTICS).
     pub diagnostics: Vec<String>,
@@ -107,6 +114,76 @@ fn write_header<W: Write>(
     Ok(())
 }
 
+/// The set of entities ACTUALLY serialized into the staged
+/// `earth_fix.dat` / `earth_nav.dat`. Airway referential integrity is
+/// checked against this index — a canonical entity that the fix/nav writers
+/// skipped (missing region, class, elevation, ...) must not satisfy an
+/// airway endpoint, or X-Plane would reject the layer at load time.
+#[derive(Debug, Default, Clone)]
+pub struct ExportedEntityIndex {
+    fixes: std::collections::HashSet<(String, String)>,
+    ndbs: std::collections::HashSet<(String, String)>,
+    vhf: std::collections::HashSet<(String, String)>,
+}
+
+impl ExportedEntityIndex {
+    fn add_fix(&mut self, wp: &CanonicalWaypoint) {
+        self.fixes
+            .insert((wp.ident.trim().to_string(), wp.region_code.clone()));
+    }
+
+    /// Register a navaid that was physically written. Only ENROUTE navaids
+    /// (no terminal area association) are valid airway endpoints per the
+    /// XPAWY1101 spec ("points ... listed in the enroute portions of
+    /// earth_nav.dat"); ILS components are terminal and never qualify.
+    fn add_navaid(&mut self, nav: &CanonicalNavaid) {
+        if nav.associated_airport.is_some() {
+            return;
+        }
+        let Some(region) = nav.region_code.clone() else {
+            return;
+        };
+        let key = (nav.ident.trim().to_string(), region);
+        match nav.kind {
+            NavaidKind::Ndb => {
+                self.ndbs.insert(key);
+            }
+            NavaidKind::Vor
+            | NavaidKind::Vordme
+            | NavaidKind::Vortac
+            | NavaidKind::Tacan
+            | NavaidKind::Dme => {
+                self.vhf.insert(key);
+            }
+            NavaidKind::IlsLocalizer | NavaidKind::IlsGlidepath => {}
+        }
+    }
+
+    /// XPAWY1101 endpoint type: 11 = enroute fix, 2 = enroute NDB,
+    /// 3 = VHF navaid (VOR/TACAN/DME). `None` = not in the exported layer.
+    pub fn endpoint_type(&self, ident: &str, region: &str) -> Option<u8> {
+        let key = (ident.trim().to_string(), region.to_string());
+        if self.fixes.contains(&key) {
+            return Some(11);
+        }
+        if self.ndbs.contains(&key) {
+            return Some(2);
+        }
+        if self.vhf.contains(&key) {
+            return Some(3);
+        }
+        None
+    }
+
+    pub fn len(&self) -> usize {
+        self.fixes.len() + self.ndbs.len() + self.vhf.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
 pub struct XPlane12Exporter;
 
 impl XPlane12Exporter {
@@ -120,6 +197,7 @@ impl XPlane12Exporter {
         build_date: &str,
         mut writer: W,
         report: &mut ExportReport,
+        index: &mut ExportedEntityIndex,
     ) -> Result<()> {
         write_header(&mut writer, "1200", "FixXP1200.", cycle, build_date)?;
 
@@ -145,8 +223,16 @@ impl XPlane12Exporter {
                 );
                 continue;
             };
-            // Terminal-area waypoints (non-ENRT) are not yet ingestible;
-            // the model keeps `is_enroute` for the PC-record work.
+            if !wp.is_enroute {
+                // Terminal fixes require the airport terminal area in the
+                // row; that data is not modeled yet. Fail closed.
+                report.skip(
+                    "fix",
+                    &wp.ident,
+                    "terminal-area waypoint not representable yet".to_string(),
+                );
+                continue;
+            }
             let terminal_area = "ENRT";
             writeln!(
                 writer,
@@ -159,6 +245,7 @@ impl XPlane12Exporter {
                 waypoint_type,
                 wp.name
             )?;
+            index.add_fix(wp);
             report.fixes_written += 1;
         }
 
@@ -177,6 +264,7 @@ impl XPlane12Exporter {
         build_date: &str,
         mut writer: W,
         report: &mut ExportReport,
+        index: &mut ExportedEntityIndex,
     ) -> Result<()> {
         write_header(&mut writer, "1200", "NavXP1200.", cycle, build_date)?;
 
@@ -185,12 +273,12 @@ impl XPlane12Exporter {
         sorted.sort_by_key(|(code, nav)| (*code, nav.ident.clone(), nav.name.clone()));
         for (code, nav) in sorted {
             match code {
-                2 => self.write_ndb(nav, &mut writer, report)?,
-                3 => self.write_vor(nav, &mut writer, report)?,
+                2 => self.write_ndb(nav, &mut writer, report, index)?,
+                3 => self.write_vor(nav, &mut writer, report, index)?,
                 4 => self.write_localizer(nav, &mut writer, report)?,
                 6 => self.write_glideslope(nav, &mut writer, report)?,
-                12 => self.write_paired_dme(nav, &mut writer, report)?,
-                13 => self.write_standalone_dme(nav, &mut writer, report)?,
+                12 => self.write_paired_dme(nav, &mut writer, report, index)?,
+                13 => self.write_standalone_dme(nav, &mut writer, report, index)?,
                 _ => report.skip(
                     "navaid",
                     &nav.ident,
@@ -214,8 +302,7 @@ impl XPlane12Exporter {
     /// airways are merged into one row with hyphen-joined names.
     pub fn export_earth_awy<W: Write>(
         legs: &[CanonicalAirwayLeg],
-        fixes: &[CanonicalWaypoint],
-        navaids: &[CanonicalNavaid],
+        index: &ExportedEntityIndex,
         cycle: &str,
         build_date: &str,
         mut writer: W,
@@ -224,36 +311,6 @@ impl XPlane12Exporter {
         write_header(&mut writer, "1100", "AwyXP1100.", cycle, build_date)?;
 
         use std::collections::BTreeMap;
-        let fix_index: std::collections::HashSet<(String, String)> = fixes
-            .iter()
-            .filter(|w| w.is_enroute)
-            .map(|w| (w.ident.trim().to_string(), w.region_code.clone()))
-            .collect();
-        let nav_index: std::collections::HashSet<(String, String)> = navaids
-            .iter()
-            .filter(|n| n.region_code.is_some())
-            .map(|n| {
-                (
-                    n.ident.trim().to_string(),
-                    n.region_code.clone().unwrap_or_default(),
-                )
-            })
-            .collect();
-
-        fn endpoint_type(
-            ident: &str,
-            region: &str,
-            fix_index: &std::collections::HashSet<(String, String)>,
-            nav_index: &std::collections::HashSet<(String, String)>,
-        ) -> Option<u8> {
-            if fix_index.contains(&(ident.to_string(), region.to_string())) {
-                return Some(11);
-            }
-            if nav_index.contains(&(ident.to_string(), region.to_string())) {
-                return Some(3); // VHF navaid (NDB type 2 not distinguished here)
-            }
-            None
-        }
 
         /// One merged airway segment row.
         struct Segment {
@@ -281,6 +338,19 @@ impl XPlane12Exporter {
                 );
                 continue;
             };
+            // Fail closed on altitudes: the XPAWY1101 base/top fields have
+            // no "unknown" representation, so a segment without source
+            // altitudes is skipped instead of written as 0/0.
+            let (Some(minimum_altitude_ft), Some(maximum_altitude_ft)) =
+                (leg.minimum_altitude_ft, leg.maximum_altitude_ft)
+            else {
+                report.skip(
+                    "airway",
+                    &leg.route_ident,
+                    "missing MEA/maximum altitude".to_string(),
+                );
+                continue;
+            };
             let start_ident = leg.start_fix.trim().to_string();
             let start_region = leg.start_icao_code.clone();
             let end_ident = leg.end_fix.trim().to_string();
@@ -301,9 +371,9 @@ impl XPlane12Exporter {
                 );
                 continue;
             }
-            let Some(start_type) =
-                endpoint_type(&start_ident, &start_region, &fix_index, &nav_index)
-            else {
+            // Referential integrity against the ACTUALLY EXPORTED entities:
+            // an endpoint the fix/nav writers skipped does not qualify.
+            let Some(start_type) = index.endpoint_type(&start_ident, &start_region) else {
                 report.skip(
                     "airway",
                     &leg.route_ident,
@@ -311,8 +381,7 @@ impl XPlane12Exporter {
                 );
                 continue;
             };
-            let Some(end_type) = endpoint_type(&end_ident, &end_region, &fix_index, &nav_index)
-            else {
+            let Some(end_type) = index.endpoint_type(&end_ident, &end_region) else {
                 report.skip(
                     "airway",
                     &leg.route_ident,
@@ -345,16 +414,18 @@ impl XPlane12Exporter {
                     direction: leg.direction,
                     level,
                     names: vec![leg.route_ident.clone()],
-                    minimum_altitude_ft: leg.minimum_altitude_ft,
-                    maximum_altitude_ft: leg.maximum_altitude_ft,
+                    minimum_altitude_ft: Some(minimum_altitude_ft),
+                    maximum_altitude_ft: Some(maximum_altitude_ft),
                 });
-            report.airway_legs_written += 1;
+            report.airway_legs_accepted += 1;
         }
 
         for seg in merged.values() {
             let level_num = if seg.level == 'H' { 2 } else { 1 };
-            let base = seg.minimum_altitude_ft.map(|v| v / 100).unwrap_or(0);
-            let top = seg.maximum_altitude_ft.map(|v| v / 100).unwrap_or(0);
+            // Altitudes are guaranteed present (checked above); the
+            // unwraps document the invariant, they cannot fail.
+            let base = seg.minimum_altitude_ft.unwrap() / 100;
+            let top = seg.maximum_altitude_ft.unwrap() / 100;
             let names = seg.names.join("-");
             writeln!(
                 writer,
@@ -372,6 +443,7 @@ impl XPlane12Exporter {
                 names
             )?;
         }
+        report.airway_rows_written = merged.len();
 
         writeln!(writer, "99")?;
         Ok(())
@@ -398,6 +470,7 @@ impl XPlane12Exporter {
         let airway_legs = store.query_airway_legs_at(date)?;
 
         let mut report = ExportReport::default();
+        let mut index = ExportedEntityIndex::default();
         let cycle = airac_cycle(date);
         let build_date = date.format("%Y%m%d").to_string();
 
@@ -410,18 +483,30 @@ impl XPlane12Exporter {
 
         let fix_file = std::fs::File::create(&staged_fix)
             .with_context(|| format!("creating staged {:?}", staged_fix))?;
-        Self::export_earth_fix(&waypoints, &cycle, &build_date, fix_file, &mut report)?;
+        Self::export_earth_fix(
+            &waypoints,
+            &cycle,
+            &build_date,
+            fix_file,
+            &mut report,
+            &mut index,
+        )?;
 
         let nav_file = std::fs::File::create(&staged_nav)
             .with_context(|| format!("creating staged {:?}", staged_nav))?;
-        XPlane12Exporter.export_earth_nav(&navaids, &cycle, &build_date, nav_file, &mut report)?;
-
+        XPlane12Exporter.export_earth_nav(
+            &navaids,
+            &cycle,
+            &build_date,
+            nav_file,
+            &mut report,
+            &mut index,
+        )?;
         let awy_file = std::fs::File::create(&staged_awy)
             .with_context(|| format!("creating staged {:?}", staged_awy))?;
         Self::export_earth_awy(
             &airway_legs,
-            &waypoints,
-            &navaids,
+            &index,
             &cycle,
             &build_date,
             awy_file,
@@ -432,17 +517,17 @@ impl XPlane12Exporter {
         // or empty file) destroys referential integrity on install.
         let incomplete = report.fixes_written == 0
             || report.navaids_written == 0
-            || report.airway_legs_written == 0;
+            || report.airway_rows_written == 0;
         if !allow_empty && incomplete {
             let _ = std::fs::remove_dir_all(&staging);
             bail!(
-                "refusing incomplete X-Plane layer: {} fixes / {} navaids / {} airway legs written \
+                "refusing incomplete X-Plane layer: {} fixes / {} navaids / {} airway rows written \
                  (skipped {} fixes, {} navaids, {} airway legs). A global X-Plane layer requires \
                  earth_fix.dat, earth_nav.dat AND earth_awy.dat with referential integrity. \
                  Re-run with --allow-empty to override (do not install the result).",
                 report.fixes_written,
                 report.navaids_written,
-                report.airway_legs_written,
+                report.airway_rows_written,
                 report.fixes_skipped,
                 report.navaids_skipped,
                 report.airway_legs_skipped
@@ -458,7 +543,7 @@ impl XPlane12Exporter {
             files: vec![
                 manifest_file_entry(&staged_fix, report.fixes_written)?,
                 manifest_file_entry(&staged_nav, report.navaids_written)?,
-                manifest_file_entry(&staged_awy, report.airway_legs_written)?,
+                manifest_file_entry(&staged_awy, report.airway_rows_written)?,
             ],
             allow_empty,
         };
@@ -481,6 +566,7 @@ impl XPlane12Exporter {
         nav: &CanonicalNavaid,
         writer: &mut W,
         report: &mut ExportReport,
+        index: &mut ExportedEntityIndex,
     ) -> Result<()> {
         let Some(region) = nav.region_code.as_deref().filter(|r| is_icao_region(r)) else {
             report.skip("navaid", &nav.ident, "missing ICAO region code".to_string());
@@ -502,6 +588,9 @@ impl XPlane12Exporter {
             );
             return Ok(());
         };
+        // Classification: spec-mandated representation. XPNAV1200: "Airport
+        // code for terminal NDBs, ENRT otherwise" — ENRT is the format's
+        // own required value for enroute facilities, not an invented one.
         let area = nav
             .associated_airport
             .as_deref()
@@ -516,12 +605,18 @@ impl XPlane12Exporter {
             elevation,
             nav.frequency.0,
             class,
+            // Classification: spec-normative field default (benign).
+            // XPNAV1200 defines the NDB flags field as "1.0 if use of BFO
+            // is required for ID. 0.0 otherwise". No ingested source
+            // publishes BFO data, so 0.0 is the spec's own default value,
+            // not an aviation value we invented.
             0.0,
             nav.ident,
             area,
             region,
             nav.name
         )?;
+        index.add_navaid(nav);
         report.navaids_written += 1;
         Ok(())
     }
@@ -533,6 +628,7 @@ impl XPlane12Exporter {
         nav: &CanonicalNavaid,
         writer: &mut W,
         report: &mut ExportReport,
+        index: &mut ExportedEntityIndex,
     ) -> Result<()> {
         let Some(region) = nav.region_code.as_deref().filter(|r| is_icao_region(r)) else {
             report.skip("navaid", &nav.ident, "missing ICAO region code".to_string());
@@ -571,6 +667,7 @@ impl XPlane12Exporter {
             region,
             name
         )?;
+        index.add_navaid(nav);
         report.navaids_written += 1;
         Ok(())
     }
@@ -673,8 +770,9 @@ impl XPlane12Exporter {
         nav: &CanonicalNavaid,
         writer: &mut W,
         report: &mut ExportReport,
+        index: &mut ExportedEntityIndex,
     ) -> Result<()> {
-        self.write_dme_common(nav, writer, report, 12)
+        self.write_dme_common(nav, writer, report, index, 12)
     }
 
     /// Row 13: standalone DME (frequency displayed on charts).
@@ -683,8 +781,9 @@ impl XPlane12Exporter {
         nav: &CanonicalNavaid,
         writer: &mut W,
         report: &mut ExportReport,
+        index: &mut ExportedEntityIndex,
     ) -> Result<()> {
-        self.write_dme_common(nav, writer, report, 13)
+        self.write_dme_common(nav, writer, report, index, 13)
     }
 
     fn write_dme_common<W: Write>(
@@ -692,6 +791,7 @@ impl XPlane12Exporter {
         nav: &CanonicalNavaid,
         writer: &mut W,
         report: &mut ExportReport,
+        index: &mut ExportedEntityIndex,
         row: u8,
     ) -> Result<()> {
         let Some(region) = nav.region_code.as_deref().filter(|r| is_icao_region(r)) else {
@@ -726,12 +826,16 @@ impl XPlane12Exporter {
             elevation,
             freq,
             service_volume,
+            // Classification: spec-mandated default. XPNAV1200 says the
+            // DME bias field's "Default is 0.0" — the specification itself
+            // defines the value when the source does not provide a bias.
             0.0,
             nav.ident,
             area,
             region,
             name
         )?;
+        index.add_navaid(nav);
         report.navaids_written += 1;
         Ok(())
     }
@@ -986,8 +1090,16 @@ mod tests {
         ];
         let mut report = ExportReport::default();
         let mut buf = Vec::new();
-        XPlane12Exporter::export_earth_fix(&waypoints, "2608", "20260806", &mut buf, &mut report)
-            .unwrap();
+        let mut index = ExportedEntityIndex::default();
+        XPlane12Exporter::export_earth_fix(
+            &waypoints,
+            "2608",
+            "20260806",
+            &mut buf,
+            &mut report,
+            &mut index,
+        )
+        .unwrap();
         let content = String::from_utf8(buf).unwrap();
         let expected = "\
 I
@@ -1024,7 +1136,14 @@ I
         let mut report = ExportReport::default();
         let mut buf = Vec::new();
         XPlane12Exporter
-            .export_earth_nav(&[sea, sea_dme], "2608", "20260806", &mut buf, &mut report)
+            .export_earth_nav(
+                &[sea, sea_dme],
+                "2608",
+                "20260806",
+                &mut buf,
+                &mut report,
+                &mut ExportedEntityIndex::default(),
+            )
             .unwrap();
         let content = String::from_utf8(buf).unwrap();
         let rows: Vec<Vec<&str>> = content
@@ -1096,7 +1215,14 @@ I
         let mut nav = navaid("NODEF", NavaidKind::Vor, 115_000, Some("K1"));
         nav.elevation_ft = None;
         XPlane12Exporter
-            .export_earth_nav(&[nav], "2608", "20260806", &mut buf, &mut report)
+            .export_earth_nav(
+                &[nav],
+                "2608",
+                "20260806",
+                &mut buf,
+                &mut report,
+                &mut ExportedEntityIndex::default(),
+            )
             .unwrap();
         assert_eq!(report.navaids_written, 0);
         assert_eq!(report.navaids_skipped, 1);
@@ -1107,7 +1233,14 @@ I
         let mut report2 = ExportReport::default();
         let mut buf2 = Vec::new();
         XPlane12Exporter
-            .export_earth_nav(&[nav2], "2608", "20260806", &mut buf2, &mut report2)
+            .export_earth_nav(
+                &[nav2],
+                "2608",
+                "20260806",
+                &mut buf2,
+                &mut report2,
+                &mut ExportedEntityIndex::default(),
+            )
             .unwrap();
         assert_eq!(report2.navaids_written, 0);
 
@@ -1117,7 +1250,14 @@ I
         let mut report3 = ExportReport::default();
         let mut buf3 = Vec::new();
         XPlane12Exporter
-            .export_earth_nav(&[nav3], "2608", "20260806", &mut buf3, &mut report3)
+            .export_earth_nav(
+                &[nav3],
+                "2608",
+                "20260806",
+                &mut buf3,
+                &mut report3,
+                &mut ExportedEntityIndex::default(),
+            )
             .unwrap();
         assert_eq!(report3.navaids_written, 0);
         assert!(report3.diagnostics.iter().any(|d| d.contains("class")));
@@ -1126,23 +1266,61 @@ I
     #[test]
     fn test_export_earth_awy_golden() {
         // The XPAWY1101 spec's example segment (ABCDE/K1 -> ABC/K1, J13),
-        // extended with a second airway on the same segment (J13-J14).
+        // extended with a second airway on the same segment (J13-J14), and
+        // an NDB endpoint (type 2) plus a VHF endpoint (type 3) per the
+        // spec's type table: 11 = fix, 2 = enroute NDB, 3 = VHF navaid.
         let fixes = vec![
             waypoint("ABCDE", 10.0, 10.0, "K1", Some(2105431)),
             waypoint("ABC", 11.0, 11.0, "K1", Some(2105431)),
         ];
+        let mut ndb = navaid("NBE", NavaidKind::Ndb, 362, Some("K1"));
+        ndb.name = "NBE NDB".to_string();
+        let mut vhf = navaid("VORX", NavaidKind::Vor, 115_000, Some("K1"));
+        vhf.name = "VORX VOR".to_string();
         let legs = vec![
             leg("J13", "ABCDE", "K1", "ABC", "K1", Some('L')),
             leg("J14", "ABCDE", "K1", "ABC", "K1", Some('L')),
+            leg("V99", "ABC", "K1", "NBE", "K1", Some('L')),
+            leg("V98", "NBE", "K1", "VORX", "K1", Some('L')),
             // endpoint missing from the layer -> skipped
-            leg("V99", "ABC", "K1", "NOPE", "K1", Some('L')),
+            leg("V97", "ABC", "K1", "NOPE", "K1", Some('L')),
+            // missing altitudes -> skipped (no 0/0 fabrication)
+            {
+                let mut l = leg("V96", "ABC", "K1", "NOPE", "K1", Some('L'));
+                l.minimum_altitude_ft = None;
+                l
+            },
         ];
+
+        // Build the exported-entity index from an actual fix/nav export.
+        let mut index = ExportedEntityIndex::default();
         let mut report = ExportReport::default();
+        let mut fix_buf = Vec::new();
+        XPlane12Exporter::export_earth_fix(
+            &fixes,
+            "2608",
+            "20260806",
+            &mut fix_buf,
+            &mut report,
+            &mut index,
+        )
+        .unwrap();
+        let mut nav_buf = Vec::new();
+        XPlane12Exporter
+            .export_earth_nav(
+                &[ndb, vhf],
+                "2608",
+                "20260806",
+                &mut nav_buf,
+                &mut report,
+                &mut index,
+            )
+            .unwrap();
+
         let mut buf = Vec::new();
         XPlane12Exporter::export_earth_awy(
             &legs,
-            &fixes,
-            &[],
+            &index,
             "2608",
             "20260806",
             &mut buf,
@@ -1151,11 +1329,148 @@ I
         .unwrap();
         let content = String::from_utf8(buf).unwrap();
         assert!(content.contains("ABCDE K1 11 ABC   K1 11 N 1 115 175 J13-J14"));
-        assert_eq!(report.airway_legs_written, 2);
-        assert_eq!(report.airway_legs_skipped, 1);
+        // NDB endpoint typed 2, VHF endpoint typed 3 per XPAWY1101.
+        assert!(content.contains("ABC   K1 11 NBE   K1  2 N 1 115 175 V99"));
+        assert!(content.contains("NBE   K1  2 VORX  K1  3 N 1 115 175 V98"));
+        assert_eq!(report.airway_legs_accepted, 4);
+        assert_eq!(report.airway_rows_written, 3); // J13+J14 merged into one row
+        assert_eq!(report.airway_legs_skipped, 2); // NOPE endpoint + missing altitudes
         assert!(content.ends_with("99\n"));
     }
 
+    #[test]
+    fn test_airway_skipped_fix_endpoint_does_not_qualify() {
+        // The canonical store contains the fix, but the fix WRITER skips it
+        // (missing waypoint type) -> it must not satisfy an airway endpoint.
+        let fixes = vec![waypoint("SKIPME", 10.0, 10.0, "K1", None)];
+        let mut index = ExportedEntityIndex::default();
+        let mut report = ExportReport::default();
+        let mut fix_buf = Vec::new();
+        XPlane12Exporter::export_earth_fix(
+            &fixes,
+            "2608",
+            "20260806",
+            &mut fix_buf,
+            &mut report,
+            &mut index,
+        )
+        .unwrap();
+        assert_eq!(report.fixes_written, 0);
+        assert!(index.is_empty());
+
+        let legs = vec![leg("V257", "SKIPME", "K1", "OTHER", "K1", Some('L'))];
+        let mut awy_buf = Vec::new();
+        XPlane12Exporter::export_earth_awy(
+            &legs,
+            &index,
+            "2608",
+            "20260806",
+            &mut awy_buf,
+            &mut report,
+        )
+        .unwrap();
+        assert_eq!(report.airway_rows_written, 0);
+        assert_eq!(report.airway_legs_skipped, 1);
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|d| d.contains("not in exported layer"))
+        );
+    }
+
+    #[test]
+    fn test_airway_skipped_navaid_endpoint_does_not_qualify() {
+        // The navaid is in the canonical store but the nav WRITER skips it
+        // (missing service class) -> it must not satisfy an airway endpoint.
+        let mut nav = navaid("NOCLS", NavaidKind::Vor, 115_000, Some("K1"));
+        nav.service_volume_nm = None;
+        let mut index = ExportedEntityIndex::default();
+        let mut report = ExportReport::default();
+        let mut nav_buf = Vec::new();
+        XPlane12Exporter
+            .export_earth_nav(
+                &[nav],
+                "2608",
+                "20260806",
+                &mut nav_buf,
+                &mut report,
+                &mut index,
+            )
+            .unwrap();
+        assert_eq!(report.navaids_written, 0);
+        assert!(index.is_empty());
+
+        let legs = vec![leg("V257", "OTHER", "K1", "NOCLS", "K1", Some('L'))];
+        let mut awy_buf = Vec::new();
+        XPlane12Exporter::export_earth_awy(
+            &legs,
+            &index,
+            "2608",
+            "20260806",
+            &mut awy_buf,
+            &mut report,
+        )
+        .unwrap();
+        assert_eq!(report.airway_rows_written, 0);
+        assert_eq!(report.airway_legs_skipped, 1);
+    }
+
+    #[test]
+    fn test_terminal_navaid_not_an_enroute_endpoint() {
+        // A serialized ILS-DME (terminal, associated_airport set) must not
+        // become an enroute airway endpoint even though it is in earth_nav.
+        let mut dme = navaid("ISFO", NavaidKind::Dme, 109_550, Some("K2"));
+        dme.associated_airport = Some("KSFO".to_string());
+        dme.dme_paired = true;
+        let mut index = ExportedEntityIndex::default();
+        let mut report = ExportReport::default();
+        let mut nav_buf = Vec::new();
+        XPlane12Exporter
+            .export_earth_nav(
+                &[dme],
+                "2608",
+                "20260806",
+                &mut nav_buf,
+                &mut report,
+                &mut index,
+            )
+            .unwrap();
+        assert_eq!(report.navaids_written, 1);
+        assert!(
+            index.is_empty(),
+            "terminal navaids are not enroute endpoints"
+        );
+    }
+
+    #[test]
+    fn test_manifest_rows_match_physical_rows() {
+        // Covered in test_export_from_db_refuses_empty_and_stages below;
+        // this test asserts the counts directly on the writer level.
+        let fixes = vec![waypoint("ABCDE", 10.0, 10.0, "K1", Some(2105431))];
+        let mut index = ExportedEntityIndex::default();
+        let mut report = ExportReport::default();
+        let mut fix_buf = Vec::new();
+        XPlane12Exporter::export_earth_fix(
+            &fixes,
+            "2608",
+            "20260806",
+            &mut fix_buf,
+            &mut report,
+            &mut index,
+        )
+        .unwrap();
+        // Count physical rows (excluding header, blank and 99).
+        let physical = String::from_utf8(fix_buf)
+            .unwrap()
+            .lines()
+            .filter(|l| {
+                let t = l.trim();
+                !t.is_empty() && t != "99" && !t.starts_with("1200 Version") && t != "I"
+            })
+            .count();
+        assert_eq!(report.fixes_written, physical);
+    }
     #[test]
     fn test_ils_without_bearing_is_refused() {
         let mut loc = navaid("IBAD", NavaidKind::IlsLocalizer, 111_300, Some("K1"));
@@ -1164,7 +1479,14 @@ I
         let mut report = ExportReport::default();
         let mut buf = Vec::new();
         XPlane12Exporter
-            .export_earth_nav(&[loc], "2608", "20260806", &mut buf, &mut report)
+            .export_earth_nav(
+                &[loc],
+                "2608",
+                "20260806",
+                &mut buf,
+                &mut report,
+                &mut ExportedEntityIndex::default(),
+            )
             .unwrap();
         assert_eq!(report.navaids_written, 0);
         assert_eq!(report.navaids_skipped, 1);
@@ -1229,11 +1551,36 @@ I
         let report = XPlane12Exporter::export_from_db(&store, Utc::now(), &out_dir, false).unwrap();
         assert_eq!(report.fixes_written, 3);
         assert_eq!(report.navaids_written, 1);
-        assert_eq!(report.airway_legs_written, 1);
+        assert_eq!(report.airway_rows_written, 1);
         assert!(out_dir.join("earth_nav.dat").exists());
         assert!(out_dir.join("earth_fix.dat").exists());
         assert!(out_dir.join("earth_awy.dat").exists());
         assert!(out_dir.join("manifest.json").exists());
+
+        // The manifest's `rows` must equal the physical data rows of each
+        // staged file (excluding header, blank lines and the 99 terminator).
+        let manifest: NavdataLayerManifest =
+            serde_json::from_str(&std::fs::read_to_string(out_dir.join("manifest.json")).unwrap())
+                .unwrap();
+        for entry in &manifest.files {
+            let physical = std::fs::read_to_string(out_dir.join(&entry.name))
+                .unwrap()
+                .lines()
+                .filter(|l| {
+                    let t = l.trim();
+                    !t.is_empty()
+                        && t != "99"
+                        && t != "I"
+                        && !t.starts_with("1200 Version")
+                        && !t.starts_with("1100 Version")
+                })
+                .count();
+            assert_eq!(
+                entry.rows, physical,
+                "manifest rows mismatch for {}",
+                entry.name
+            );
+        }
         let _ = std::fs::remove_dir_all(&out_dir);
     }
 }
