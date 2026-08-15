@@ -10,27 +10,34 @@
 //!         ↓
 //! semantic interpretation (interpret → CifpInterpretation)
 //!         ↓
-//! canonical entities (CanonicalWaypoint / CanonicalNavaid)
+//! canonical entities (CanonicalWaypoint / CanonicalNavaid / CanonicalAirwayLeg)
 //! ```
 //!
 //! Supported record classes (ARINC 424-18 / FAA CIFP, verified against
-//! CIFP cycle 2608):
+//! CIFP cycle 2608 and cross-checked against Laminar convert424toxplane
+//! v12.4 output):
 //! - Enroute waypoints: section `E`, subsection `A` (`EA`).
 //! - VHF navaids: section `D`, subsection blank (`D `): VOR, VOR-DME,
 //!   VORTAC, DME-only, TACAN-only and ILS localizers (class code `I`).
+//!   VOR-DME/VORTAC facilities emit their paired DME component (row 12),
+//!   and ILS localizers emit their DME-ILS component, from the dedicated
+//!   DME position columns.
 //! - NDB navaids: section `D`, subsection `B` (`DB`) and section `P`,
 //!   subsection `N` (`PN`, terminal NDBs).
+//! - Enroute airways: section `E`, subsection `R` (`ER`): consecutive
+//!   records are chained into airway segments.
 //!
 //! Everything else is decoded as an explicit [`CifpRecord::Unsupported`]:
 //! the raw line is preserved and never reinterpreted.
 //!
 //! Known gaps (documented, not hidden):
-//! - ILS localizer bearing is not decodable from the `D` record alone;
-//!   canonical localizers therefore carry `localizer_bearing_* = None` and
-//!   exporters must refuse to emit bearing-dependent rows.
+//! - ILS localizer bearing, glideslope angle and ILS category are not
+//!   decodable from `D` records (convert424toxplane synthesizes the
+//!   glideslope geometry and reads the category from `PF` records).
+//!   Canonical localizers therefore carry `localizer_bearing_* = None`
+//!   and exporters must refuse bearing-dependent rows.
 //! - Terminal waypoints (`PC`) are not emitted for US airspace in CIFP;
-//!   terminal navaid/waypoint population from `PA`/`PD`/`PE`/`PF` records is
-//!   future work.
+//!   terminal procedures (PD/PE/PF) are future work.
 
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
@@ -67,8 +74,7 @@ impl<'a> CifpLine<'a> {
         self.raw.chars().nth(5).unwrap_or(' ')
     }
 
-    /// Slice columns `start`..=`end` (1-based, inclusive), right-trimmed of
-    /// neither padding — callers trim as needed.
+    /// Slice columns `start`..=`end` (1-based, inclusive). Callers trim.
     pub fn field(&self, start: usize, end: usize) -> &'a str {
         if end > self.raw.len() {
             return &self.raw[start - 1..];
@@ -122,6 +128,15 @@ pub fn parse_arinc_coordinate(coord_str: &str) -> Result<(f64, f64)> {
     Ok((lat, lon))
 }
 
+fn parse_coord_pair(lat_field: &str, lon_field: &str) -> Result<Option<(f64, f64)>> {
+    let lat = lat_field.trim();
+    let lon = lon_field.trim();
+    if lat.is_empty() || lon.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(parse_arinc_coordinate(&format!("{lat}{lon}"))?))
+}
+
 /// Magnetic variation field (columns 75-80 of D/DB/PN/EA records):
 /// direction `E`/`W` followed by 4-5 digits. 4 digits = tenths of a degree,
 /// 5 digits = hundredths (both paddings occur in real CIFP data).
@@ -159,6 +174,15 @@ fn waypoint_type_u32(field: &str) -> Option<u32> {
     Some(u32::from_le_bytes(b))
 }
 
+/// Altitude field in feet (5 chars, right-ish aligned, e.g. `05000`).
+fn parse_altitude_ft(field: &str) -> Option<u32> {
+    let s = field.trim();
+    if s.is_empty() {
+        return None;
+    }
+    s.parse::<u32>().ok().filter(|v| *v > 0)
+}
+
 // ---------------------------------------------------------------------------
 // Layer 2: raw decoded records
 // ---------------------------------------------------------------------------
@@ -172,7 +196,7 @@ pub enum CifpRecord {
         /// ARINC 5.6: `ENRT` for enroute records.
         airport_ident: String,
         ident: String,
-        /// ARINC 5.14 ICAO code (e.g. `K2`, `CY`); may be `K` + blank for US.
+        /// ARINC 5.14 ICAO code (e.g. `K2`, `CY`, `K ` for US blanks).
         icao_code: String,
         /// ARINC 5.42 waypoint type (3 chars).
         waypoint_type: String,
@@ -189,10 +213,13 @@ pub enum CifpRecord {
         ident: String,
         icao_code: String,
         frequency_khz: u32,
-        /// Navaid class (columns 28-30).
+        /// Navaid class (columns 28-30), e.g. `VTH`, ` IT`, ` DH`.
         class: String,
         latitude_deg: f64,
         longitude_deg: f64,
+        /// DME component position (columns 56-74), when present.
+        dme_latitude_deg: Option<f64>,
+        dme_longitude_deg: Option<f64>,
         magnetic_variation_deg: Option<f64>,
         /// Station elevation in feet (tenths in the record).
         elevation_ft: Option<i32>,
@@ -210,6 +237,28 @@ pub enum CifpRecord {
         longitude_deg: f64,
         magnetic_variation_deg: Option<f64>,
         name: String,
+        raw: String,
+    },
+    Airway {
+        record_type: String,
+        /// Route identifier (columns 14-18).
+        route_ident: String,
+        /// Route type (column 45): `O` conventional, `R` RNAV.
+        route_type: char,
+        /// Level (column 46): `H`, `L` or blank.
+        level: Option<char>,
+        /// Sequence number (columns 26-29).
+        sequence_number: u32,
+        /// Fix identifier of this record (columns 30-34).
+        fix_ident: String,
+        /// Fix ICAO code (columns 35-36).
+        fix_icao_code: String,
+        /// Fix section/subsection code (columns 37-38), e.g. `EA`, `D `.
+        fix_section: String,
+        /// MEA, feet (columns 84-88).
+        minimum_altitude_ft: Option<u32>,
+        /// Maximum altitude, feet (columns 94-98).
+        maximum_altitude_ft: Option<u32>,
         raw: String,
     },
     Unsupported {
@@ -240,10 +289,9 @@ pub fn decode_line(line: &str) -> Result<CifpRecord> {
 
     match (section, subsection) {
         ('E', 'A') => {
-            let lat_str = cifp.field(33, 41);
-            let lon_str = cifp.field(42, 51);
             let (latitude_deg, longitude_deg) =
-                parse_arinc_coordinate(&format!("{lat_str}{lon_str}"))?;
+                parse_coord_pair(cifp.field(33, 41), cifp.field(42, 51))?
+                    .ok_or_else(|| anyhow!("EA record without coordinates"))?;
             let ident = cifp.field(14, 18).trim().to_string();
             if ident.is_empty() {
                 return Err(anyhow!("EA record without waypoint identifier"));
@@ -258,7 +306,10 @@ pub fn decode_line(line: &str) -> Result<CifpRecord> {
                     name_field
                 },
                 ident,
-                icao_code: cifp.field(20, 21).trim().to_string(),
+                // NOTE: kept untrimmed on purpose — US records code `K `
+                // (letter + blank), which X-Plane accepts (convert424toxplane
+                // emits it verbatim).
+                icao_code: cifp.field(20, 21).to_string(),
                 waypoint_type: cifp.field(27, 29).to_string(),
                 latitude_deg,
                 longitude_deg,
@@ -283,21 +334,20 @@ pub fn decode_line(line: &str) -> Result<CifpRecord> {
             let class = cifp.field(28, 30).to_string();
 
             // ILS localizers (class code 'I') carry the position in the DME
-            // columns; all other D records carry it in the VOR columns.
+            // columns; VOR-family records carry it in the VOR columns with
+            // the (possibly distinct) DME position at 56-74.
             let is_ils = class.as_bytes().get(1) == Some(&b'I');
-            let (lat_str, lon_str) = if is_ils {
-                (cifp.field(56, 64), cifp.field(65, 74))
+            let vor_pos = parse_coord_pair(cifp.field(33, 41), cifp.field(42, 51))?;
+            let dme_pos = parse_coord_pair(cifp.field(56, 64), cifp.field(65, 74))?;
+            let (latitude_deg, longitude_deg) = if is_ils {
+                dme_pos.ok_or_else(|| anyhow!("ILS record '{ident}' without position"))?
             } else {
-                let vor = (cifp.field(33, 41), cifp.field(42, 51));
-                if vor.0.trim().is_empty() {
-                    (cifp.field(56, 64), cifp.field(65, 74))
-                } else {
-                    vor
-                }
+                // VOR-family: VOR columns; DME-only facilities carry their
+                // position in the DME columns.
+                vor_pos
+                    .or(dme_pos)
+                    .ok_or_else(|| anyhow!("D record '{ident}' without position"))?
             };
-            let (latitude_deg, longitude_deg) =
-                parse_arinc_coordinate(&format!("{lat_str}{lon_str}"))?;
-
             let elevation_ft = match cifp.field(81, 85).trim().parse::<f64>() {
                 Ok(tenths) => Some((tenths / 10.0).round() as i32),
                 Err(_) => None,
@@ -312,15 +362,43 @@ pub fn decode_line(line: &str) -> Result<CifpRecord> {
                 class,
                 latitude_deg,
                 longitude_deg,
+                dme_latitude_deg: dme_pos.map(|p| p.0),
+                dme_longitude_deg: dme_pos.map(|p| p.1),
                 magnetic_variation_deg: parse_mag_variation(cifp.field(75, 80)),
                 elevation_ft,
                 name: cifp.field(91, 120).trim().to_string(),
                 raw: line.to_string(),
             })
         }
-        ('D', 'B') => decode_ndb(&cifp, record_type, line),
-        ('P', 'N') => decode_ndb(&cifp, record_type, line),
-        ('E', 'R') => unsupported("airway record"),
+        ('D', 'B') | ('P', 'N') => decode_ndb(&cifp, record_type, line),
+        ('E', 'R') => {
+            let route_ident = cifp.field(14, 18).trim().to_string();
+            if route_ident.is_empty() {
+                return Err(anyhow!("ER record without route identifier"));
+            }
+            let fix_ident = cifp.field(30, 34).trim().to_string();
+            if fix_ident.is_empty() {
+                return Err(anyhow!("ER record '{route_ident}' without fix identifier"));
+            }
+            let sequence_number: u32 = cifp
+                .field(26, 29)
+                .trim()
+                .parse()
+                .map_err(|_| anyhow!("ER record '{route_ident}': invalid sequence number"))?;
+            Ok(CifpRecord::Airway {
+                record_type,
+                route_ident,
+                route_type: cifp.field(45, 45).chars().next().unwrap_or(' '),
+                level: cifp.field(46, 46).chars().next().filter(|c| *c != ' '),
+                sequence_number,
+                fix_ident,
+                fix_icao_code: cifp.field(35, 36).to_string(),
+                fix_section: cifp.field(37, 38).to_string(),
+                minimum_altitude_ft: parse_altitude_ft(cifp.field(84, 88)),
+                maximum_altitude_ft: parse_altitude_ft(cifp.field(94, 98)),
+                raw: line.to_string(),
+            })
+        }
         ('P', ' ') => unsupported("terminal procedure or airport record"),
         ('H', ' ') => unsupported("heliport record"),
         ('U', 'C') => unsupported("controlled airspace record"),
@@ -345,7 +423,8 @@ fn decode_ndb(cifp: &CifpLine<'_>, record_type: String, line: &str) -> Result<Ci
         }
     };
     let (latitude_deg, longitude_deg) =
-        parse_arinc_coordinate(&format!("{}{}", cifp.field(33, 41), cifp.field(42, 51)))?;
+        parse_coord_pair(cifp.field(33, 41), cifp.field(42, 51))?
+            .ok_or_else(|| anyhow!("NDB record '{ident}' without coordinates"))?;
     let name_field = cifp.field(91, 120).trim().to_string();
     Ok(CifpRecord::NdbNavaid {
         record_type,
@@ -370,11 +449,12 @@ fn decode_ndb(cifp: &CifpLine<'_>, record_type: String, line: &str) -> Result<Ci
 // Layer 3: semantic interpretation → canonical entities
 // ---------------------------------------------------------------------------
 
-/// Result of interpreting one raw record into the canonical model.
+/// Result of interpreting one raw record into canonical form.
 #[derive(Debug, Clone)]
 pub enum CifpInterpretation {
     Waypoint(CanonicalWaypoint),
     Navaid(CanonicalNavaid),
+    AirwayLeg(CanonicalAirwayLeg),
     Unsupported { reason: String, raw: String },
 }
 
@@ -391,13 +471,40 @@ fn navaid_kind_from_class(class: &str) -> Option<NavaidKind> {
     }
 }
 
-/// Interpret a raw record into canonical form. Never fabricates values:
-/// unknown semantics stay `Unsupported`.
+/// XPNAV1200 class/volume mapping derived from the source class field.
+/// The mapping table was verified against Laminar convert424toxplane v12.4
+/// output for the same records (CIFP cycle 2608).
+fn service_volume_from_cifp_class(kind: NavaidKind, class: &str) -> Option<u16> {
+    let b = class.as_bytes();
+    match kind {
+        NavaidKind::Vor | NavaidKind::Vordme | NavaidKind::Vortac | NavaidKind::Dme => {
+            match b.get(1).copied() {
+                Some(b'H') => Some(130),
+                Some(b'L') => Some(40),
+                Some(b'T') => Some(25),
+                Some(b'U') => Some(if kind == NavaidKind::Dme { 125 } else { 150 }),
+                _ => None,
+            }
+        }
+        NavaidKind::IlsLocalizer => None,
+        NavaidKind::Ndb => match b.first().copied() {
+            Some(b'H') | Some(b'D') => Some(50),
+            Some(b'M') => Some(25),
+            Some(b'L') => Some(15),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Interpret a raw record into canonical entities. One record may produce
+/// several entities (e.g. a VORTAC yields the VOR row plus its paired DME
+/// row). Never fabricates values: unknown semantics stay `Unsupported`.
 pub fn interpret(
     record: &CifpRecord,
     snapshot_id: &SourceSnapshotId,
     valid_from: DateTime<Utc>,
-) -> CifpInterpretation {
+) -> Vec<CifpInterpretation> {
     let temporal = TemporalValidity {
         valid_from,
         valid_until: None,
@@ -414,7 +521,7 @@ pub fn interpret(
             longitude_deg,
             name,
             ..
-        } => CifpInterpretation::Waypoint(CanonicalWaypoint {
+        } => vec![CifpInterpretation::Waypoint(CanonicalWaypoint {
             object_id: WaypointId(format!("faa:{record_type}:{icao_code}:{ident}")),
             ident: ident.clone(),
             name: name.clone(),
@@ -424,7 +531,7 @@ pub fn interpret(
             region_code: icao_code.clone(),
             waypoint_type: waypoint_type_u32(waypoint_type),
             temporal,
-        }),
+        })],
         CifpRecord::VhfNavaid {
             record_type,
             airport_ident,
@@ -434,18 +541,34 @@ pub fn interpret(
             class,
             latitude_deg,
             longitude_deg,
+            dme_latitude_deg,
+            dme_longitude_deg,
             magnetic_variation_deg,
             elevation_ft,
             name,
             ..
         } => {
             let Some(kind) = navaid_kind_from_class(class) else {
-                return CifpInterpretation::Unsupported {
+                return vec![CifpInterpretation::Unsupported {
                     reason: format!("unrecognized navaid class '{class}'"),
                     raw: record_to_raw(record),
-                };
+                }];
             };
-            CifpInterpretation::Navaid(CanonicalNavaid {
+            let associated_airport = (!airport_ident.is_empty()).then(|| airport_ident.clone());
+            let volume = service_volume_from_cifp_class(kind, class);
+            // The VOR's station declination IS the published slaved variation
+            // (0-radial direction) for a VOR; convert424toxplane emits the
+            // same field value. Not substituted for other kinds.
+            let slaved = if matches!(
+                kind,
+                NavaidKind::Vor | NavaidKind::Vordme | NavaidKind::Vortac
+            ) {
+                *magnetic_variation_deg
+            } else {
+                None
+            };
+
+            let mut out = vec![CifpInterpretation::Navaid(CanonicalNavaid {
                 object_id: NavaidId(format!("faa:{record_type}:{icao_code}:{ident}")),
                 ident: ident.clone(),
                 name: name.clone(),
@@ -455,14 +578,52 @@ pub fn interpret(
                 longitude: *longitude_deg,
                 elevation_ft: *elevation_ft,
                 region_code: Some(icao_code.clone()),
-                associated_airport: (!airport_ident.is_empty()).then(|| airport_ident.clone()),
+                associated_airport: associated_airport.clone(),
                 magnetic_variation_deg: *magnetic_variation_deg,
+                slaved_variation_deg: slaved,
+                service_volume_nm: volume,
+                dme_paired: false,
                 associated_runway: None,
                 localizer_bearing_true_deg: None,
                 localizer_bearing_mag_deg: None,
                 glideslope_angle_deg: None,
-                temporal,
-            })
+                temporal: temporal.clone(),
+            })];
+
+            let dme_for = match kind {
+                NavaidKind::Vordme | NavaidKind::Vortac => "DME",
+                NavaidKind::IlsLocalizer => "DME-ILS",
+                _ => "",
+            };
+            if !dme_for.is_empty() {
+                let position = match (*dme_latitude_deg, *dme_longitude_deg) {
+                    (Some(lat), Some(lon)) => (lat, lon),
+                    _ => (*latitude_deg, *longitude_deg),
+                };
+                out.push(CifpInterpretation::Navaid(CanonicalNavaid {
+                    object_id: NavaidId(format!("faa:{record_type}:{icao_code}:{ident}:dme")),
+                    ident: ident.clone(),
+                    name: format!("{name} {dme_for}"),
+                    kind: NavaidKind::Dme,
+                    frequency: FrequencyKhz(*frequency_khz),
+                    latitude: position.0,
+                    longitude: position.1,
+                    elevation_ft: *elevation_ft,
+                    region_code: Some(icao_code.clone()),
+                    associated_airport: associated_airport.clone(),
+                    magnetic_variation_deg: *magnetic_variation_deg,
+                    slaved_variation_deg: None,
+                    service_volume_nm: service_volume_from_cifp_class(NavaidKind::Dme, class)
+                        .or(Some(25)),
+                    dme_paired: true,
+                    associated_runway: None,
+                    localizer_bearing_true_deg: None,
+                    localizer_bearing_mag_deg: None,
+                    glideslope_angle_deg: None,
+                    temporal,
+                }));
+            }
+            out
         }
         CifpRecord::NdbNavaid {
             record_type,
@@ -470,12 +631,13 @@ pub fn interpret(
             ident,
             icao_code,
             frequency_khz,
+            class,
             latitude_deg,
             longitude_deg,
             magnetic_variation_deg,
             name,
             ..
-        } => CifpInterpretation::Navaid(CanonicalNavaid {
+        } => vec![CifpInterpretation::Navaid(CanonicalNavaid {
             object_id: NavaidId(format!("faa:{record_type}:{icao_code}:{ident}")),
             ident: ident.clone(),
             name: name.clone(),
@@ -487,16 +649,23 @@ pub fn interpret(
             region_code: Some(icao_code.clone()),
             associated_airport: (!airport_ident.is_empty()).then(|| airport_ident.clone()),
             magnetic_variation_deg: *magnetic_variation_deg,
+            slaved_variation_deg: None,
+            service_volume_nm: service_volume_from_cifp_class(NavaidKind::Ndb, class),
+            dme_paired: false,
             associated_runway: None,
             localizer_bearing_true_deg: None,
             localizer_bearing_mag_deg: None,
             glideslope_angle_deg: None,
             temporal,
-        }),
-        CifpRecord::Unsupported { reason, raw, .. } => CifpInterpretation::Unsupported {
+        })],
+        CifpRecord::Airway { .. } => vec![CifpInterpretation::Unsupported {
+            reason: "airway segment (chained by the scanner)".to_string(),
+            raw: record_to_raw(record),
+        }],
+        CifpRecord::Unsupported { reason, raw, .. } => vec![CifpInterpretation::Unsupported {
             reason: reason.to_string(),
             raw: raw.clone(),
-        },
+        }],
     }
 }
 
@@ -505,11 +674,11 @@ fn record_to_raw(record: &CifpRecord) -> String {
         CifpRecord::Waypoint { raw, .. }
         | CifpRecord::VhfNavaid { raw, .. }
         | CifpRecord::NdbNavaid { raw, .. }
+        | CifpRecord::Airway { raw, .. }
         | CifpRecord::Unsupported { raw, .. } => raw.clone(),
     }
 }
 
-// ---------------------------------------------------------------------------
 // Ingest entry points
 // ---------------------------------------------------------------------------
 
@@ -520,6 +689,7 @@ pub struct CifpScanReport {
     pub records_decoded: usize,
     pub waypoints_decoded: usize,
     pub navaids_decoded: usize,
+    pub airway_legs_decoded: usize,
     pub unsupported_records: usize,
     pub decode_errors: usize,
     pub unsupported_reasons: Vec<String>,
@@ -531,16 +701,30 @@ impl FaaCifpAdapter {
     /// Decode and interpret a complete CIFP content string.
     ///
     /// Returns the accepted canonical entities plus a deterministic scan
-    /// report. Unsupported records are counted with their raw lines
-    /// preserved in the report; malformed supported records are errors.
+    /// report. ER airway records are chained into segments: each consecutive
+    /// record of a route becomes a segment from the previous fix to this fix.
     pub fn parse_cifp_content(
         content: &str,
         snapshot_id: &SourceSnapshotId,
         valid_from: DateTime<Utc>,
-    ) -> (Vec<CanonicalWaypoint>, Vec<CanonicalNavaid>, CifpScanReport) {
+    ) -> (
+        Vec<CanonicalWaypoint>,
+        Vec<CanonicalNavaid>,
+        Vec<CanonicalAirwayLeg>,
+        CifpScanReport,
+    ) {
         let mut waypoints = Vec::new();
         let mut navaids = Vec::new();
+        let mut airway_legs = Vec::new();
         let mut report = CifpScanReport::default();
+
+        // Per-route previous record for ER chaining.
+        #[derive(Clone)]
+        struct Prev {
+            fix_ident: String,
+            fix_icao_code: String,
+        }
+        let mut prev_by_route: std::collections::HashMap<String, Prev> = Default::default();
 
         for line in content.lines() {
             if line.len() < 132 {
@@ -548,26 +732,82 @@ impl FaaCifpAdapter {
             }
             report.lines_seen += 1;
             match decode_line(line) {
-                Ok(record) => match interpret(&record, snapshot_id, valid_from) {
-                    CifpInterpretation::Waypoint(wp) => {
+                Ok(CifpRecord::Airway {
+                    record_type,
+                    route_ident,
+                    route_type,
+                    level,
+                    sequence_number,
+                    fix_ident,
+                    fix_icao_code,
+                    fix_section: _,
+                    minimum_altitude_ft,
+                    maximum_altitude_ft,
+                    raw: _,
+                }) => {
+                    if let Some(prev) = prev_by_route.get(&route_ident) {
+                        // Consecutive record: segment from previous fix to this.
+                        airway_legs.push(CanonicalAirwayLeg {
+                            object_id: AirwayLegId(format!(
+                                "faa:{record_type}:{route_ident}:{sequence_number}"
+                            )),
+                            route_ident: route_ident.clone(),
+                            route_type: route_type.to_string(),
+                            level,
+                            sequence_number,
+                            start_fix: prev.fix_ident.clone(),
+                            start_icao_code: prev.fix_icao_code.clone(),
+                            end_fix: fix_ident.clone(),
+                            end_icao_code: fix_icao_code.clone(),
+                            direction: 'N', // CIFP carries no directional restrictions
+                            minimum_altitude_ft,
+                            maximum_altitude_ft,
+                            temporal: TemporalValidity {
+                                valid_from,
+                                valid_until: None,
+                                source_snapshot_id: snapshot_id.clone(),
+                            },
+                        });
                         report.records_decoded += 1;
-                        report.waypoints_decoded += 1;
-                        waypoints.push(wp);
+                        report.airway_legs_decoded += 1;
                     }
-                    CifpInterpretation::Navaid(nav) => {
-                        report.records_decoded += 1;
-                        report.navaids_decoded += 1;
-                        navaids.push(nav);
-                    }
-                    CifpInterpretation::Unsupported { reason, raw } => {
-                        report.unsupported_records += 1;
-                        if report.unsupported_reasons.len() < 1000 {
-                            report
-                                .unsupported_reasons
-                                .push(format!("{reason}: {}", &raw[..64.min(raw.len())]));
+                    prev_by_route.insert(
+                        route_ident,
+                        Prev {
+                            fix_ident,
+                            fix_icao_code,
+                        },
+                    );
+                }
+                Ok(record) => {
+                    for interpretation in interpret(&record, snapshot_id, valid_from) {
+                        match interpretation {
+                            CifpInterpretation::Waypoint(wp) => {
+                                report.records_decoded += 1;
+                                report.waypoints_decoded += 1;
+                                waypoints.push(wp);
+                            }
+                            CifpInterpretation::Navaid(nav) => {
+                                report.records_decoded += 1;
+                                report.navaids_decoded += 1;
+                                navaids.push(nav);
+                            }
+                            CifpInterpretation::AirwayLeg(leg) => {
+                                report.records_decoded += 1;
+                                report.airway_legs_decoded += 1;
+                                airway_legs.push(leg);
+                            }
+                            CifpInterpretation::Unsupported { reason, raw } => {
+                                report.unsupported_records += 1;
+                                if report.unsupported_reasons.len() < 1000 {
+                                    report
+                                        .unsupported_reasons
+                                        .push(format!("{reason}: {}", &raw[..64.min(raw.len())]));
+                                }
+                            }
                         }
                     }
-                },
+                }
                 Err(err) => {
                     report.decode_errors += 1;
                     if report.unsupported_reasons.len() < 1000 {
@@ -580,7 +820,7 @@ impl FaaCifpAdapter {
             }
         }
 
-        (waypoints, navaids, report)
+        (waypoints, navaids, airway_legs, report)
     }
 
     /// Parse CIFP content and ingest the canonical entities into the store
@@ -591,7 +831,7 @@ impl FaaCifpAdapter {
         valid_from: DateTime<Utc>,
         store: &mut WorldStore,
     ) -> Result<CifpScanReport> {
-        let (waypoints, navaids, report) =
+        let (waypoints, navaids, airway_legs, report) =
             Self::parse_cifp_content(content, snapshot_id, valid_from);
 
         store.transact(|conn| {
@@ -600,6 +840,9 @@ impl FaaCifpAdapter {
             }
             for nav in &navaids {
                 openairac_store::insert_navaid_conn(conn, nav)?;
+            }
+            for leg in &airway_legs {
+                openairac_store::insert_airway_leg_conn(conn, leg)?;
             }
             Ok(())
         })?;
@@ -623,7 +866,11 @@ mod tests {
     const DB_AA_NDB: &str = "SUSADB       AA    K3003650HOLW N47003259W096485466                       E0040           NARKENIE                         268711805";
     const PN_AB_NDB: &str = "SUSAPNKABIK4 AB    K4003530HO W N32175591W099402722                       E0050           NARTOMHI                         577831911";
     const D_ISFO_ILS: &str = "SUSAD KSFOK2 ISFO  K2010955 ITW                    ISFON37373954W122234146E0140000200     NARSAN FRANCISCO INTL            267531703";
-    const ER_AIRWAY: &str = "SUSAERENRT   J1    K 0J1    001J1  A                                           NAR           J1                         200091305   ";
+    const ER_A315_1: &str = "SUSAER       A315        0100ZBV  MYD 0V    O                         13540185     05000     60000                         557442605";
+    const ER_A315_2: &str = "SUSAER       A315        0110SWIMMK7EA0E    O                         135404691355 08000     60000                         557452605";
+    const ER_A315_3: &str = "SUSAER       A315        0120TINKYK EA0E    O                         135702181357 12500     60000                         557462411";
+    const PA_AIRPORT: &str = "SUSAP 00AAK3A        0     034NSN38421448W101282608E005503435         1800018000P    MNAR    AERO B RANCH                  785012605";
+
     #[test]
     fn test_parse_arinc_coordinate() {
         let (lat, lon) = parse_arinc_coordinate("N37371100W122223000").unwrap();
@@ -650,7 +897,7 @@ mod tests {
                 ..
             } => {
                 assert_eq!(ident, "AAARG");
-                assert_eq!(icao_code, "K");
+                assert_eq!(icao_code, "K ");
                 assert_eq!(waypoint_type, "W  ");
                 assert!((latitude_deg - 32.69396388888889).abs() < 5e-6);
                 assert!((longitude_deg - (-78.05129444444444)).abs() < 5e-6);
@@ -671,6 +918,8 @@ mod tests {
                 class,
                 latitude_deg,
                 longitude_deg,
+                dme_latitude_deg,
+                dme_longitude_deg,
                 magnetic_variation_deg,
                 elevation_ft,
                 ..
@@ -681,6 +930,8 @@ mod tests {
                 assert_eq!(class, "VTH");
                 assert!((latitude_deg - 32.48133055555556).abs() < 5e-6);
                 assert!((longitude_deg - (-99.86345277777777)).abs() < 5e-6);
+                assert_eq!(dme_latitude_deg, Some(32.48133055555556));
+                assert_eq!(dme_longitude_deg, Some(-99.86345277777777));
                 assert_eq!(magnetic_variation_deg, Some(10.0));
                 assert_eq!(elevation_ft, Some(1809));
             }
@@ -765,67 +1016,112 @@ mod tests {
     }
 
     #[test]
+    fn test_decode_er_airway() {
+        match decode_line(ER_A315_1).unwrap() {
+            CifpRecord::Airway {
+                route_ident,
+                route_type,
+                level,
+                sequence_number,
+                fix_ident,
+                fix_icao_code,
+                minimum_altitude_ft,
+                maximum_altitude_ft,
+                ..
+            } => {
+                assert_eq!(route_ident, "A315");
+                assert_eq!(route_type, 'O');
+                assert_eq!(level, None);
+                assert_eq!(sequence_number, 100);
+                assert_eq!(fix_ident, "ZBV");
+                assert_eq!(fix_icao_code, "MY");
+                assert_eq!(minimum_altitude_ft, Some(5000));
+                assert_eq!(maximum_altitude_ft, Some(60000));
+            }
+            other => panic!("expected airway, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_unsupported_record_is_explicit() {
-        match decode_line(ER_AIRWAY).unwrap() {
+        match decode_line(PA_AIRPORT).unwrap() {
             CifpRecord::Unsupported {
                 section,
                 subsection,
                 raw,
                 ..
             } => {
-                assert_eq!(section, 'E');
-                assert_eq!(subsection, 'R');
-                assert!(raw.starts_with("SUSAER"));
+                assert_eq!(section, 'P');
+                assert_eq!(subsection, ' ');
+                assert!(raw.starts_with("SUSAP"));
             }
             other => panic!("expected unsupported, got {other:?}"),
         }
     }
 
     #[test]
-    fn test_interpret_to_canonical() {
+    fn test_interpret_vortac_emits_paired_dme() {
         let snapshot_id = SourceSnapshotId("snap-faa".to_string());
-        let valid_from = Utc::now();
-
-        let wp_rec = decode_line(EA_AAARG).unwrap();
-        match interpret(&wp_rec, &snapshot_id, valid_from) {
-            CifpInterpretation::Waypoint(wp) => {
-                assert_eq!(wp.object_id.0, "faa:SUSA:K:AAARG");
-                assert_eq!(wp.waypoint_type, Some(waypoint_type_u32("W  ").unwrap()));
-                assert!(wp.is_enroute);
-            }
-            other => panic!("expected waypoint, got {other:?}"),
-        }
-
-        let vor_rec = decode_line(D_ABI_VORTAC).unwrap();
-        match interpret(&vor_rec, &snapshot_id, valid_from) {
-            CifpInterpretation::Navaid(nav) => {
-                assert_eq!(nav.kind, NavaidKind::Vortac);
-                assert_eq!(nav.object_id.0, "faa:SUSA:K4:ABI");
-            }
+        let rec = decode_line(D_ABI_VORTAC).unwrap();
+        let out = interpret(&rec, &snapshot_id, Utc::now());
+        assert_eq!(out.len(), 2);
+        let vor = match &out[0] {
+            CifpInterpretation::Navaid(n) => n.clone(),
             other => panic!("expected navaid, got {other:?}"),
-        }
+        };
+        assert_eq!(vor.kind, NavaidKind::Vortac);
+        assert_eq!(vor.slaved_variation_deg, Some(10.0));
+        assert_eq!(vor.service_volume_nm, Some(25)); // class 'VTH' col29 = T (terminal)
+        let dme = match &out[1] {
+            CifpInterpretation::Navaid(n) => n.clone(),
+            other => panic!("expected paired DME, got {other:?}"),
+        };
+        assert_eq!(dme.kind, NavaidKind::Dme);
+        assert!(dme.dme_paired);
     }
 
     #[test]
-    fn test_parse_cifp_content_scans_and_filters() {
-        let content =
-            format!("{EA_AAARG}\n{D_ABI_VORTAC}\n{D_ISFO_ILS}\n{ER_AIRWAY}\n{DB_AA_NDB}\n");
+    fn test_interpret_ils_emits_dme_ils() {
         let snapshot_id = SourceSnapshotId("snap-faa".to_string());
-        let (waypoints, navaids, report) =
+        let rec = decode_line(D_ISFO_ILS).unwrap();
+        let out = interpret(&rec, &snapshot_id, Utc::now());
+        assert_eq!(out.len(), 2);
+        let dme = match &out[1] {
+            CifpInterpretation::Navaid(n) => n.clone(),
+            other => panic!("expected DME-ILS, got {other:?}"),
+        };
+        assert_eq!(dme.kind, NavaidKind::Dme);
+        assert!(dme.dme_paired);
+        assert_eq!(dme.associated_airport.as_deref(), Some("KSFO"));
+    }
+
+    #[test]
+    fn test_parse_cifp_content_chains_airway_legs() {
+        let content = format!("{ER_A315_1}\n{ER_A315_2}\n{ER_A315_3}\n{EA_AAARG}\n");
+        let snapshot_id = SourceSnapshotId("snap-faa".to_string());
+        let (waypoints, _navaids, legs, report) =
             FaaCifpAdapter::parse_cifp_content(&content, &snapshot_id, Utc::now());
 
         assert_eq!(waypoints.len(), 1);
-        assert_eq!(navaids.len(), 3); // VORTAC + ILS + NDB
-        assert_eq!(report.lines_seen, 5);
-        assert_eq!(report.records_decoded, 4);
-        assert_eq!(report.unsupported_records, 1);
+        assert_eq!(legs.len(), 2);
+        assert_eq!(legs[0].start_fix, "ZBV");
+        assert_eq!(legs[0].end_fix, "SWIMM");
+        assert_eq!(legs[0].minimum_altitude_ft, Some(8000));
+        assert_eq!(legs[1].start_fix, "SWIMM");
+        assert_eq!(legs[1].end_fix, "TINKY");
+        assert_eq!(report.airway_legs_decoded, 2);
+    }
 
-        // ILS localizer must not carry fabricated bearing data.
-        let ils = navaids
-            .iter()
-            .find(|n| n.kind == NavaidKind::IlsLocalizer)
-            .unwrap();
-        assert_eq!(ils.localizer_bearing_true_deg, None);
-        assert_eq!(ils.associated_airport.as_deref(), Some("KSFO"));
+    #[test]
+    fn test_waypoint_region_preserves_blank_icao() {
+        let snapshot_id = SourceSnapshotId("snap-faa".to_string());
+        let rec = decode_line(EA_AAARG).unwrap();
+        let out = interpret(&rec, &snapshot_id, Utc::now());
+        match &out[0] {
+            CifpInterpretation::Waypoint(wp) => {
+                assert_eq!(wp.region_code, "K ");
+            }
+            other => panic!("expected waypoint, got {other:?}"),
+        }
     }
 }

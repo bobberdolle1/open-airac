@@ -62,10 +62,40 @@ pub struct OurAirportsNavaidRecord {
     pub latitude_deg: Option<f64>,
     pub longitude_deg: Option<f64>,
     pub elevation_ft: Option<i32>,
-    pub associated_airport: Option<String>,
+    pub iso_country: Option<String>,
+    pub dme_frequency_khz: Option<u32>,
+    pub dme_channel: Option<String>,
+    pub dme_latitude_deg: Option<f64>,
+    pub dme_longitude_deg: Option<f64>,
+    pub dme_elevation_ft: Option<i32>,
+    pub slaved_variation_deg: Option<f64>,
     pub magnetic_variation_deg: Option<f64>,
+    pub power: Option<String>,
+    pub associated_airport: Option<String>,
 }
 
+/// Map OurAirports transmitter power to the XPNAV1200 class/volume field.
+/// Source-derived (https://ourairports.com/data/ `power` column); never
+/// synthesized when the source is silent.
+fn service_volume_from_power(kind: NavaidKind, power: &str) -> Option<u16> {
+    match kind {
+        NavaidKind::Vor | NavaidKind::Vordme | NavaidKind::Vortac | NavaidKind::Dme => {
+            match power {
+                "HIGH" => Some(130),
+                "MEDIUM" => Some(40),
+                "LOW" => Some(25),
+                _ => None,
+            }
+        }
+        NavaidKind::Ndb => match power {
+            "HIGH" => Some(75),
+            "MEDIUM" => Some(50),
+            "LOW" => Some(25),
+            _ => None,
+        },
+        _ => None,
+    }
+}
 fn valid_lat(l: Option<f64>) -> Option<f64> {
     l.filter(|v| (-90.0..=90.0).contains(v))
 }
@@ -328,17 +358,10 @@ impl OurAirportsImporter {
                 continue;
             };
 
+            let is_ndb_dme = rec.navaid_type.eq_ignore_ascii_case("NDB-DME");
             let kind = match NavaidKind::parse(&rec.navaid_type) {
                 Some(k) => k,
-                None if rec.navaid_type.eq_ignore_ascii_case("NDB-DME") => {
-                    // Composite facility: needs two X-Plane rows (NDB + DME).
-                    // Not yet representable as a single canonical navaid.
-                    report.record_quarantined(format!(
-                        "Navaid {}: composite NDB-DME not yet representable",
-                        rec.ident
-                    ));
-                    continue;
-                }
+                None if is_ndb_dme => NavaidKind::Ndb,
                 None => {
                     report.record_rejected(format!(
                         "Navaid {}: unknown navaid type '{}'",
@@ -358,29 +381,83 @@ impl OurAirportsImporter {
                 continue;
             }
 
-            let navaid = CanonicalNavaid {
+            let service_volume_nm = match rec.power.as_deref() {
+                Some(p) => service_volume_from_power(kind, p),
+                None => None,
+            };
+
+            let temporal = TemporalValidity {
+                valid_from,
+                valid_until: None,
+                source_snapshot_id: snapshot_id.clone(),
+            };
+
+            navaids.push(CanonicalNavaid {
                 object_id: NavaidId(format!("ourairports:{}", rec.id)),
-                ident: rec.ident,
-                name: rec.name,
+                ident: rec.ident.clone(),
+                name: rec.name.clone(),
                 kind,
                 frequency: FrequencyKhz(freq_khz),
                 latitude: lat,
                 longitude: lon,
                 elevation_ft: rec.elevation_ft,
                 region_code: None,
-                associated_airport: rec.associated_airport,
+                associated_airport: rec.associated_airport.clone(),
                 magnetic_variation_deg: rec.magnetic_variation_deg,
+                slaved_variation_deg: rec.slaved_variation_deg,
+                service_volume_nm,
+                dme_paired: false,
                 associated_runway: None,
                 localizer_bearing_true_deg: None,
                 localizer_bearing_mag_deg: None,
                 glideslope_angle_deg: None,
-                temporal: TemporalValidity {
-                    valid_from,
-                    valid_until: None,
-                    source_snapshot_id: snapshot_id.clone(),
-                },
-            };
-            navaids.push(navaid);
+                temporal: temporal.clone(),
+            });
+
+            // Paired DME component: VOR-DME/VORTAC/NDB-DME facilities carry
+            // the DME frequency and position in dedicated columns.
+            let has_dme = rec.dme_frequency_khz.is_some_and(|f| f > 0);
+            let dme_component =
+                matches!(kind, NavaidKind::Vordme | NavaidKind::Vortac) || is_ndb_dme;
+            if dme_component && has_dme {
+                let dme_freq = rec.dme_frequency_khz.unwrap_or(freq_khz);
+                // The DME of a colocated facility sits at the facility
+                // position; the source DME coordinates take precedence.
+                let dme_lat = rec
+                    .dme_latitude_deg
+                    .filter(|v| (-90.0..=90.0).contains(v))
+                    .unwrap_or(lat);
+                let dme_lon = rec
+                    .dme_longitude_deg
+                    .filter(|v| (-180.0..=180.0).contains(v))
+                    .unwrap_or(lon);
+                let dme_elevation = rec.dme_elevation_ft.or(rec.elevation_ft);
+                let dme_volume = rec
+                    .power
+                    .as_deref()
+                    .and_then(|p| service_volume_from_power(NavaidKind::Dme, p));
+                navaids.push(CanonicalNavaid {
+                    object_id: NavaidId(format!("ourairports:{}:dme", rec.id)),
+                    ident: rec.ident.clone(),
+                    name: format!("{} DME", rec.name),
+                    kind: NavaidKind::Dme,
+                    frequency: FrequencyKhz(dme_freq),
+                    latitude: dme_lat,
+                    longitude: dme_lon,
+                    elevation_ft: dme_elevation,
+                    region_code: None,
+                    associated_airport: rec.associated_airport.clone(),
+                    magnetic_variation_deg: rec.magnetic_variation_deg,
+                    slaved_variation_deg: None,
+                    service_volume_nm: dme_volume,
+                    dme_paired: !is_ndb_dme,
+                    associated_runway: None,
+                    localizer_bearing_true_deg: None,
+                    localizer_bearing_mag_deg: None,
+                    glideslope_angle_deg: None,
+                    temporal,
+                });
+            }
         }
 
         (navaids, report)
@@ -521,10 +598,10 @@ id,airport_ref,airport_ident,length_ft,width_ft,surface,le_ident,le_latitude_deg
 ";
 
     const NAVAIDS_CSV: &str = "\
-id,filename,ident,name,type,frequency_khz,latitude_deg,longitude_deg,elevation_ft,associated_airport,magnetic_variation_deg
-201,SFO.navaid,SFO,San Francisco VOR-DME,VOR-DME,115800,37.6195,-122.3739,13,KSFO,-13.0
-202,XXX.navaid,XXX,Some NDB-DME,NDB-DME,350,37.0,-122.0,10,,5.0
-203,BAD.navaid,BAD,Bad Navaid,VOR,999,37.0,-122.0,10,,
+id,filename,ident,name,type,frequency_khz,latitude_deg,longitude_deg,elevation_ft,iso_country,dme_frequency_khz,dme_channel,dme_latitude_deg,dme_longitude_deg,dme_elevation_ft,slaved_variation_deg,magnetic_variation_deg,usageType,power,associated_airport
+201,SFO.navaid,SFO,San Francisco VOR-DME,VOR-DME,115800,37.6195,-122.3739,13,US,115800,115X,37.6195,-122.3739,13,-13.0,-13.0,BOTH,HIGH,KSFO
+202,XXX.navaid,XXX,Some NDB-DME,NDB-DME,350,37.0,-122.0,10,US,110400,80X,37.01,-122.01,10,5.0,5.0,BOTH,MEDIUM,
+203,BAD.navaid,BAD,Bad Navaid,VOR,999,37.0,-122.0,10,US,,,,,,,,,LOW,
 ";
 
     fn fixture_dataset(name: &str, content: &str) -> FetchedDataset {
@@ -573,13 +650,26 @@ id,filename,ident,name,type,frequency_khz,latitude_deg,longitude_deg,elevation_f
     }
 
     #[test]
-    fn test_parse_navaids_quarantines_composite() {
+    fn test_parse_navaids_models_dme_components() {
         let snap = SourceSnapshotId("snap-test".to_string());
         let (navaids, report) =
             OurAirportsImporter::parse_navaids(NAVAIDS_CSV, &snap, "hash", Utc::now());
-        assert_eq!(navaids.len(), 1);
+        // 201: VOR-DME + paired DME; 202: NDB-DME -> NDB + DME (row 13); 203 rejected.
+        assert_eq!(navaids.len(), 4);
         assert_eq!(navaids[0].kind, NavaidKind::Vordme);
-        assert_eq!(report.records_quarantined, 1);
+        assert_eq!(navaids[0].service_volume_nm, Some(130)); // HIGH
+        assert_eq!(navaids[0].slaved_variation_deg, Some(-13.0));
+        let dme = navaids
+            .iter()
+            .find(|n| n.kind == NavaidKind::Dme && n.dme_paired)
+            .unwrap();
+        assert_eq!(dme.ident, "SFO");
+        let ndb_dme = navaids
+            .iter()
+            .find(|n| n.kind == NavaidKind::Dme && !n.dme_paired)
+            .unwrap();
+        assert_eq!(ndb_dme.ident, "XXX");
+        assert_eq!(report.records_quarantined, 0);
         assert_eq!(report.records_rejected, 1);
     }
 
@@ -600,7 +690,7 @@ id,filename,ident,name,type,frequency_khz,latitude_deg,longitude_deg,elevation_f
 
         let nav = fixture_dataset("navaids", NAVAIDS_CSV);
         let report = OurAirportsImporter::ingest_dataset(&nav, &mut store).unwrap();
-        assert_eq!(report.records_accepted(), 1);
+        assert_eq!(report.records_accepted(), 4);
 
         // The store is structurally clean after the whole ingestion.
         let issues = store.validate().unwrap();
@@ -609,8 +699,8 @@ id,filename,ident,name,type,frequency_khz,latitude_deg,longitude_deg,elevation_f
         let status = store.status().unwrap();
         assert_eq!(status.total_airports, 2);
         assert_eq!(status.total_runways, 3);
-        assert_eq!(status.total_navaids, 1);
+        assert_eq!(status.total_navaids, 4);
         assert_eq!(status.total_snapshots, 3);
-        assert_eq!(status.migration_version, 2);
+        assert_eq!(status.migration_version, 3);
     }
 }
