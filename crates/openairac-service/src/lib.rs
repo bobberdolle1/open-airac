@@ -281,6 +281,19 @@ impl WorldQuery {
         Planner::new(&self.store).plan(request)
     }
 
+    /// Connected-component sizes of the airway graph at `date`, sorted
+    /// descending. A healthy dataset has one dominant component; many
+    /// large components indicate disconnected airspace (data quality).
+    pub fn graph_components(&self, date: DateTime<Utc>) -> Result<Vec<usize>> {
+        let (graph, _) = openairac_routing::AirwayGraph::build(
+            &self.store.query_waypoints_at(date)?,
+            &self.store.query_navaids_at(date)?,
+            &self.store.query_airway_legs_at(date)?,
+            date,
+        );
+        Ok(graph.disconnected_components())
+    }
+
     /// The current waypoint list (for diagnostics and exporters).
     pub fn waypoints(&self, date: DateTime<Utc>) -> Result<Vec<CanonicalWaypoint>> {
         self.store.query_waypoints_at(date)
@@ -496,6 +509,15 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn test_graph_components() {
+        let t = Utc::now();
+        let service = seeded(t).unwrap();
+        // One leg W1 -> SFO: a single component of size 2.
+        let components = service.graph_components(t).unwrap();
+        assert_eq!(components, vec![2]);
     }
 
     #[test]

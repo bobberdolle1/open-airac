@@ -30,7 +30,7 @@ Traditional flight simulation navigation relies on expensive recurring subscript
 
 ---
 
-## 📊 Feature Status Table (v0.2 Foundation)
+## 📊 Feature Status Table (v0.3 Routing & Procedures Foundation)
 
 | Feature | Status | Crate / Component |
 | :--- | :---: | :--- |
@@ -40,10 +40,12 @@ Traditional flight simulation navigation relies on expensive recurring subscript
 | **Temporal SQLite Store (revisioned `world_at`) & Migrations** | **Implemented** | `openairac-store` |
 | **Transactional, Fail-Closed Ingestion + Diagnostics** | **Implemented** | `openairac-ingest` |
 | **OurAirports Ingestion (live fetch: Airports/Runways/Navaids)** | **Implemented** | `openairac-ingest` |
-| **Experimental FAA CIFP ARINC 424 Adapter (EA/D/DB/PN/ER records)** | **Experimental** | `openairac-ingest` |
-| **Geodesic Direct Route Engine (WGS84)** | **Implemented** | `openairac-routing` |
-| **X-Plane 12 dat Exporter (`earth_fix`/`earth_nav`/`earth_awy`, staged & fail-closed)** | **Experimental** | `openairac-export-xplane` |
-| **Full SID / STAR / Approach Leg Execution** | *Planned* | `openairac-procedures` |
+| **FAA CIFP ARINC 424 Adapter (EA/D/DB/PN/ER + PA/PG/PC/PD/PE/PF)** | **Implemented** | `openairac-ingest` |
+| **Canonical Airway Routing Graph (Dijkstra/A\*, MEA/cruise filters, exclusions)** | **Implemented** | `openairac-routing` |
+| **SID / STAR / Approach Semantic Layer (ARINC 424 path terminators)** | **Implemented** | `openairac-procedures` |
+| **Flight-Plan Integration (airport → SID → enroute → STAR → approach)** | **Implemented** | `openairac-integration` |
+| **WorldQuery Service API (world_at / search / nearby / airways / procedures / plan)** | **Implemented** | `openairac-service` |
+| **X-Plane 12 dat Exporter (`earth_fix`/`earth_nav`/`earth_awy`, staged & fail-closed)** | **Diagnostic** | `openairac-export-xplane` |
 | **MSFS 2024 Packager** | *Planned* | Roadmap |
 | **Flight Deck EFB Interface** | *Planned* | Roadmap |
 
@@ -57,12 +59,13 @@ crates/
 ├── openairac-magnetic/       # NOAA WMM2025 geomagnetic solver & runway drift engine
 ├── openairac-store/          # Temporal SQLite store with schema migrations
 ├── openairac-ingest/         # DataProvider abstraction, OurAirports & FAA CIFP parsers
-├── openairac-procedures/     # Procedure domain models & ARINC 424 Path Terminators
-├── openairac-routing/        # Geodesic WGS84 distance & direct route calculation
-├── openairac-export-xplane/  # Database-backed X-Plane 12 navdata exporter
+├── openairac-procedures/     # ARINC 424 path-terminator semantic layer
+├── openairac-routing/        # Canonical airway graph (Dijkstra/A*) + geodesics
+├── openairac-integration/    # Full flight-planning (procedures + enroute join)
+├── openairac-service/        # WorldQuery: UI-independent query boundary
+├── openairac-export-xplane/  # X-Plane 12 navdata exporter (diagnostic path)
 ├── openairac-plugin/         # X-Plane 12 C-ABI plugin for live SQLite status querying
 └── openairac-cli/            # Command-line interface
-```
 
 ---
 

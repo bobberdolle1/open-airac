@@ -282,10 +282,24 @@ impl AirwayGraph {
 
         let mut edges: Vec<AirwayEdge> = Vec::new();
         let mut diagnostics = Vec::new();
+        // Airway endpoints may be fixes or navaids (VOR intersections are
+        // common). Resolution order: fix, then VHF navaid, then NDB.
+        let resolve = |ident: &str, region: &str| -> Option<&GraphNode> {
+            let id = NodeId::fix(ident, region);
+            if let Some(n) = nodes.get(&id) {
+                return Some(n);
+            }
+            let id = NodeId::navaid(ident, region, NodeKind::Vhf);
+            if let Some(n) = nodes.get(&id) {
+                return Some(n);
+            }
+            nodes.get(&NodeId::navaid(ident, region, NodeKind::Ndb))
+        };
         for leg in legs {
-            let start = NodeId::fix(&leg.start_fix, &leg.start_icao_code);
-            let end = NodeId::fix(&leg.end_fix, &leg.end_icao_code);
-            let (Some(from), Some(to)) = (nodes.get(&start), nodes.get(&end)) else {
+            let (Some(from), Some(to)) = (
+                resolve(&leg.start_fix, &leg.start_icao_code),
+                resolve(&leg.end_fix, &leg.end_icao_code),
+            ) else {
                 diagnostics.push(format!(
                     "airway {}: endpoint {}/{} or {}/{} not in node set",
                     leg.route_ident,
@@ -954,6 +968,51 @@ mod tests {
         let (graph2, diagnostics2) = AirwayGraph::build(&all_fixes, &[], &legs_t0, t_future);
         assert!(diagnostics2.is_empty(), "{diagnostics2:?}");
         assert_eq!(graph2.node_count(), 2);
+    }
+
+    #[test]
+    fn test_navaid_endpoints_resolve() {
+        let t = Utc::now();
+        let fixes = vec![fix("AAA", "K1", 40.0, -80.0, t)];
+        let nav = CanonicalNavaid {
+            object_id: openairac_model::NavaidId("NAV-VOR".to_string()),
+            ident: "VOR".to_string(),
+            name: "VOR".to_string(),
+            kind: openairac_model::NavaidKind::Vor,
+            frequency: openairac_model::FrequencyKhz(115_000),
+            latitude: 41.0,
+            longitude: -81.0,
+            elevation_ft: None,
+            region_code: Some("K1".to_string()),
+            associated_airport: None,
+            magnetic_variation_deg: None,
+            slaved_variation_deg: None,
+            service_volume_nm: None,
+            dme_paired: false,
+            associated_runway: None,
+            localizer_bearing_true_deg: None,
+            localizer_bearing_mag_deg: None,
+            glideslope_angle_deg: None,
+            temporal: temporal(t),
+        };
+        let navaids = vec![nav];
+        let legs = vec![leg(
+            "V1",
+            "AAA",
+            "K1",
+            "VOR",
+            "K1",
+            Some('L'),
+            'N',
+            None,
+            None,
+            t,
+        )];
+        let (graph, diagnostics) = AirwayGraph::build(&fixes, &navaids, &legs, t);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(graph.edge_count(), 2); // bidirectional through the VOR node
+        let components = graph.disconnected_components();
+        assert_eq!(components, vec![2]);
     }
 
     #[test]

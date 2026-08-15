@@ -789,7 +789,9 @@ impl WorldStore {
                 "SELECT l.id, l.start_fix, l.end_fix
                  FROM airway_legs l
                  WHERE l.start_fix NOT IN (SELECT ident FROM waypoints)
+                    AND l.start_fix NOT IN (SELECT ident FROM navaids)
                     OR l.end_fix NOT IN (SELECT ident FROM waypoints)
+                    AND l.end_fix NOT IN (SELECT ident FROM navaids)
                  ORDER BY l.id LIMIT 20",
             )?;
             let rows = stmt.query_map([], |r| {
