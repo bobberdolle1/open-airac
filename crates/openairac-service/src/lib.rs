@@ -454,7 +454,7 @@ mod tests {
         assert_eq!(world.waypoints, 1);
         assert_eq!(world.airway_legs, 1);
         assert_eq!(world.procedure_legs, 1);
-        assert_eq!(world.migration_version, 4);
+        assert_eq!(world.migration_version, 5);
     }
 
     #[test]

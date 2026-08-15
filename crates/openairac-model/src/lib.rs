@@ -311,3 +311,206 @@ pub struct StoreStatus {
     pub total_airway_legs: usize,
     pub total_procedure_legs: usize,
 }
+
+// ---------------------------------------------------------------------------
+// AIRAC lifecycle domain (v0.4)
+// ---------------------------------------------------------------------------
+
+/// AIRAC cycle identifier (e.g. `"2608"`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct CycleId(pub String);
+
+/// Lifecycle state of a published cycle.
+///
+/// Legal transitions (validated by the store):
+/// ```text
+/// Discovered  -> Preloaded | Superseded | Expired
+/// Preloaded   -> Active | Superseded | Expired
+/// Active      -> Superseded | Expired | RolledBack
+/// RolledBack  -> Superseded
+/// Superseded / Expired: terminal
+/// ```
+/// `Active` is bookkeeping recorded by the `Observed` event; data queries
+/// are time-driven and NEVER gate on cycle status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CycleStatus {
+    Discovered,
+    Preloaded,
+    Active,
+    Superseded,
+    Expired,
+    RolledBack,
+}
+
+impl CycleStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CycleStatus::Discovered => "Discovered",
+            CycleStatus::Preloaded => "Preloaded",
+            CycleStatus::Active => "Active",
+            CycleStatus::Superseded => "Superseded",
+            CycleStatus::Expired => "Expired",
+            CycleStatus::RolledBack => "RolledBack",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "Discovered" => Some(CycleStatus::Discovered),
+            "Preloaded" => Some(CycleStatus::Preloaded),
+            "Active" => Some(CycleStatus::Active),
+            "Superseded" => Some(CycleStatus::Superseded),
+            "Expired" => Some(CycleStatus::Expired),
+            "RolledBack" => Some(CycleStatus::RolledBack),
+            _ => None,
+        }
+    }
+
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, CycleStatus::Superseded | CycleStatus::Expired)
+    }
+
+    pub fn legal_transition(from: CycleStatus, to: CycleStatus) -> bool {
+        use CycleStatus::*;
+        matches!(
+            (from, to),
+            (Discovered, Preloaded | Superseded | Expired)
+                | (Preloaded, Active | Superseded | Expired)
+                | (Active, Superseded | Expired | RolledBack)
+                | (RolledBack, Superseded)
+        )
+    }
+}
+
+/// One published AIRAC cycle in the catalog. The catalog is metadata:
+/// the temporal data rows are the only source of truth for `world_at(t)`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiracCycle {
+    pub id: CycleId,
+    /// `None` = not yet confirmed from the source (fail-closed: such a
+    /// cycle can never be scheduled/activated).
+    pub effective_from: Option<DateTime<Utc>>,
+    pub effective_until: Option<DateTime<Utc>>,
+    pub status: CycleStatus,
+    /// Source location this cycle was discovered from (e.g. the CIFP zip URL).
+    pub source_uri: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub notes: Option<String>,
+}
+
+/// Audit/journal entry kind. The journal records intents and facts
+/// (schedule, observed transition, rollback) and is display/audit
+/// metadata; it never gates queries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CycleEventKind {
+    /// The cycle's datasets were ingested for its `effective_from`
+    /// (recorded in the same transaction as the preload ingest).
+    Scheduled,
+    /// Bookkeeping mark that the cycle's effective window was reached.
+    Observed,
+    /// The cycle was rolled back by re-publishing the pre-cycle state as
+    /// new revisions at the rollback instant.
+    Rollback,
+}
+
+impl CycleEventKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CycleEventKind::Scheduled => "Scheduled",
+            CycleEventKind::Observed => "Observed",
+            CycleEventKind::Rollback => "Rollback",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "Scheduled" => Some(CycleEventKind::Scheduled),
+            "Observed" => Some(CycleEventKind::Observed),
+            "Rollback" => Some(CycleEventKind::Rollback),
+            _ => None,
+        }
+    }
+}
+
+/// One journal entry. Deliberately carries NO `world_revision_id`: a
+/// rollback re-publishes rows from multiple historical snapshots and the
+/// per-row provenance lives in those rows' own `source_snapshot_id`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CycleEvent {
+    pub id: i64,
+    pub at: DateTime<Utc>,
+    pub kind: CycleEventKind,
+    /// Subject cycle.
+    pub cycle_id: CycleId,
+    /// Required for `Rollback`: which cycle was re-published.
+    pub restored_cycle_id: Option<CycleId>,
+    pub notes: Option<String>,
+}
+
+/// Whether a dataset publication is the cycle's baseline or a correction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RevisionKind {
+    Baseline,
+    Correction,
+}
+
+impl RevisionKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RevisionKind::Baseline => "Baseline",
+            RevisionKind::Correction => "Correction",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "Baseline" => Some(RevisionKind::Baseline),
+            "Correction" => Some(RevisionKind::Correction),
+            _ => None,
+        }
+    }
+}
+
+/// Whether a dataset publication covers the whole dataset or only
+/// changed records. `close_absent_at` semantics depend ONLY on this:
+/// full-snapshot removals must be applied even for corrected re-publishes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Coverage {
+    FullSnapshot,
+    Partial,
+}
+
+impl Coverage {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Coverage::FullSnapshot => "FullSnapshot",
+            Coverage::Partial => "Partial",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "FullSnapshot" => Some(Coverage::FullSnapshot),
+            "Partial" => Some(Coverage::Partial),
+            _ => None,
+        }
+    }
+}
+
+/// Append-only record of one observed dataset publication. The latest row
+/// (max `retrieved_at`) per `(provider, dataset, airac_cycle)` is the
+/// version compared for skip-by-hash; corrected re-publishes of the same
+/// cycle append new rows instead of overwriting.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DatasetVersion {
+    pub id: i64,
+    pub provider: String,
+    pub dataset: String,
+    pub airac_cycle: Option<String>,
+    pub content_sha256: String,
+    pub retrieved_at: DateTime<Utc>,
+    pub revision_kind: RevisionKind,
+    pub coverage: Coverage,
+    pub notes: Option<String>,
+}

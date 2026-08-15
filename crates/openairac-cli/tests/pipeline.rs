@@ -56,6 +56,10 @@ fn fixture_dataset(name: &str, content: &str, retrieved_at: DateTime<Utc>) -> Fe
         content_sha256: sha256_hex(content.as_bytes()),
         retrieved_at,
         provider_revision: Some("fixture".to_string()),
+        airac_cycle: None,
+        revision_kind: openairac_model::RevisionKind::Baseline,
+        coverage: openairac_model::Coverage::FullSnapshot,
+        valid_from: None,
         raw_content: content.to_string(),
     }
 }

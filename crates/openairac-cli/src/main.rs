@@ -76,6 +76,15 @@ enum Commands {
         /// Comma-separated datasets (default: all supported by the provider)
         #[arg(long)]
         datasets: Option<String>,
+        /// AIRAC cycle ident (required for cycle-aware providers like faa_cifp)
+        #[arg(long)]
+        cycle: Option<String>,
+    },
+
+    /// AIRAC cycle catalog: discovery and inspection
+    Cycle {
+        #[command(subcommand)]
+        cmd: CycleCmd,
     },
 
     /// Display local world database revision, entity counts, and status
@@ -94,6 +103,23 @@ enum Commands {
     Export {
         #[command(subcommand)]
         target: ExportTarget,
+    },
+}
+
+#[derive(Subcommand)]
+enum CycleCmd {
+    /// Discover published cycles from the FAA CIFP directory (live network)
+    /// and record them in the catalog. Effective dates stay unconfirmed
+    /// until `cycle confirm` (future milestone).
+    Discover {
+        #[arg(short, long, default_value = "./data/world.openairac.sqlite")]
+        db: PathBuf,
+    },
+
+    /// List the AIRAC cycle catalog
+    List {
+        #[arg(short, long, default_value = "./data/world.openairac.sqlite")]
+        db: PathBuf,
     },
 }
 
@@ -171,6 +197,10 @@ fn sync_fixture(store: &mut WorldStore) -> Result<()> {
             content_sha256: sha256_hex(content.as_bytes()),
             retrieved_at: Utc::now(),
             provider_revision: Some("fixture".to_string()),
+            airac_cycle: None,
+            revision_kind: openairac_model::RevisionKind::Baseline,
+            coverage: openairac_model::Coverage::FullSnapshot,
+            valid_from: None,
             raw_content: content.to_string(),
         };
         let report = OurAirportsImporter::ingest_dataset(&dataset, store)?;
@@ -311,6 +341,7 @@ fn main() -> Result<()> {
             db,
             fixture,
             datasets,
+            cycle,
         } => {
             println!("Synchronizing OpenAIRAC Navigation Data...");
             println!("  Provider: {provider}");
@@ -318,11 +349,75 @@ fn main() -> Result<()> {
 
             let mut store = WorldStore::open(db)?;
 
-            if provider != "ourairports" {
-                anyhow::bail!("Unknown provider '{provider}' (supported: ourairports)");
+            if provider != "ourairports" && provider != "faa_cifp" {
+                anyhow::bail!("Unknown provider '{provider}' (supported: ourairports, faa_cifp)");
             }
 
-            if *fixture {
+            if provider == "faa_cifp" {
+                if *fixture {
+                    anyhow::bail!("--fixture is not supported for faa_cifp");
+                }
+                let Some(cycle_ident) = cycle.as_deref() else {
+                    anyhow::bail!(
+                        "--cycle <ident> is required for faa_cifp (discover cycles with `openairac cycle discover`)"
+                    );
+                };
+                let catalog_cycle = store
+                    .query_cycle(&openairac_model::CycleId(cycle_ident.to_string()))?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "cycle '{cycle_ident}' is not in the catalog; run `openairac cycle discover --db <db>` first"
+                        )
+                    })?;
+                let Some(selector) = catalog_cycle.source_uri.as_deref() else {
+                    anyhow::bail!("cycle '{cycle_ident}' has no source URI");
+                };
+                let provider = openairac_ingest::faa_cifp::CifpProvider;
+                let requested: Vec<String> = datasets
+                    .as_deref()
+                    .map(|d| d.split(',').map(|s| s.trim().to_string()).collect())
+                    .unwrap_or_else(|| vec!["FAACIFP18".to_string()]);
+                for dataset_name in requested {
+                    println!("  Fetching {dataset_name} for cycle {cycle_ident}...");
+                    let dataset = openairac_ingest::provider::DataProvider::fetch(
+                        &provider,
+                        &dataset_name,
+                        Some(selector),
+                    )?;
+                    println!(
+                        "    fetched {} bytes from {}",
+                        dataset.raw_content.len(),
+                        dataset.source_uri
+                    );
+                    let report = openairac_ingest::provider::DataProvider::parse_and_ingest(
+                        &provider, &dataset, &mut store,
+                    )?;
+                    println!(
+                        "    {}: seen {}, accepted {}, unchanged {}, quarantined {}, rejected {}, {} ms",
+                        report.dataset_name,
+                        report.records_seen,
+                        report.records_accepted(),
+                        report.records_unchanged,
+                        report.records_quarantined,
+                        report.records_rejected,
+                        report.duration_ms
+                    );
+                    for (kind, count) in &report.kind_counts {
+                        println!("    {kind}: {count}");
+                    }
+                    store.insert_dataset_version(&openairac_model::DatasetVersion {
+                        id: 0,
+                        provider: "FAA_CIFP".to_string(),
+                        dataset: dataset.dataset_name.clone(),
+                        airac_cycle: dataset.airac_cycle.clone(),
+                        content_sha256: dataset.content_sha256.clone(),
+                        retrieved_at: dataset.retrieved_at,
+                        revision_kind: dataset.revision_kind,
+                        coverage: dataset.coverage,
+                        notes: None,
+                    })?;
+                }
+            } else if *fixture {
                 println!("  Using offline fixture content.");
                 sync_fixture(&mut store)?;
             } else {
@@ -339,7 +434,7 @@ fn main() -> Result<()> {
                     });
                 for dataset_name in requested {
                     println!("  Fetching {dataset_name}...");
-                    let dataset = importer.fetch(&dataset_name)?;
+                    let dataset = importer.fetch(&dataset_name, None)?;
                     println!(
                         "    fetched {} bytes from {}",
                         dataset.raw_content.len(),
@@ -431,6 +526,68 @@ fn main() -> Result<()> {
             }
         }
 
+        Commands::Cycle { cmd } => match cmd {
+            CycleCmd::Discover { db } => {
+                println!("Discovering FAA CIFP cycles...");
+                let store = WorldStore::open(db)?;
+                let discovered = openairac_ingest::cifp_discovery::discover_cifp_cycles()?;
+                let mut new_count = 0usize;
+                for cycle in &discovered {
+                    let id = openairac_model::CycleId(cycle.ident.clone());
+                    if store.query_cycle(&id)?.is_some() {
+                        println!("  cycle {} already in catalog (skipped)", cycle.ident);
+                        continue;
+                    }
+                    let now = chrono::Utc::now();
+                    store.insert_cycle(&openairac_model::AiracCycle {
+                        id,
+                        effective_from: cycle.effective_from,
+                        effective_until: cycle.effective_until,
+                        status: openairac_model::CycleStatus::Discovered,
+                        source_uri: Some(cycle.source_uri.clone()),
+                        created_at: now,
+                        updated_at: now,
+                        notes: Some("effective dates unconfirmed".to_string()),
+                    })?;
+                    new_count += 1;
+                    println!(
+                        "  discovered {} ({}) — effective dates UNCONFIRMED",
+                        cycle.ident, cycle.source_uri
+                    );
+                }
+                println!(
+                    "Discovery complete: {} new cycle(s), {} total in catalog.",
+                    new_count,
+                    store.query_cycles()?.len()
+                );
+            }
+            CycleCmd::List { db } => {
+                let store = WorldStore::open(db)?;
+                let cycles = store.query_cycles()?;
+                if cycles.is_empty() {
+                    println!("Cycle catalog is empty. Run `openairac cycle discover`.");
+                    return Ok(());
+                }
+                println!("AIRAC Cycle Catalog");
+                println!("===================");
+                for cycle in &cycles {
+                    println!(
+                        "  {}  status={}  effective_from={}  effective_until={}  source={}",
+                        cycle.id.0,
+                        cycle.status.as_str(),
+                        cycle
+                            .effective_from
+                            .map(|t| t.to_rfc3339())
+                            .unwrap_or_else(|| "UNCONFIRMED".to_string()),
+                        cycle
+                            .effective_until
+                            .map(|t| t.to_rfc3339())
+                            .unwrap_or_else(|| "-".to_string()),
+                        cycle.source_uri.as_deref().unwrap_or("-"),
+                    );
+                }
+            }
+        },
         Commands::Export { target } => match target {
             ExportTarget::Xplane {
                 db,

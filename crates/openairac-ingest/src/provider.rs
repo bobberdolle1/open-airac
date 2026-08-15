@@ -1,8 +1,10 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+pub use openairac_model::{Coverage, RevisionKind};
 use openairac_store::{EntityWrite, WorldStore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 
 /// SHA-256 of raw content, hex encoded.
 pub fn sha256_hex(content: &[u8]) -> String {
@@ -20,6 +22,17 @@ pub struct FetchedDataset {
     pub content_sha256: String,
     pub retrieved_at: DateTime<Utc>,
     pub provider_revision: Option<String>,
+    /// AIRAC cycle this publication belongs to (None for cycle-less
+    /// providers like OurAirports).
+    pub airac_cycle: Option<String>,
+    /// Baseline (first publication of the cycle) or Correction.
+    pub revision_kind: RevisionKind,
+    /// Whether the publication covers the whole dataset (full-snapshot
+    /// removal semantics apply) or only changed records.
+    pub coverage: Coverage,
+    /// The temporal validity start for this publication's entities
+    /// (usually the AIRAC cycle's effective_from). `None` = now.
+    pub valid_from: Option<DateTime<Utc>>,
     pub raw_content: String,
 }
 
@@ -41,6 +54,12 @@ pub struct IngestReport {
     pub records_unchanged: usize,
     pub records_quarantined: usize,
     pub records_rejected: usize,
+    /// Per-entity-class accepted counts (e.g. "waypoints", "procedure_legs").
+    pub kind_counts: BTreeMap<String, usize>,
+    /// Rejected records whose entity id could NOT be identified. For a
+    /// full-snapshot publication these block close_absent semantics: a
+    /// parser failure must never silently become a source deletion.
+    pub unidentifiable_rejections: usize,
     pub warnings: Vec<String>,
     pub errors: Vec<String>,
     pub duration_ms: u64,
@@ -112,8 +131,13 @@ impl IngestReport {
 pub trait DataProvider: Send + Sync {
     fn name(&self) -> &'static str;
 
-    /// Fetch one raw dataset over the network (or a documented local mirror).
-    fn fetch(&self, dataset: &str) -> Result<FetchedDataset>;
+    /// The datasets this provider publishes.
+    fn datasets(&self) -> &'static [&'static str];
+
+    /// Fetch one raw dataset over the network (or a documented local
+    /// mirror). `cycle` is a provider-defined selector: AIRAC cycle ident
+    /// for cycle-aware providers, ignored by cycle-less ones.
+    fn fetch(&self, dataset: &str, cycle: Option<&str>) -> Result<FetchedDataset>;
 
     /// Parse the fetched content and write it into the temporal store as one
     /// transaction.
@@ -177,6 +201,10 @@ pub fn fetch_url(
         content_sha256: checksum,
         retrieved_at,
         provider_revision,
+        airac_cycle: None,
+        revision_kind: RevisionKind::Baseline,
+        coverage: Coverage::FullSnapshot,
+        valid_from: None,
         raw_content: body,
     })
 }

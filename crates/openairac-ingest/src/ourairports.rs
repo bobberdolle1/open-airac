@@ -126,7 +126,11 @@ impl DataProvider for OurAirportsProvider {
         "OurAirports"
     }
 
-    fn fetch(&self, dataset: &str) -> Result<FetchedDataset> {
+    fn datasets(&self) -> &'static [&'static str] {
+        &["airports", "runways", "navaids"]
+    }
+
+    fn fetch(&self, dataset: &str, _cycle: Option<&str>) -> Result<FetchedDataset> {
         let url = match dataset {
             "airports" => AIRPORTS_URL,
             "runways" => RUNWAYS_URL,
@@ -621,6 +625,10 @@ id,filename,ident,name,type,frequency_khz,latitude_deg,longitude_deg,elevation_f
             content_sha256: crate::provider::sha256_hex(content.as_bytes()),
             retrieved_at: Utc::now(),
             provider_revision: Some("2026-08-12".to_string()),
+            airac_cycle: None,
+            revision_kind: openairac_model::RevisionKind::Baseline,
+            coverage: openairac_model::Coverage::FullSnapshot,
+            valid_from: None,
             raw_content: content.to_string(),
         }
     }
@@ -710,6 +718,6 @@ id,filename,ident,name,type,frequency_khz,latitude_deg,longitude_deg,elevation_f
         assert_eq!(status.total_runways, 3);
         assert_eq!(status.total_navaids, 4);
         assert_eq!(status.total_snapshots, 3);
-        assert_eq!(status.migration_version, 4);
+        assert_eq!(status.migration_version, 5);
     }
 }

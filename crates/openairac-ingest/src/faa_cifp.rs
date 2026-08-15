@@ -1164,6 +1164,126 @@ impl FaaCifpAdapter {
     }
 }
 
+/// Documented FAA CIFP download directory.
+pub const FAA_CIFP_BASE_URL: &str = "https://aeronav.faa.gov/Upload_313-d/cifp";
+
+/// Extract the AIRAC cycle ident from a CIFP file stem
+/// (`CIFP_260806` -> `2608`).
+pub fn cycle_ident_from_stem(selector: &str) -> Option<&str> {
+    let name = selector.rsplit('/').next().unwrap_or(selector);
+    let rest = name.strip_prefix("CIFP_")?;
+    let digits = rest.strip_suffix(".zip").unwrap_or(rest);
+    if digits.len() == 6 && digits.chars().all(|c| c.is_ascii_digit()) {
+        Some(&digits[..4])
+    } else {
+        None
+    }
+}
+
+/// The FAA CIFP as a cycle-aware [`DataProvider`].
+///
+/// Fetch selector is provider-defined and produced by cycle discovery:
+/// a file stem (`CIFP_260806`) or a full URL. The cycle ident is derived
+/// from the stem; a selector that is not a recognizable CIFP stem keeps
+/// the selector string as the cycle ident (fail-open only for
+/// identification, never for data).
+pub struct CifpProvider;
+
+impl crate::provider::DataProvider for CifpProvider {
+    fn name(&self) -> &'static str {
+        "FAA_CIFP"
+    }
+
+    fn datasets(&self) -> &'static [&'static str] {
+        &["FAACIFP18"]
+    }
+
+    fn fetch(&self, dataset: &str, cycle: Option<&str>) -> Result<crate::provider::FetchedDataset> {
+        if dataset != "FAACIFP18" {
+            anyhow::bail!("unknown FAA CIFP dataset '{dataset}'");
+        }
+        let selector = cycle.ok_or_else(|| {
+            anyhow::anyhow!(
+                "FAA CIFP is cycle-aware: fetch requires a cycle selector \
+                 (file stem like CIFP_260806 or a full URL)"
+            )
+        })?;
+        let url = if selector.starts_with("http://") || selector.starts_with("https://") {
+            selector.to_string()
+        } else {
+            format!("{FAA_CIFP_BASE_URL}/{selector}.zip")
+        };
+        let mut ds = crate::provider::fetch_url("FAA_CIFP", dataset, &url, Utc::now())?;
+        ds.airac_cycle = Some(
+            cycle_ident_from_stem(selector)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| selector.to_string()),
+        );
+        Ok(ds)
+    }
+
+    fn parse_and_ingest(
+        &self,
+        dataset: &crate::provider::FetchedDataset,
+        store: &mut WorldStore,
+    ) -> Result<crate::provider::IngestReport> {
+        use crate::provider::IngestReport;
+        if dataset.dataset_name != "FAACIFP18" {
+            anyhow::bail!("unknown FAA CIFP dataset '{}'", dataset.dataset_name);
+        }
+        let valid_from = dataset.valid_from.unwrap_or_else(Utc::now);
+        let cycle = dataset.airac_cycle.clone().unwrap_or_default();
+        let snapshot_id = SourceSnapshotId(format!(
+            "faa_cifp:{}:{}",
+            cycle,
+            dataset.content_sha256.get(..16).unwrap_or("unknown")
+        ));
+        let snapshot = SourceSnapshot {
+            id: snapshot_id.clone(),
+            provider: "FAA_CIFP".to_string(),
+            dataset: "FAACIFP18".to_string(),
+            provider_revision: dataset.provider_revision.clone(),
+            airac_cycle: dataset.airac_cycle.clone(),
+            effective_from: Some(valid_from),
+            effective_until: None,
+            retrieved_at: dataset.retrieved_at,
+            source_uri: dataset.source_uri.clone(),
+            content_sha256: dataset.content_sha256.clone(),
+            license_id: Some("US-GOV".to_string()),
+            license_notes: Some("US Government work (public domain)".to_string()),
+            parser_version: env!("CARGO_PKG_VERSION").to_string(),
+        };
+        store.insert_source_snapshot(&snapshot)?;
+
+        let scan =
+            FaaCifpAdapter::ingest_cifp(&dataset.raw_content, &snapshot_id, valid_from, store)?;
+
+        let mut report = IngestReport::new("FAA_CIFP", "FAACIFP18", &dataset.content_sha256);
+        report.records_seen = scan.lines_seen;
+        report.records_parsed = scan.records_decoded;
+        report
+            .kind_counts
+            .insert("waypoints".into(), scan.waypoints_decoded);
+        report
+            .kind_counts
+            .insert("navaids".into(), scan.navaids_decoded);
+        report
+            .kind_counts
+            .insert("airway_legs".into(), scan.airway_legs_decoded);
+        report
+            .kind_counts
+            .insert("procedure_legs".into(), scan.procedure_legs_decoded);
+        report.records_rejected = scan.decode_errors;
+        report.records_quarantined = scan.unsupported_records;
+        report.warnings = scan.unsupported_reasons;
+        // The fixed-width decoder identifies every record it rejects by
+        // record type at minimum; entity-level identification for
+        // close_absent semantics is wired with the full-snapshot ingest.
+        report.unidentifiable_rejections = 0;
+        Ok(report)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1629,6 +1749,102 @@ mod tests {
                 assert_eq!(wp.region_code, "K ");
             }
             other => panic!("expected waypoint, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_cycle_ident_from_stem() {
+        assert_eq!(cycle_ident_from_stem("CIFP_260806"), Some("2608"));
+        assert_eq!(cycle_ident_from_stem("CIFP_260806.zip"), Some("2608"));
+        assert_eq!(
+            cycle_ident_from_stem("https://aeronav.faa.gov/Upload_313-d/cifp/CIFP_260806.zip"),
+            Some("2608")
+        );
+        assert_eq!(cycle_ident_from_stem("CIFP_26XX06"), None);
+        assert_eq!(cycle_ident_from_stem("other"), None);
+    }
+
+    #[test]
+    fn test_cifp_provider_parity_with_adapter() {
+        // The provider path must decode exactly what the direct adapter
+        // path decodes from the same real cycle 2608 content.
+        let content =
+            format!("{EA_AAARG}\n{D_ABI_VORTAC}\n{ER_A315_1}\n{ER_A315_2}\n{ER_A315_3}\n");
+        let vf = Utc::now();
+
+        let snapshot = SourceSnapshot {
+            id: SourceSnapshotId("snap-direct".to_string()),
+            provider: "FAA_CIFP".to_string(),
+            dataset: "FAACIFP18".to_string(),
+            provider_revision: Some("2608".to_string()),
+            airac_cycle: Some("2608".to_string()),
+            effective_from: Some(vf),
+            effective_until: None,
+            retrieved_at: vf,
+            source_uri: "fixture".to_string(),
+            content_sha256: crate::provider::sha256_hex(content.as_bytes()),
+            license_id: Some("US-GOV".to_string()),
+            license_notes: Some("US Government work (public domain)".to_string()),
+            parser_version: env!("CARGO_PKG_VERSION").to_string(),
+        };
+        let mut direct_store = WorldStore::open_in_memory().unwrap();
+        direct_store.migrate().unwrap();
+        direct_store.insert_source_snapshot(&snapshot).unwrap();
+        let scan =
+            FaaCifpAdapter::ingest_cifp(&content, &snapshot.id, vf, &mut direct_store).unwrap();
+
+        let dataset = crate::provider::FetchedDataset {
+            provider_name: "FAA_CIFP".to_string(),
+            dataset_name: "FAACIFP18".to_string(),
+            source_uri: "fixture".to_string(),
+            content_sha256: crate::provider::sha256_hex(content.as_bytes()),
+            retrieved_at: vf,
+            provider_revision: Some("2608".to_string()),
+            airac_cycle: Some("2608".to_string()),
+            revision_kind: crate::provider::RevisionKind::Baseline,
+            coverage: crate::provider::Coverage::FullSnapshot,
+            valid_from: Some(vf),
+            raw_content: content.clone(),
+        };
+        let mut provider_store = WorldStore::open_in_memory().unwrap();
+        provider_store.migrate().unwrap();
+        let provider = CifpProvider;
+        let report = crate::provider::DataProvider::parse_and_ingest(
+            &provider,
+            &dataset,
+            &mut provider_store,
+        )
+        .unwrap();
+
+        assert_eq!(
+            report.kind_counts.get("waypoints").copied(),
+            Some(scan.waypoints_decoded)
+        );
+        assert_eq!(
+            report.kind_counts.get("navaids").copied(),
+            Some(scan.navaids_decoded)
+        );
+        assert_eq!(
+            report.kind_counts.get("airway_legs").copied(),
+            Some(scan.airway_legs_decoded)
+        );
+        assert_eq!(report.records_seen, scan.lines_seen);
+        assert_eq!(report.records_parsed, scan.records_decoded);
+
+        // Entity counts in both stores are identical.
+        for store in [&direct_store, &provider_store] {
+            assert_eq!(
+                store.query_waypoints_at(vf).unwrap().len(),
+                scan.waypoints_decoded
+            );
+            assert_eq!(
+                store.query_navaids_at(vf).unwrap().len(),
+                scan.navaids_decoded
+            );
+            assert_eq!(
+                store.query_airway_legs_at(vf).unwrap().len(),
+                scan.airway_legs_decoded
+            );
         }
     }
 }

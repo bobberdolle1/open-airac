@@ -145,7 +145,12 @@ impl WorldStore {
                 .execute_batch(include_str!("../migrations/v4_procedure_legs.sql"))
                 .context("Failed to execute database migration v4_procedure_legs.sql")?;
         }
-        self.conn.pragma_update(None, "user_version", 4)?;
+        if version < 5 {
+            self.conn
+                .execute_batch(include_str!("../migrations/v5_airac_lifecycle.sql"))
+                .context("Failed to execute database migration v5_airac_lifecycle.sql")?;
+        }
+        self.conn.pragma_update(None, "user_version", 5)?;
         Ok(())
     }
 
@@ -454,6 +459,76 @@ impl WorldStore {
         date: DateTime<Utc>,
     ) -> Result<Vec<CanonicalProcedureLeg>> {
         query_procedure_legs_at(&self.conn, date)
+    }
+
+    // -------------------------------------------------------------------
+    // AIRAC lifecycle (v5)
+    // -------------------------------------------------------------------
+
+    /// Insert a cycle into the catalog. Fails on duplicate id.
+    pub fn insert_cycle(&self, cycle: &AiracCycle) -> Result<()> {
+        insert_cycle_conn(&self.conn, cycle)
+    }
+
+    pub fn query_cycles(&self) -> Result<Vec<AiracCycle>> {
+        query_cycles_conn(&self.conn)
+    }
+
+    pub fn query_cycle(&self, id: &CycleId) -> Result<Option<AiracCycle>> {
+        query_cycle_conn(&self.conn, id)
+    }
+
+    /// Transition a cycle's status, validating the state machine.
+    pub fn set_cycle_status(&self, id: &CycleId, status: CycleStatus) -> Result<()> {
+        set_cycle_status_conn(&self.conn, id, status, Utc::now())
+    }
+
+    pub fn insert_cycle_snapshot(
+        &self,
+        cycle_id: &CycleId,
+        snapshot_id: &SourceSnapshotId,
+    ) -> Result<()> {
+        insert_cycle_snapshot_conn(&self.conn, cycle_id, snapshot_id)
+    }
+
+    /// The source snapshots of one cycle — the provenance basis for
+    /// ownership scoping (rollback diff, close_absent).
+    pub fn cycle_snapshot_ids(&self, cycle_id: &CycleId) -> Result<Vec<SourceSnapshotId>> {
+        cycle_snapshot_ids_conn(&self.conn, cycle_id)
+    }
+
+    /// Append an audit/journal entry; returns its id.
+    pub fn record_cycle_event(&self, event: &CycleEvent) -> Result<i64> {
+        record_cycle_event_conn(&self.conn, event)
+    }
+
+    pub fn query_cycle_events(&self) -> Result<Vec<CycleEvent>> {
+        query_cycle_events_conn(&self.conn)
+    }
+
+    /// Append an observed dataset publication (append-only).
+    pub fn insert_dataset_version(&self, version: &DatasetVersion) -> Result<()> {
+        insert_dataset_version_conn(&self.conn, version)
+    }
+
+    /// The latest observed publication of a dataset/cycle (max retrieved_at).
+    pub fn latest_dataset_version(
+        &self,
+        provider: &str,
+        dataset: &str,
+        cycle: Option<&str>,
+    ) -> Result<Option<DatasetVersion>> {
+        latest_dataset_version_conn(&self.conn, provider, dataset, cycle)
+    }
+
+    pub fn insert_entity_alias(
+        &self,
+        table: &str,
+        natural_key: &str,
+        provider: &str,
+        entity_id: &str,
+    ) -> Result<()> {
+        insert_entity_alias_conn(&self.conn, table, natural_key, provider, entity_id)
     }
 
     /// Structural integrity validation of the canonical store. Returns every
@@ -809,6 +884,150 @@ impl WorldStore {
                     id,
                     format!("endpoint {start}/{end} has no waypoint row"),
                 );
+            }
+        }
+
+        // 14. Cycle catalog: status membership and window sanity.
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, status, effective_from, effective_until
+                 FROM airac_cycles ORDER BY id",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                ))
+            })?;
+            for row in rows {
+                let (id, status, from, until) = row?;
+                if CycleStatus::parse(&status).is_none() {
+                    push(
+                        "error",
+                        "airac_cycles",
+                        id.clone(),
+                        format!("unknown status '{status}'"),
+                    );
+                }
+                if let (Some(f), Some(u)) = (&from, &until)
+                    && u <= f
+                {
+                    push(
+                        "error",
+                        "airac_cycles",
+                        id.clone(),
+                        "effective_until not strictly after effective_from".into(),
+                    );
+                }
+            }
+        }
+
+        // 15. Cycle events: kind membership and rollback invariant
+        // (Rollback MUST name the restored cycle; provenance of the
+        // re-published rows lives in their own source_snapshot_id).
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, kind, cycle_id, restored_cycle_id FROM cycle_events ORDER BY id",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                ))
+            })?;
+            for row in rows {
+                let (id, kind, cycle_id, restored) = row?;
+                if CycleEventKind::parse(&kind).is_none() {
+                    push(
+                        "error",
+                        "cycle_events",
+                        id.to_string(),
+                        format!("unknown kind '{kind}'"),
+                    );
+                }
+                if kind == "Rollback" && restored.is_none() {
+                    push(
+                        "error",
+                        "cycle_events",
+                        id.to_string(),
+                        format!("rollback of '{cycle_id}' must name the restored cycle"),
+                    );
+                }
+            }
+        }
+
+        // 16. Dataset versions: revision_kind and coverage membership.
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, revision_kind, coverage, content_sha256
+                 FROM dataset_versions ORDER BY id",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            })?;
+            for row in rows {
+                let (id, kind, coverage, sha) = row?;
+                if RevisionKind::parse(&kind).is_none() {
+                    push(
+                        "error",
+                        "dataset_versions",
+                        id.to_string(),
+                        format!("unknown revision_kind '{kind}'"),
+                    );
+                }
+                if Coverage::parse(&coverage).is_none() {
+                    push(
+                        "error",
+                        "dataset_versions",
+                        id.to_string(),
+                        format!("unknown coverage '{coverage}'"),
+                    );
+                }
+                if sha.len() != 64 {
+                    push(
+                        "error",
+                        "dataset_versions",
+                        id.to_string(),
+                        "content_sha256 must be a 64-char hex digest".into(),
+                    );
+                }
+            }
+        }
+
+        // 17. Entity aliases: table membership.
+        {
+            let known = [
+                "airports",
+                "runways",
+                "navaids",
+                "waypoints",
+                "airway_legs",
+                "procedure_legs",
+            ];
+            let mut stmt = self.conn.prepare(
+                "SELECT entity_table, entity_id FROM entity_aliases ORDER BY entity_table, entity_id",
+            )?;
+            let rows =
+                stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+            for row in rows {
+                let (table, entity_id) = row?;
+                if !known.contains(&table.as_str()) {
+                    push(
+                        "error",
+                        "entity_aliases",
+                        entity_id,
+                        format!("unknown entity_table '{table}'"),
+                    );
+                }
             }
         }
 
@@ -1887,6 +2106,394 @@ pub fn query_procedure_legs_at(
     Ok(legs)
 }
 
+// ---------------------------------------------------------------------------
+// AIRAC lifecycle (v5) — connection-level implementation
+// ---------------------------------------------------------------------------
+
+/// The instant strictly before `t` in the store's RFC3339 representation.
+///
+/// `rfc3339` serializes timestamps lexicographically ordered by UTC time,
+/// so `t - 1s` compares strictly less than `t`. Use this for every
+/// "world at effective_from − ε" probe; do NOT hand-roll sub-second
+/// arithmetic elsewhere.
+pub fn just_before(t: DateTime<Utc>) -> DateTime<Utc> {
+    t - chrono::TimeDelta::seconds(1)
+}
+
+pub fn insert_cycle_conn(conn: &Connection, cycle: &AiracCycle) -> Result<()> {
+    conn.execute(
+        "INSERT INTO airac_cycles
+            (id, effective_from, effective_until, status, source_uri,
+             created_at, updated_at, notes)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            cycle.id.0,
+            cycle.effective_from.map(rfc3339),
+            cycle.effective_until.map(rfc3339),
+            cycle.status.as_str(),
+            cycle.source_uri,
+            rfc3339(cycle.created_at),
+            rfc3339(cycle.updated_at),
+            cycle.notes,
+        ],
+    )
+    .with_context(|| format!("inserting cycle '{}'", cycle.id.0))?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cycle_from_parts(
+    id: String,
+    effective_from: Option<String>,
+    effective_until: Option<String>,
+    status: String,
+    source_uri: Option<String>,
+    created_at: String,
+    updated_at: String,
+    notes: Option<String>,
+) -> Result<AiracCycle> {
+    Ok(AiracCycle {
+        id: CycleId(id),
+        effective_from: effective_from
+            .map(|v| parse_utc(&v, "airac_cycles.effective_from"))
+            .transpose()?,
+        effective_until: effective_until
+            .map(|v| parse_utc(&v, "airac_cycles.effective_until"))
+            .transpose()?,
+        status: CycleStatus::parse(&status)
+            .ok_or_else(|| anyhow::anyhow!("unknown cycle status '{status}'"))?,
+        source_uri,
+        created_at: parse_utc(&created_at, "airac_cycles.created_at")?,
+        updated_at: parse_utc(&updated_at, "airac_cycles.updated_at")?,
+        notes,
+    })
+}
+
+pub fn query_cycles_conn(conn: &Connection) -> Result<Vec<AiracCycle>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, effective_from, effective_until, status, source_uri,
+                created_at, updated_at, notes
+         FROM airac_cycles ORDER BY id",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, Option<String>>(1)?,
+            r.get::<_, Option<String>>(2)?,
+            r.get::<_, String>(3)?,
+            r.get::<_, Option<String>>(4)?,
+            r.get::<_, String>(5)?,
+            r.get::<_, String>(6)?,
+            r.get::<_, Option<String>>(7)?,
+        ))
+    })?;
+    let mut cycles = Vec::new();
+    for row in rows {
+        let (id, ef, eu, st, uri, ca, ua, notes) = row?;
+        cycles.push(cycle_from_parts(id, ef, eu, st, uri, ca, ua, notes)?);
+    }
+    Ok(cycles)
+}
+
+pub fn query_cycle_conn(conn: &Connection, id: &CycleId) -> Result<Option<AiracCycle>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, effective_from, effective_until, status, source_uri,
+                created_at, updated_at, notes
+         FROM airac_cycles WHERE id = ?1",
+    )?;
+    let mut rows = stmt.query_map(params![id.0], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, Option<String>>(1)?,
+            r.get::<_, Option<String>>(2)?,
+            r.get::<_, String>(3)?,
+            r.get::<_, Option<String>>(4)?,
+            r.get::<_, String>(5)?,
+            r.get::<_, String>(6)?,
+            r.get::<_, Option<String>>(7)?,
+        ))
+    })?;
+    if let Some(row) = rows.next() {
+        let (id, ef, eu, st, uri, ca, ua, notes) = row?;
+        return Ok(Some(cycle_from_parts(id, ef, eu, st, uri, ca, ua, notes)?));
+    }
+    Ok(None)
+}
+
+pub fn set_cycle_status_conn(
+    conn: &Connection,
+    id: &CycleId,
+    status: CycleStatus,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    let current = query_cycle_conn(conn, id)?
+        .ok_or_else(|| anyhow::anyhow!("cycle '{}' not in catalog", id.0))?;
+    if current.status == status {
+        return Ok(());
+    }
+    if !CycleStatus::legal_transition(current.status, status) {
+        anyhow::bail!(
+            "illegal cycle transition {} -> {} for '{}'",
+            current.status.as_str(),
+            status.as_str(),
+            id.0
+        );
+    }
+    conn.execute(
+        "UPDATE airac_cycles SET status = ?1, updated_at = ?2 WHERE id = ?3",
+        params![status.as_str(), rfc3339(now), id.0],
+    )
+    .with_context(|| format!("updating cycle '{}' status", id.0))?;
+    Ok(())
+}
+
+pub fn insert_cycle_snapshot_conn(
+    conn: &Connection,
+    cycle_id: &CycleId,
+    snapshot_id: &SourceSnapshotId,
+) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO cycle_snapshots (cycle_id, source_snapshot_id) VALUES (?1, ?2)",
+        params![cycle_id.0, snapshot_id.0],
+    )
+    .with_context(|| {
+        format!(
+            "linking cycle '{}' to snapshot '{}'",
+            cycle_id.0, snapshot_id.0
+        )
+    })?;
+    Ok(())
+}
+
+pub fn cycle_snapshot_ids_conn(
+    conn: &Connection,
+    cycle_id: &CycleId,
+) -> Result<Vec<SourceSnapshotId>> {
+    let mut stmt = conn.prepare(
+        "SELECT source_snapshot_id FROM cycle_snapshots WHERE cycle_id = ?1 ORDER BY source_snapshot_id",
+    )?;
+    let rows = stmt.query_map(params![cycle_id.0], |r| r.get::<_, String>(0))?;
+    let mut ids = Vec::new();
+    for row in rows {
+        ids.push(SourceSnapshotId(row?));
+    }
+    Ok(ids)
+}
+
+pub fn record_cycle_event_conn(conn: &Connection, event: &CycleEvent) -> Result<i64> {
+    conn.execute(
+        "INSERT INTO cycle_events (at, kind, cycle_id, restored_cycle_id, notes)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            rfc3339(event.at),
+            event.kind.as_str(),
+            event.cycle_id.0,
+            event.restored_cycle_id.as_ref().map(|c| c.0.as_str()),
+            event.notes,
+        ],
+    )
+    .with_context(|| format!("recording cycle event for '{}'", event.cycle_id.0))?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn query_cycle_events_conn(conn: &Connection) -> Result<Vec<CycleEvent>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, at, kind, cycle_id, restored_cycle_id, notes
+         FROM cycle_events ORDER BY at, id",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
+            r.get::<_, Option<String>>(4)?,
+            r.get::<_, Option<String>>(5)?,
+        ))
+    })?;
+    let mut events = Vec::new();
+    for row in rows {
+        let (id, at, kind, cycle_id, restored, notes) = row?;
+        events.push(CycleEvent {
+            id,
+            at: parse_utc(&at, "cycle_events.at")?,
+            kind: CycleEventKind::parse(&kind).unwrap_or(CycleEventKind::Scheduled),
+            cycle_id: CycleId(cycle_id),
+            restored_cycle_id: restored.map(CycleId),
+            notes,
+        });
+    }
+    Ok(events)
+}
+
+pub fn insert_dataset_version_conn(conn: &Connection, version: &DatasetVersion) -> Result<()> {
+    conn.execute(
+        "INSERT INTO dataset_versions
+            (provider, dataset, airac_cycle, content_sha256, retrieved_at,
+             revision_kind, coverage, notes)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            version.provider,
+            version.dataset,
+            version.airac_cycle,
+            version.content_sha256,
+            rfc3339(version.retrieved_at),
+            version.revision_kind.as_str(),
+            version.coverage.as_str(),
+            version.notes,
+        ],
+    )
+    .context("inserting dataset version")?;
+    Ok(())
+}
+
+pub fn latest_dataset_version_conn(
+    conn: &Connection,
+    provider: &str,
+    dataset: &str,
+    cycle: Option<&str>,
+) -> Result<Option<DatasetVersion>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, provider, dataset, airac_cycle, content_sha256, retrieved_at,
+                revision_kind, coverage, notes
+         FROM dataset_versions
+         WHERE provider = ?1 AND dataset = ?2 AND airac_cycle IS ?3
+         ORDER BY retrieved_at DESC, id DESC LIMIT 1",
+    )?;
+    let mut rows = stmt.query_map(params![provider, dataset, cycle], |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, Option<String>>(3)?,
+            r.get::<_, String>(4)?,
+            r.get::<_, String>(5)?,
+            r.get::<_, String>(6)?,
+            r.get::<_, String>(7)?,
+            r.get::<_, Option<String>>(8)?,
+        ))
+    })?;
+    if let Some(row) = rows.next() {
+        let (id, prov, ds, cycle_s, sha, retrieved, kind, cov, notes) = row?;
+        return Ok(Some(DatasetVersion {
+            id,
+            provider: prov,
+            dataset: ds,
+            airac_cycle: cycle_s,
+            content_sha256: sha,
+            retrieved_at: parse_utc(&retrieved, "dataset_versions.retrieved_at")?,
+            revision_kind: RevisionKind::parse(&kind)
+                .ok_or_else(|| anyhow::anyhow!("unknown revision_kind '{kind}'"))?,
+            coverage: Coverage::parse(&cov)
+                .ok_or_else(|| anyhow::anyhow!("unknown coverage '{cov}'"))?,
+            notes,
+        }));
+    }
+    Ok(None)
+}
+
+pub fn insert_entity_alias_conn(
+    conn: &Connection,
+    table: &str,
+    natural_key: &str,
+    provider: &str,
+    entity_id: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO entity_aliases (entity_table, natural_key, provider, entity_id)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![table, natural_key, provider, entity_id],
+    )
+    .context("inserting entity alias")?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Full-snapshot semantics (v0.4)
+// ---------------------------------------------------------------------------
+
+/// Close every open row of `table` in `namespace` that was valid before
+/// `valid_from` and is NOT in `seen_ids`: a full-snapshot publication
+/// ("here is the whole dataset") implicitly removes absent entities.
+///
+/// Semantics:
+/// * Ownership scope is the object-id namespace (`<namespace>:%`); rows
+///   of other providers are never touched.
+/// * Only rows with `valid_until IS NULL AND valid_from < valid_from`
+///   are candidates — future revisions and already-closed history are
+///   never modified.
+/// * `seen_ids` must contain every entity id the publication carries,
+///   INCLUDING records the parser rejected/quarantined but could
+///   identify. If the caller cannot guarantee that (unidentifiable
+///   rejections), it MUST NOT call this function: a parser failure must
+///   never silently become a source deletion.
+/// * Idempotent: a second call with the same inputs closes nothing.
+///
+/// Uses a TEMP table (per-connection, dropped at end) instead of a
+/// giant NOT IN list so large datasets stay scalable.
+pub fn close_absent_at(
+    conn: &Connection,
+    table: &str,
+    namespace: &str,
+    valid_from: DateTime<Utc>,
+    seen_ids: &[String],
+) -> Result<usize> {
+    if !namespace
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c == '_')
+    {
+        anyhow::bail!("namespace '{namespace}' must be [a-z_]+");
+    }
+    // Table names are hardcoded constants, never user input.
+    let _ = table;
+    conn.execute_batch("CREATE TEMP TABLE ingest_seen (id TEXT PRIMARY KEY)")?;
+    {
+        let mut insert = conn.prepare("INSERT OR IGNORE INTO ingest_seen (id) VALUES (?1)")?;
+        for chunk in seen_ids.chunks(512) {
+            for id in chunk {
+                insert.execute(params![id])?;
+            }
+        }
+    }
+    let vf = rfc3339(valid_from);
+    let prefix = format!("{namespace}:%");
+    let closed: usize = conn
+        .execute(
+            &format!(
+                "UPDATE {table} SET valid_until = ?1
+                 WHERE id LIKE ?2
+                   AND valid_until IS NULL
+                   AND valid_from < ?1
+                   AND id NOT IN (SELECT id FROM ingest_seen)"
+            ),
+            params![vf, prefix],
+        )
+        .with_context(|| format!("closing absent rows of {table} for '{namespace}'"))?;
+    conn.execute_batch("DROP TABLE ingest_seen")?;
+    Ok(closed)
+}
+
+/// Tombstone-close one open row of `table` at `at` (a removal carried by
+/// a Partial correction). Returns true when a row was closed. Idempotent:
+/// a second call returns false.
+pub fn close_entity_at(
+    conn: &Connection,
+    table: &str,
+    id: &str,
+    at: DateTime<Utc>,
+) -> Result<bool> {
+    let closed = conn
+        .execute(
+            &format!(
+                "UPDATE {table} SET valid_until = ?1
+                 WHERE id = ?2 AND valid_until IS NULL AND valid_from < ?1"
+            ),
+            params![rfc3339(at), id],
+        )
+        .with_context(|| format!("tombstone-closing '{id}' in {table}"))?;
+    Ok(closed > 0)
+}
+
 /// Query airway legs valid at a given UTC instant, ordered by route.
 pub fn query_airway_legs_at(
     conn: &Connection,
@@ -2020,7 +2627,7 @@ mod tests {
         let store = WorldStore::open_in_memory().unwrap();
         let status = store.status().unwrap();
         assert!(status.integrity_ok);
-        assert_eq!(status.migration_version, 4);
+        assert_eq!(status.migration_version, 5);
         assert_eq!(status.total_airports, 0);
 
         let snap = snapshot("snap-001");
@@ -2458,7 +3065,7 @@ mod tests {
 
         // Opening with the current code must migrate v1 -> v3 in place.
         let store = WorldStore::open(&path).unwrap();
-        assert_eq!(store.migration_version().unwrap(), 4);
+        assert_eq!(store.migration_version().unwrap(), 5);
         let at = store.query_airports_at(Utc::now()).unwrap();
         assert_eq!(at.len(), 1);
         assert_eq!(at[0].ident, "KSFO");
@@ -2533,5 +3140,264 @@ mod tests {
         assert_eq!(legs[0].end_fix, "LOLIC");
         assert_eq!(store.status().unwrap().total_airway_legs, 1);
         assert!(store.validate().unwrap().is_empty());
+    }
+
+    // -------------------------------------------------------------------
+    // v0.4 lifecycle tests
+    // -------------------------------------------------------------------
+
+    fn cycle(id: &str, eff: Option<DateTime<Utc>>, status: CycleStatus) -> AiracCycle {
+        let now = Utc::now();
+        AiracCycle {
+            id: CycleId(id.to_string()),
+            effective_from: eff,
+            effective_until: None,
+            status,
+            source_uri: Some(format!("https://example.invalid/{id}")),
+            created_at: now,
+            updated_at: now,
+            notes: None,
+        }
+    }
+
+    #[test]
+    fn test_just_before_is_strictly_before() {
+        let samples = [
+            Utc::now(),
+            DateTime::parse_from_rfc3339("2026-08-06T09:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            DateTime::parse_from_rfc3339("2026-08-06T09:00:00.5Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        ];
+        for t in samples {
+            let before = just_before(t);
+            assert!(before < t, "{before} < {t}");
+            assert!(
+                rfc3339(before) < rfc3339(t),
+                "rfc3339({before}) < rfc3339({t})"
+            );
+        }
+    }
+
+    #[test]
+    fn test_cycle_catalog_roundtrip_and_transitions() {
+        let store = WorldStore::open_in_memory().unwrap();
+        let t = Utc::now();
+        let c = cycle("2608", Some(t), CycleStatus::Discovered);
+        store.insert_cycle(&c).unwrap();
+        assert_eq!(store.query_cycles().unwrap().len(), 1);
+        let got = store.query_cycle(&CycleId("2608".into())).unwrap().unwrap();
+        assert_eq!(got.status, CycleStatus::Discovered);
+        assert_eq!(got.effective_from, Some(t));
+
+        // Legal transitions.
+        store
+            .set_cycle_status(&CycleId("2608".into()), CycleStatus::Preloaded)
+            .unwrap();
+        store
+            .set_cycle_status(&CycleId("2608".into()), CycleStatus::Active)
+            .unwrap();
+        store
+            .set_cycle_status(&CycleId("2608".into()), CycleStatus::Superseded)
+            .unwrap();
+        // Terminal: no further transitions.
+        let err = store
+            .set_cycle_status(&CycleId("2608".into()), CycleStatus::Active)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("illegal cycle transition"),
+            "{err}"
+        );
+        // Same-status set is a no-op.
+        store
+            .set_cycle_status(&CycleId("2608".into()), CycleStatus::Superseded)
+            .unwrap();
+    }
+
+    #[test]
+    fn test_cycle_snapshots_and_events_roundtrip() {
+        let store = WorldStore::open_in_memory().unwrap();
+        let snap = snapshot("snap-001");
+        store.insert_source_snapshot(&snap).unwrap();
+        let t = Utc::now();
+        store
+            .insert_cycle(&cycle("2608", Some(t), CycleStatus::Preloaded))
+            .unwrap();
+        store
+            .insert_cycle_snapshot(&CycleId("2608".into()), &snap.id)
+            .unwrap();
+        store
+            .insert_cycle_snapshot(&CycleId("2608".into()), &snap.id)
+            .unwrap(); // idempotent
+        assert_eq!(
+            store.cycle_snapshot_ids(&CycleId("2608".into())).unwrap(),
+            vec![SourceSnapshotId("snap-001".into())]
+        );
+
+        let event = CycleEvent {
+            id: 0,
+            at: t,
+            kind: CycleEventKind::Scheduled,
+            cycle_id: CycleId("2608".into()),
+            restored_cycle_id: None,
+            notes: Some("preload".into()),
+        };
+        let id = store.record_cycle_event(&event).unwrap();
+        assert!(id > 0);
+        let events = store.query_cycle_events().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, CycleEventKind::Scheduled);
+
+        // Rollback without restored_cycle_id violates the invariant.
+        store
+            .record_cycle_event(&CycleEvent {
+                id: 0,
+                at: t,
+                kind: CycleEventKind::Rollback,
+                cycle_id: CycleId("2608".into()),
+                restored_cycle_id: None,
+                notes: None,
+            })
+            .unwrap();
+        let issues = store.validate().unwrap();
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.table == "cycle_events" && i.message.contains("restored cycle")),
+            "{issues:?}"
+        );
+    }
+
+    #[test]
+    fn test_dataset_versions_append_only() {
+        let store = WorldStore::open_in_memory().unwrap();
+        let t0 = Utc::now();
+        let t1 = t0 + Duration::from_secs(60);
+        let v1 = DatasetVersion {
+            id: 0,
+            provider: "FAA_CIFP".to_string(),
+            dataset: "FAACIFP18".to_string(),
+            airac_cycle: Some("2608".to_string()),
+            content_sha256: "a".repeat(64),
+            retrieved_at: t0,
+            revision_kind: RevisionKind::Baseline,
+            coverage: Coverage::FullSnapshot,
+            notes: None,
+        };
+        let mut v2 = v1.clone();
+        v2.content_sha256 = "b".repeat(64);
+        v2.retrieved_at = t1;
+        v2.revision_kind = RevisionKind::Correction;
+        store.insert_dataset_version(&v1).unwrap();
+        store.insert_dataset_version(&v2).unwrap();
+
+        let latest = store
+            .latest_dataset_version("FAA_CIFP", "FAACIFP18", Some("2608"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest.content_sha256, "b".repeat(64));
+        assert_eq!(latest.revision_kind, RevisionKind::Correction);
+        assert_eq!(latest.coverage, Coverage::FullSnapshot);
+        assert!(
+            store
+                .latest_dataset_version("OurAirports", "FAACIFP18", Some("2608"))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_close_absent_at_semantics() {
+        let mut store = WorldStore::open_in_memory().unwrap();
+        store.insert_source_snapshot(&snapshot("snap-001")).unwrap();
+        let t0 = Utc::now();
+        let t1 = t0 + Duration::from_secs(3600);
+        let t2 = t1 + Duration::from_secs(3600);
+
+        let ap = |id: &str, vf: DateTime<Utc>| airport(id, id, vf, "snap-001");
+        store.insert_airport(&ap("faa:A", t0)).unwrap();
+        store.insert_airport(&ap("faa:B", t0)).unwrap();
+        // faa:E was rejected by the parser but its id was identified: it
+        // must appear in the seen set and stay open.
+        store.insert_airport(&ap("faa:E", t0)).unwrap();
+        store.insert_airport(&ap("ourairports:C", t0)).unwrap();
+
+        // New full snapshot at t1: A and E present (E via the rejected
+        // record), B absent. B closes, A and E stay.
+        let closed = store
+            .transact(|conn| {
+                close_absent_at(
+                    conn,
+                    "airports",
+                    "faa",
+                    t1,
+                    &["faa:A".to_string(), "faa:E".to_string()],
+                )
+            })
+            .unwrap();
+        assert_eq!(closed, 1);
+        let at_t1 = store.query_airports_at(t1).unwrap();
+        assert_eq!(at_t1.len(), 3); // faa:A + faa:E + ourairports:C
+        assert!(at_t1.iter().any(|a| a.ident == "faa:A"));
+        assert!(at_t1.iter().any(|a| a.ident == "faa:E")); // rejected-present protection
+        assert!(at_t1.iter().any(|a| a.ident == "ourairports:C"));
+        assert!(!at_t1.iter().any(|a| a.ident == "faa:B"));
+
+        // Idempotent: second call closes nothing.
+        let again = store
+            .transact(|conn| {
+                close_absent_at(
+                    conn,
+                    "airports",
+                    "faa",
+                    t1,
+                    &["faa:A".to_string(), "faa:E".to_string()],
+                )
+            })
+            .unwrap();
+        assert_eq!(again, 0);
+
+        // A row created later in the cycle (valid_from = t2) is untouched.
+        store.insert_airport(&ap("faa:D", t2)).unwrap();
+        let closed2 = store
+            .transact(|conn| {
+                close_absent_at(
+                    conn,
+                    "airports",
+                    "faa",
+                    t1,
+                    &["faa:A".to_string(), "faa:E".to_string()],
+                )
+            })
+            .unwrap();
+        assert_eq!(closed2, 0);
+        let at_t2 = store.query_airports_at(t2).unwrap();
+        assert!(at_t2.iter().any(|a| a.ident == "faa:D"));
+    }
+
+    #[test]
+    fn test_close_entity_at_tombstone() {
+        let mut store = WorldStore::open_in_memory().unwrap();
+        store.insert_source_snapshot(&snapshot("snap-001")).unwrap();
+        let t0 = Utc::now();
+        let t1 = t0 + Duration::from_secs(3600);
+        store
+            .insert_airport(&airport("faa:A", "faa:A", t0, "snap-001"))
+            .unwrap();
+
+        let closed = store
+            .transact(|conn| close_entity_at(conn, "airports", "faa:A", t1))
+            .unwrap();
+        assert!(closed);
+        assert!(store.query_airports_at(t1).unwrap().is_empty());
+        assert_eq!(store.query_airports_at(t0).unwrap().len(), 1); // history intact
+
+        // Idempotent.
+        let again = store
+            .transact(|conn| close_entity_at(conn, "airports", "faa:A", t1))
+            .unwrap();
+        assert!(!again);
     }
 }
