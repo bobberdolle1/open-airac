@@ -1371,8 +1371,6 @@ impl crate::provider::DataProvider for CifpProvider {
             license_notes: Some("US Government work (public domain)".to_string()),
             parser_version: env!("CARGO_PKG_VERSION").to_string(),
         };
-        store.insert_source_snapshot(&snapshot)?;
-
         // The catalog is the authority on the cycle: cross-check the
         // confirmed effective date (defense in depth behind the CLI).
         // Baseline publications land exactly on the cycle's effective
@@ -1465,63 +1463,36 @@ impl crate::provider::DataProvider for CifpProvider {
             valid_from: Some(valid_from),
             notes: None,
         };
-        let outcome = store.record_dataset_publication(&version)?;
-
-        let mut closed_rows = 0usize;
-        let mut duplicate = false;
-        if outcome == openairac_model::PublicationOutcome::Duplicate {
-            duplicate = true;
-        } else {
-            let plan = openairac_store::PublicationPlan {
-                namespace: "faa".to_string(),
-                kind: update_kind,
-                valid_from,
-                payloads: openairac_store::EntityPayloads {
-                    airports: Vec::new(),
-                    runways: Vec::new(),
-                    navaids: navaids.clone(),
-                    waypoints: waypoints.clone(),
-                    airway_legs: airway_legs.clone(),
-                    procedure_legs: procedure_legs.clone(),
-                },
-                tombstones: Vec::new(),
-                masked_tables: masked.clone(),
-                publication_id: publication_id.clone(),
-            };
-            let applied = store.apply_publication(&plan)?;
-            closed_rows = applied.rows_closed;
-            store.transact(|conn| {
-                // Cycle bookkeeping: link the snapshot, record the
-                // schedule intent once, advance Discovered -> Preloaded.
-                openairac_store::insert_cycle_snapshot_conn(conn, &cycle_id, &snapshot_id)?;
-                if !openairac_store::has_cycle_event_conn(
-                    conn,
-                    &cycle_id,
-                    CycleEventKind::Scheduled,
-                )? {
-                    openairac_store::record_cycle_event_conn(
-                        conn,
-                        &CycleEvent {
-                            id: 0,
-                            at: Utc::now(),
-                            kind: CycleEventKind::Scheduled,
-                            cycle_id: cycle_id.clone(),
-                            restored_cycle_id: None,
-                            notes: Some(format!("published {publication_id}")),
-                        },
-                    )?;
-                }
-                if catalog.status == CycleStatus::Discovered {
-                    openairac_store::set_cycle_status_conn(
-                        conn,
-                        &cycle_id,
-                        CycleStatus::Preloaded,
-                        Utc::now(),
-                    )?;
-                }
-                Ok(())
-            })?;
-        }
+        let plan = openairac_store::PublicationPlan {
+            namespace: "faa".to_string(),
+            kind: update_kind,
+            valid_from,
+            payloads: openairac_store::EntityPayloads {
+                airports: Vec::new(),
+                runways: Vec::new(),
+                navaids: navaids.clone(),
+                waypoints: waypoints.clone(),
+                airway_legs: airway_legs.clone(),
+                procedure_legs: procedure_legs.clone(),
+            },
+            tombstones: Vec::new(),
+            masked_tables: masked.clone(),
+            publication_id: publication_id.clone(),
+        };
+        // ONE atomic transaction: snapshot, identity guard, entity
+        // application, audit row and lifecycle bookkeeping commit
+        // together or not at all.
+        let applied = store.apply_dataset_publication(
+            &snapshot,
+            &version,
+            &plan,
+            Some(&openairac_store::PublicationLifecycle {
+                cycle_id: cycle_id.clone(),
+                snapshot_id: snapshot_id.clone(),
+            }),
+        )?;
+        let closed_rows = applied.rows_closed;
+        let duplicate = applied.duplicate;
 
         let mut report = IngestReport::new("FAA_CIFP", "FAACIFP18", &dataset.content_sha256);
         report.records_seen = scan.lines_seen;

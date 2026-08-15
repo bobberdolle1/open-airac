@@ -436,6 +436,29 @@ impl WorldStore {
         Ok(report)
     }
 
+    /// Atomically accept + apply one dataset publication (identity
+    /// guard, payloads, tombstones, close, audit, lifecycle). All or
+    /// nothing.
+    pub fn apply_dataset_publication(
+        &mut self,
+        snapshot: &SourceSnapshot,
+        version: &DatasetVersion,
+        plan: &PublicationPlan,
+        lifecycle: Option<&PublicationLifecycle>,
+    ) -> Result<PublicationReport> {
+        let txn = self.conn.transaction()?;
+        let report = apply_dataset_publication_conn(
+            &txn,
+            snapshot,
+            version,
+            plan,
+            lifecycle,
+            &PublicationFailpoints::default(),
+        )?;
+        txn.commit()?;
+        Ok(report)
+    }
+
     /// Apply one tombstone in one transaction.
     pub fn apply_tombstone(&mut self, tomb: &Tombstone) -> Result<TombstoneOutcome> {
         let txn = self.conn.transaction()?;
@@ -1160,6 +1183,38 @@ impl WorldStore {
                         format!("unknown coverage '{coverage}'"),
                     );
                 }
+            }
+        }
+
+        // 23. Publication atomicity invariant: every recorded
+        // publication must have a completed application audit row (the
+        // identity guard and the application commit in one transaction).
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT d.publication_id, d.valid_from
+                 FROM dataset_versions d
+                 WHERE d.publication_id IS NOT NULL
+                   AND NOT EXISTS (
+                       SELECT 1 FROM publication_applications a
+                       WHERE a.publication_id = d.publication_id
+                         AND a.valid_from = d.valid_from
+                   )
+                 ORDER BY d.id LIMIT 20",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+            })?;
+            for row in rows {
+                let (publication_id, valid_from) = row?;
+                push(
+                    "error",
+                    "dataset_versions",
+                    publication_id,
+                    format!(
+                        "recorded publication without a completed application audit (valid_from {})",
+                        valid_from.as_deref().unwrap_or("NULL")
+                    ),
+                );
             }
         }
 
@@ -2906,6 +2961,58 @@ pub struct PublicationReport {
     pub unchanged: usize,
     pub rows_closed: usize,
     pub tombstone_outcomes: Vec<TombstoneOutcome>,
+    /// True when the exact publication identity + checksum was already
+    /// fully applied: nothing was written, nothing was re-applied.
+    pub duplicate: bool,
+}
+
+/// Lifecycle bookkeeping attached to one cycle-aware publication.
+pub struct PublicationLifecycle {
+    pub cycle_id: CycleId,
+    pub snapshot_id: SourceSnapshotId,
+}
+
+/// Test-only failure injection points for publication atomicity tests.
+/// Production callers pass `&PublicationFailpoints::default()` (all
+/// disabled). Each point aborts the surrounding transaction.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PublicationFailpoints {
+    /// After the publication identity guard recorded the version, before
+    /// any entity write.
+    pub after_record: bool,
+    /// After the first entity write (mid-application).
+    pub during_apply: bool,
+    /// After the audit row, before lifecycle bookkeeping.
+    pub before_lifecycle: bool,
+    /// After the cycle_snapshots link, before event/status bookkeeping.
+    pub after_snapshot_link: bool,
+}
+
+impl PublicationFailpoints {
+    pub fn after_record() -> Self {
+        Self {
+            after_record: true,
+            ..Default::default()
+        }
+    }
+    pub fn during_apply() -> Self {
+        Self {
+            during_apply: true,
+            ..Default::default()
+        }
+    }
+    pub fn before_lifecycle() -> Self {
+        Self {
+            before_lifecycle: true,
+            ..Default::default()
+        }
+    }
+    pub fn after_snapshot_link() -> Self {
+        Self {
+            after_snapshot_link: true,
+            ..Default::default()
+        }
+    }
 }
 
 /// Apply one publication's payloads and tombstones.
@@ -2921,6 +3028,15 @@ pub struct PublicationReport {
 pub fn apply_publication_conn(
     conn: &Connection,
     plan: &PublicationPlan,
+) -> Result<PublicationReport> {
+    apply_publication_payloads_conn(conn, plan, &PublicationFailpoints::default())
+}
+
+/// Payload application core (shared with the atomic publication entry).
+fn apply_publication_payloads_conn(
+    conn: &Connection,
+    plan: &PublicationPlan,
+    failpoints: &PublicationFailpoints,
 ) -> Result<PublicationReport> {
     let mut report = PublicationReport::default();
     // Upserts route through insert_with_future_correction so a
@@ -3001,6 +3117,10 @@ pub fn apply_publication_conn(
             EntityWrite::Updated => report.updated += 1,
             EntityWrite::Unchanged => report.unchanged += 1,
         }
+    }
+
+    if failpoints.during_apply {
+        anyhow::bail!("failpoint: during_apply");
     }
 
     for tomb in &plan.tombstones {
@@ -3165,6 +3285,83 @@ pub fn observe_cycles_conn(conn: &Connection, now: DateTime<Utc>) -> Result<Obse
         {
             set_cycle_status_conn(conn, &cycle.id, CycleStatus::Expired, now)?;
             report.expired.push(cycle.id.clone());
+        }
+    }
+
+    Ok(report)
+}
+
+/// Atomically accept and apply one dataset publication: source snapshot,
+/// publication identity/replay/conflict guard, entity upserts,
+/// tombstones, full-snapshot close (when eligible), the
+/// publication_applications audit row, and cycle lifecycle bookkeeping
+/// (cycle_snapshots link, Scheduled event, Discovered -> Preloaded).
+///
+/// ALL of it commits or NONE of it does. "Duplicate" therefore means
+/// the exact publication was already SUCCESSFULLY APPLIED — the prior
+/// transaction necessarily committed the full application — so an exact
+/// replay is a safe no-op.
+///
+/// `lifecycle: None` = pure dataset publication without cycle
+/// bookkeeping (cycle-less providers).
+pub fn apply_dataset_publication_conn(
+    conn: &Connection,
+    snapshot: &SourceSnapshot,
+    version: &DatasetVersion,
+    plan: &PublicationPlan,
+    lifecycle: Option<&PublicationLifecycle>,
+    failpoints: &PublicationFailpoints,
+) -> Result<PublicationReport> {
+    insert_source_snapshot_conn(conn, snapshot)?;
+
+    // Identity guard inside the SAME transaction as the application.
+    let outcome = record_dataset_publication_conn(conn, version)?;
+    if outcome == PublicationOutcome::Duplicate {
+        // Invariant: the matching dataset_versions row could only exist
+        // together with its completed application (same transaction).
+        // Historical rows from before the atomic boundary are diagnosed
+        // by validate().
+        return Ok(PublicationReport {
+            duplicate: true,
+            ..Default::default()
+        });
+    }
+    if failpoints.after_record {
+        anyhow::bail!("failpoint: after_record");
+    }
+
+    let report = apply_publication_payloads_conn(conn, plan, failpoints)?;
+    if failpoints.before_lifecycle {
+        anyhow::bail!("failpoint: before_lifecycle");
+    }
+
+    if let Some(lifecycle) = lifecycle {
+        insert_cycle_snapshot_conn(conn, &lifecycle.cycle_id, &lifecycle.snapshot_id)?;
+        if failpoints.after_snapshot_link {
+            anyhow::bail!("failpoint: after_snapshot_link");
+        }
+        if !has_cycle_event_conn(conn, &lifecycle.cycle_id, CycleEventKind::Scheduled)? {
+            record_cycle_event_conn(
+                conn,
+                &CycleEvent {
+                    id: 0,
+                    at: Utc::now(),
+                    kind: CycleEventKind::Scheduled,
+                    cycle_id: lifecycle.cycle_id.clone(),
+                    restored_cycle_id: None,
+                    notes: Some(format!("published {}", plan.publication_id)),
+                },
+            )?;
+        }
+        if let Some(catalog) = query_cycle_conn(conn, &lifecycle.cycle_id)?
+            && catalog.status == CycleStatus::Discovered
+        {
+            set_cycle_status_conn(
+                conn,
+                &lifecycle.cycle_id,
+                CycleStatus::Preloaded,
+                Utc::now(),
+            )?;
         }
     }
 
@@ -5464,6 +5661,291 @@ mod tests {
                 .any(|w| w.ident == "faa:K2")
         );
         // validate() proves no differential ran close_absent.
+        assert!(store.validate().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_publication_atomicity_failpoints() {
+        // One atomic boundary: identity guard + application + lifecycle
+        // bookkeeping commit together or not at all. Each failpoint
+        // aborts the transaction and must leave NO partial state; an
+        // exact retry then applies normally.
+        let failpoints = [
+            PublicationFailpoints::after_record(),
+            PublicationFailpoints::during_apply(),
+            PublicationFailpoints::before_lifecycle(),
+            PublicationFailpoints::after_snapshot_link(),
+        ];
+        for failpoint in failpoints {
+            let mut store = WorldStore::open_in_memory().unwrap();
+            let mut snap = snapshot("snap-fp");
+            snap.provider = "FAA_CIFP".to_string();
+            snap.dataset = "FAACIFP18".to_string();
+            let t0 = Utc::now();
+            let eff = t0 + Duration::from_secs(3600);
+            store
+                .insert_cycle(&cycle("2608", Some(eff), CycleStatus::Discovered))
+                .unwrap();
+            store.insert_source_snapshot(&snap).unwrap();
+            // Pre-existing entity targeted by the publication tombstone.
+            store
+                .apply_publication(&PublicationPlan {
+                    namespace: "faa".to_string(),
+                    kind: UpdateKind::FullSnapshot,
+                    valid_from: t0,
+                    payloads: EntityPayloads {
+                        waypoints: vec![s7_wp("faa:OLD", 1.0, t0, "snap-fp")],
+                        ..Default::default()
+                    },
+                    tombstones: vec![],
+                    masked_tables: Default::default(),
+                    publication_id: "seed".to_string(),
+                })
+                .unwrap();
+
+            let version = s7_version(
+                "FAA_CIFP",
+                "FAACIFP18",
+                Some("2608"),
+                "f".repeat(64).as_str(),
+                RevisionKind::Baseline,
+                Coverage::FullSnapshot,
+                "pub-fp",
+                eff,
+                eff,
+            );
+            let plan = PublicationPlan {
+                namespace: "faa".to_string(),
+                kind: UpdateKind::FullSnapshot,
+                valid_from: eff,
+                payloads: EntityPayloads {
+                    waypoints: vec![s7_wp("faa:NEW", 2.0, eff, "snap-fp")],
+                    ..Default::default()
+                },
+                tombstones: vec![Tombstone {
+                    provider: "FAA_CIFP".to_string(),
+                    dataset: "FAACIFP18".to_string(),
+                    entity_table: "waypoints".to_string(),
+                    entity_id: "faa:OLD".to_string(),
+                    effective_from: eff,
+                    source_snapshot_id: SourceSnapshotId("snap-fp".to_string()),
+                    reason: None,
+                }],
+                masked_tables: Default::default(),
+                publication_id: "pub-fp".to_string(),
+            };
+            let lifecycle = PublicationLifecycle {
+                cycle_id: CycleId("2608".to_string()),
+                snapshot_id: snap.id.clone(),
+            };
+
+            // Injected failure: the WHOLE operation must roll back.
+            let result = store.transact(|conn| {
+                apply_dataset_publication_conn(
+                    conn,
+                    &snap,
+                    &version,
+                    &plan,
+                    Some(&lifecycle),
+                    &failpoint,
+                )
+            });
+            assert!(result.is_err(), "{failpoint:?}");
+
+            // No partial state anywhere.
+            let versions: i64 = store
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM dataset_versions WHERE publication_id = 'pub-fp'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(versions, 0, "{failpoint:?}");
+            let new_rows: i64 = store
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM waypoints WHERE id = 'faa:NEW'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(new_rows, 0, "{failpoint:?}");
+            let tombstones: i64 = store
+                .conn
+                .query_row("SELECT COUNT(*) FROM tombstones", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(tombstones, 0, "{failpoint:?}");
+            let audits: i64 = store
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM publication_applications WHERE publication_id = 'pub-fp'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(audits, 0, "{failpoint:?}");
+            let links: i64 = store
+                .conn
+                .query_row("SELECT COUNT(*) FROM cycle_snapshots", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(links, 0, "{failpoint:?}");
+            let events: i64 = store
+                .conn
+                .query_row("SELECT COUNT(*) FROM cycle_events", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(events, 0, "{failpoint:?}");
+            assert_eq!(
+                store
+                    .query_cycle(&CycleId("2608".to_string()))
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                CycleStatus::Discovered,
+                "{failpoint:?}"
+            );
+            // The tombstone target is still open.
+            assert!(
+                store
+                    .query_waypoints_at(t0)
+                    .unwrap()
+                    .iter()
+                    .any(|w| w.ident == "faa:OLD")
+            );
+
+            // Exact retry applies normally.
+            let report = store
+                .apply_dataset_publication(&snap, &version, &plan, Some(&lifecycle))
+                .unwrap();
+            assert!(!report.duplicate, "{failpoint:?}");
+            assert_eq!(report.created, 1, "{failpoint:?}");
+            assert_eq!(report.tombstone_outcomes, vec![TombstoneOutcome::Closed]);
+            assert_eq!(
+                store
+                    .query_cycle(&CycleId("2608".to_string()))
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                CycleStatus::Preloaded,
+                "{failpoint:?}"
+            );
+            assert!(
+                store
+                    .query_waypoints_at(eff)
+                    .unwrap()
+                    .iter()
+                    .any(|w| w.ident == "faa:NEW")
+            );
+            assert!(
+                !store
+                    .query_waypoints_at(eff)
+                    .unwrap()
+                    .iter()
+                    .any(|w| w.ident == "faa:OLD")
+            );
+
+            // Exact successful replay: Duplicate no-op.
+            let replay = store
+                .apply_dataset_publication(&snap, &version, &plan, Some(&lifecycle))
+                .unwrap();
+            assert!(replay.duplicate, "{failpoint:?}");
+            let versions: i64 = store
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM dataset_versions WHERE publication_id = 'pub-fp'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(versions, 1, "{failpoint:?}");
+            let audits: i64 = store
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM publication_applications WHERE publication_id = 'pub-fp'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(audits, 1, "{failpoint:?}");
+            assert!(store.validate().unwrap().is_empty(), "{failpoint:?}");
+        }
+    }
+
+    #[test]
+    fn test_publication_conflict_mutates_nothing() {
+        let mut store = WorldStore::open_in_memory().unwrap();
+        let mut snap = snapshot("snap-c");
+        snap.provider = "FAA_CIFP".to_string();
+        snap.dataset = "FAACIFP18".to_string();
+        let t0 = Utc::now();
+        store
+            .insert_cycle(&cycle("2608", Some(t0), CycleStatus::Preloaded))
+            .unwrap();
+        let version = s7_version(
+            "FAA_CIFP",
+            "FAACIFP18",
+            Some("2608"),
+            "c".repeat(64).as_str(),
+            RevisionKind::Baseline,
+            Coverage::FullSnapshot,
+            "pub-conflict",
+            t0,
+            t0,
+        );
+        let plan = PublicationPlan {
+            namespace: "faa".to_string(),
+            kind: UpdateKind::FullSnapshot,
+            valid_from: t0,
+            payloads: EntityPayloads {
+                waypoints: vec![s7_wp("faa:W1", 1.0, t0, "snap-c")],
+                ..Default::default()
+            },
+            tombstones: vec![],
+            masked_tables: Default::default(),
+            publication_id: "pub-conflict".to_string(),
+        };
+        store
+            .apply_dataset_publication(&snap, &version, &plan, None)
+            .unwrap();
+
+        // Same identity, different content, NOT a correction: loud
+        // error inside the atomic transaction — no mutation at all.
+        let mut conflict = version.clone();
+        conflict.content_sha256 = "d".repeat(64);
+        let mut conflict_plan = plan.clone();
+        conflict_plan.publication_id = "pub-conflict".to_string();
+        let err = store
+            .apply_dataset_publication(&snap, &conflict, &conflict_plan, None)
+            .unwrap_err();
+        assert!(err.to_string().contains("requires a Correction"), "{err}");
+
+        let versions: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM dataset_versions WHERE publication_id = 'pub-conflict'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(versions, 1);
+        let wp: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM waypoints WHERE id = 'faa:W1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(wp, 1);
+        let audits: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM publication_applications WHERE publication_id = 'pub-conflict'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(audits, 1);
         assert!(store.validate().unwrap().is_empty());
     }
 }
