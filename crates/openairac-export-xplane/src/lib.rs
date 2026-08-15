@@ -998,6 +998,7 @@ mod tests {
             longitude: lon,
             is_enroute: true,
             region_code: region.to_string(),
+            terminal_area_ident: None,
             waypoint_type: wptype,
             temporal: temporal(),
         }

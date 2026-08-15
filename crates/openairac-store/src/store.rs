@@ -140,7 +140,12 @@ impl WorldStore {
                 .execute_batch(include_str!("../migrations/v3_source_observations.sql"))
                 .context("Failed to execute database migration v3_source_observations.sql")?;
         }
-        self.conn.pragma_update(None, "user_version", 3)?;
+        if version < 4 {
+            self.conn
+                .execute_batch(include_str!("../migrations/v4_procedure_legs.sql"))
+                .context("Failed to execute database migration v4_procedure_legs.sql")?;
+        }
+        self.conn.pragma_update(None, "user_version", 4)?;
         Ok(())
     }
 
@@ -393,7 +398,8 @@ impl WorldStore {
         let date_str = rfc3339(date);
         let mut stmt = self.conn.prepare(&format!(
             "SELECT id, ident, name, latitude_deg, longitude_deg, region, is_enroute,
-                    waypoint_type, source_snapshot_id, valid_from, valid_until
+                    waypoint_type, terminal_area_ident, source_snapshot_id,
+                    valid_from, valid_until
              FROM waypoints WHERE {VALID_FROM_LE} AND {VALID_UNTIL_GT};"
         ))?;
 
@@ -414,17 +420,18 @@ impl WorldStore {
                     .get::<_, Option<i64>>(7)
                     .context("waypoint_type")?
                     .map(|v| v as u32),
+                terminal_area_ident: row.get(8).context("terminal_area_ident")?,
                 temporal: TemporalValidity {
                     valid_from: parse_utc(
-                        &row.get::<_, String>(9).context("valid_from")?,
+                        &row.get::<_, String>(10).context("valid_from")?,
                         "valid_from",
                     )?,
                     valid_until: row
-                        .get::<_, Option<String>>(10)
+                        .get::<_, Option<String>>(11)
                         .context("valid_until")?
                         .map(|s| parse_utc(&s, "valid_until"))
                         .transpose()?,
-                    source_snapshot_id: SourceSnapshotId(row.get(8).context("source_snapshot_id")?),
+                    source_snapshot_id: SourceSnapshotId(row.get(9).context("source_snapshot_id")?),
                 },
             })
         })?;
@@ -441,6 +448,14 @@ impl WorldStore {
         query_airway_legs_at(&self.conn, date)
     }
 
+    /// Query procedure legs valid at a given UTC instant.
+    pub fn query_procedure_legs_at(
+        &self,
+        date: DateTime<Utc>,
+    ) -> Result<Vec<CanonicalProcedureLeg>> {
+        query_procedure_legs_at(&self.conn, date)
+    }
+
     /// Structural integrity validation of the canonical store. Returns every
     /// issue found (empty = clean). Deterministic ordering by (table, id).
     pub fn validate(&self) -> Result<Vec<StoreIssue>> {
@@ -455,7 +470,14 @@ impl WorldStore {
         };
 
         // 1. Provenance: every entity row must reference an existing snapshot.
-        for table in ["airports", "runways", "navaids", "waypoints", "airway_legs"] {
+        for table in [
+            "airports",
+            "runways",
+            "navaids",
+            "waypoints",
+            "airway_legs",
+            "procedure_legs",
+        ] {
             let sql = format!(
                 "SELECT t.id FROM {table} t
                  WHERE t.source_snapshot_id NOT IN (SELECT id FROM source_snapshots)
@@ -509,7 +531,14 @@ impl WorldStore {
         }
 
         // 4. Impossible temporal ranges.
-        for table in ["airports", "runways", "navaids", "waypoints", "airway_legs"] {
+        for table in [
+            "airports",
+            "runways",
+            "navaids",
+            "waypoints",
+            "airway_legs",
+            "procedure_legs",
+        ] {
             let sql = format!(
                 "SELECT id FROM {table}
                  WHERE valid_until IS NOT NULL AND valid_until <= valid_from
@@ -530,7 +559,14 @@ impl WorldStore {
         }
 
         // 5. Overlapping open revisions (more than one row without valid_until).
-        for table in ["airports", "runways", "navaids", "waypoints", "airway_legs"] {
+        for table in [
+            "airports",
+            "runways",
+            "navaids",
+            "waypoints",
+            "airway_legs",
+            "procedure_legs",
+        ] {
             let sql = format!(
                 "SELECT id FROM {table} WHERE valid_until IS NULL
                  GROUP BY id HAVING COUNT(*) > 1 ORDER BY id LIMIT 20"
@@ -664,6 +700,11 @@ impl WorldStore {
             total_waypoints,
             total_airway_legs: self.conn.query_row(
                 "SELECT COUNT(*) FROM airway_legs;",
+                [],
+                |r| r.get(0),
+            )?,
+            total_procedure_legs: self.conn.query_row(
+                "SELECT COUNT(*) FROM procedure_legs;",
                 [],
                 |r| r.get(0),
             )?,
@@ -1152,7 +1193,7 @@ pub fn insert_waypoint_conn(
     let existing = conn
         .query_row(
             "SELECT ident, name, latitude_deg, longitude_deg, region, is_enroute,
-                    waypoint_type, valid_from
+                    waypoint_type, terminal_area_ident, valid_from
              FROM waypoints WHERE id = ?1 ORDER BY valid_from DESC LIMIT 1",
             params![id],
             |row| {
@@ -1164,13 +1205,16 @@ pub fn insert_waypoint_conn(
                     row.get::<_, Option<String>>(4)?,
                     row.get::<_, i64>(5)?,
                     row.get::<_, Option<i64>>(6)?,
-                    row.get::<_, String>(7)?,
+                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, String>(8)?,
                 ))
             },
         )
         .optional()?;
 
-    let write = if let Some((ident, name, lat, lon, region, enroute, wptype, prev_vf)) = existing {
+    let write = if let Some((ident, name, lat, lon, region, enroute, wptype, term_area, prev_vf)) =
+        existing
+    {
         // Payload comparison excludes provenance (see entity_observations).
         let unchanged = ident == waypoint.ident
             && name == waypoint.name
@@ -1178,7 +1222,8 @@ pub fn insert_waypoint_conn(
             && lon == waypoint.longitude
             && region.as_deref().unwrap_or("") == waypoint.region_code
             && (enroute != 0) == waypoint.is_enroute
-            && wptype.map(|v| v as u32) == waypoint.waypoint_type;
+            && wptype.map(|v| v as u32) == waypoint.waypoint_type
+            && term_area == waypoint.terminal_area_ident;
         if unchanged {
             EntityWrite::Unchanged
         } else {
@@ -1214,8 +1259,9 @@ fn insert_waypoint_row(
     conn.execute(
         "INSERT INTO waypoints (
             id, ident, name, latitude_deg, longitude_deg, datum, region,
-            is_enroute, waypoint_type, source_snapshot_id, valid_from, valid_until
-        ) VALUES (?1, ?2, ?3, ?4, ?5, 'WGS84', ?6, ?7, ?8, ?9, ?10, ?11)",
+            is_enroute, waypoint_type, terminal_area_ident, source_snapshot_id,
+            valid_from, valid_until
+        ) VALUES (?1, ?2, ?3, ?4, ?5, 'WGS84', ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
             waypoint.object_id.0,
             waypoint.ident,
@@ -1225,6 +1271,7 @@ fn insert_waypoint_row(
             waypoint.region_code,
             waypoint.is_enroute as i64,
             waypoint.waypoint_type.map(|v| v as i64),
+            waypoint.terminal_area_ident,
             waypoint.temporal.source_snapshot_id.0,
             vf,
             vu,
@@ -1385,6 +1432,299 @@ pub fn insert_with_future_correction(
     insert(conn)
 }
 
+pub fn insert_procedure_leg_conn(
+    conn: &Connection,
+    leg: &CanonicalProcedureLeg,
+) -> Result<EntityWrite> {
+    validate_temporal(&leg.temporal)?;
+    let id = &leg.object_id.0;
+    let vf = rfc3339(leg.temporal.valid_from);
+    let vu = leg.temporal.valid_until.map(rfc3339);
+
+    let existing = conn
+        .query_row(
+            "SELECT airport_ident, icao_code, procedure_kind, procedure_ident,
+                    route_type, transition_ident, sequence_number, fix_ident,
+                    fix_icao_code, fix_section, waypoint_description,
+                    turn_direction, rnp_nm, path_terminator, recommended_navaid,
+                    arc_radius_nm, course_a_deg, distance_a_nm, course_b_deg,
+                    distance_b_nm, altitude_descriptor, altitude_1_ft,
+                    altitude_2_ft, speed_limit_kts, course_c_deg,
+                    vertical_angle_deg, msa_center_fix, route_qualifiers, raw,
+                    valid_from
+             FROM procedure_legs WHERE id = ?1 ORDER BY valid_from DESC LIMIT 1",
+            params![id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, u32>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, String>(10)?,
+                    row.get::<_, Option<String>>(11)?,
+                    row.get::<_, Option<f64>>(12)?,
+                    row.get::<_, String>(13)?,
+                    row.get::<_, Option<String>>(14)?,
+                    row.get::<_, Option<f64>>(15)?,
+                    row.get::<_, Option<f64>>(16)?,
+                    row.get::<_, Option<f64>>(17)?,
+                    row.get::<_, Option<f64>>(18)?,
+                    row.get::<_, Option<f64>>(19)?,
+                    row.get::<_, Option<String>>(20)?,
+                    row.get::<_, Option<i64>>(21)?,
+                    row.get::<_, Option<i64>>(22)?,
+                    row.get::<_, Option<i64>>(23)?,
+                    row.get::<_, Option<i64>>(24)?,
+                    row.get::<_, Option<f64>>(25)?,
+                    row.get::<_, Option<String>>(26)?,
+                    row.get::<_, String>(27)?,
+                    row.get::<_, String>(28)?,
+                    row.get::<_, String>(29)?,
+                ))
+            },
+        )
+        .optional()?;
+
+    let write = if let Some((
+        airport_ident,
+        icao_code,
+        procedure_kind,
+        procedure_ident,
+        route_type,
+        transition_ident,
+        sequence_number,
+        fix_ident,
+        fix_icao_code,
+        fix_section,
+        waypoint_description,
+        turn_direction,
+        rnp_nm,
+        path_terminator,
+        recommended_navaid,
+        arc_radius_nm,
+        course_a_deg,
+        distance_a_nm,
+        course_b_deg,
+        distance_b_nm,
+        altitude_descriptor,
+        altitude_1_ft,
+        altitude_2_ft,
+        speed_limit_kts,
+        course_c_deg,
+        vertical_angle_deg,
+        msa_center_fix,
+        route_qualifiers,
+        raw,
+        prev_vf,
+    )) = existing
+    {
+        // Payload comparison excludes provenance (see entity_observations).
+        let unchanged = airport_ident == leg.airport_ident
+            && icao_code == leg.icao_code
+            && procedure_kind == leg.procedure_kind.to_string()
+            && procedure_ident == leg.procedure_ident
+            && route_type == leg.route_type
+            && transition_ident == leg.transition_ident
+            && sequence_number == leg.sequence_number
+            && fix_ident == leg.fix_ident
+            && fix_icao_code == leg.fix_icao_code
+            && fix_section == leg.fix_section
+            && waypoint_description == leg.waypoint_description
+            && turn_direction.as_deref() == leg.turn_direction.map(|c| c.to_string()).as_deref()
+            && rnp_nm == leg.rnp_nm
+            && path_terminator == leg.path_terminator
+            && recommended_navaid == leg.recommended_navaid
+            && arc_radius_nm == leg.arc_radius_nm
+            && course_a_deg == leg.course_a_deg
+            && distance_a_nm == leg.distance_a_nm
+            && course_b_deg == leg.course_b_deg
+            && distance_b_nm == leg.distance_b_nm
+            && altitude_descriptor.as_deref()
+                == leg.altitude_descriptor.map(|c| c.to_string()).as_deref()
+            && altitude_1_ft.map(|v| v as u32) == leg.altitude_1_ft
+            && altitude_2_ft.map(|v| v as u32) == leg.altitude_2_ft
+            && speed_limit_kts.map(|v| v as u32) == leg.speed_limit_kts
+            && course_c_deg.map(|v| v as u32) == leg.course_c_deg
+            && vertical_angle_deg == leg.vertical_angle_deg
+            && msa_center_fix == leg.msa_center_fix
+            && route_qualifiers == leg.route_qualifiers
+            && raw == leg.raw;
+        if unchanged {
+            EntityWrite::Unchanged
+        } else {
+            if prev_vf >= vf {
+                return Err(anyhow!(
+                    "procedure leg '{id}': new valid_from {vf} must be strictly after existing revision {prev_vf}"
+                ));
+            }
+            close_open_revision(conn, "procedure_legs", id, &prev_vf, &vf)?;
+            insert_procedure_leg_row(conn, leg, &vf, &vu)?;
+            EntityWrite::Updated
+        }
+    } else {
+        insert_procedure_leg_row(conn, leg, &vf, &vu)?;
+        EntityWrite::Created
+    };
+
+    record_observation(
+        conn,
+        "procedure_legs",
+        id,
+        &leg.temporal.source_snapshot_id.0,
+        &vf,
+    )?;
+    Ok(write)
+}
+
+fn insert_procedure_leg_row(
+    conn: &Connection,
+    leg: &CanonicalProcedureLeg,
+    vf: &str,
+    vu: &Option<String>,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO procedure_legs (
+            id, airport_ident, icao_code, procedure_kind, procedure_ident,
+            route_type, transition_ident, sequence_number, fix_ident,
+            fix_icao_code, fix_section, waypoint_description, turn_direction,
+            rnp_nm, path_terminator, recommended_navaid, arc_radius_nm,
+            course_a_deg, distance_a_nm, course_b_deg, distance_b_nm,
+            altitude_descriptor, altitude_1_ft, altitude_2_ft, speed_limit_kts,
+            course_c_deg, vertical_angle_deg, msa_center_fix, route_qualifiers,
+            raw, source_snapshot_id, valid_from, valid_until
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+                  ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26,
+                  ?27, ?28, ?29, ?30, ?31, ?32, ?33)",
+        params![
+            leg.object_id.0,
+            leg.airport_ident,
+            leg.icao_code,
+            leg.procedure_kind.to_string(),
+            leg.procedure_ident,
+            leg.route_type,
+            leg.transition_ident,
+            leg.sequence_number,
+            leg.fix_ident,
+            leg.fix_icao_code,
+            leg.fix_section,
+            leg.waypoint_description,
+            leg.turn_direction.map(|c| c.to_string()),
+            leg.rnp_nm,
+            leg.path_terminator,
+            leg.recommended_navaid,
+            leg.arc_radius_nm,
+            leg.course_a_deg,
+            leg.distance_a_nm,
+            leg.course_b_deg,
+            leg.distance_b_nm,
+            leg.altitude_descriptor.map(|c| c.to_string()),
+            leg.altitude_1_ft,
+            leg.altitude_2_ft,
+            leg.speed_limit_kts,
+            leg.course_c_deg,
+            leg.vertical_angle_deg,
+            leg.msa_center_fix,
+            leg.route_qualifiers,
+            leg.raw,
+            leg.temporal.source_snapshot_id.0,
+            vf,
+            vu,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Query procedure legs valid at a given UTC instant.
+pub fn query_procedure_legs_at(
+    conn: &Connection,
+    date: DateTime<Utc>,
+) -> Result<Vec<CanonicalProcedureLeg>> {
+    let date_str = rfc3339(date);
+    let mut stmt = conn.prepare(&format!(
+        "SELECT id, airport_ident, icao_code, procedure_kind, procedure_ident,
+                route_type, transition_ident, sequence_number, fix_ident,
+                fix_icao_code, fix_section, waypoint_description,
+                turn_direction, rnp_nm, path_terminator, recommended_navaid,
+                arc_radius_nm, course_a_deg, distance_a_nm, course_b_deg,
+                distance_b_nm, altitude_descriptor, altitude_1_ft,
+                altitude_2_ft, speed_limit_kts, course_c_deg,
+                vertical_angle_deg, msa_center_fix, route_qualifiers, raw,
+                source_snapshot_id, valid_from, valid_until
+         FROM procedure_legs WHERE {VALID_FROM_LE} AND {VALID_UNTIL_GT}
+         ORDER BY airport_ident, procedure_ident, transition_ident, sequence_number;"
+    ))?;
+
+    let rows = stmt.query_and_then(params![date_str], |row| -> Result<CanonicalProcedureLeg> {
+        Ok(CanonicalProcedureLeg {
+            object_id: ProcedureLegId(row.get(0).context("procedure_legs.id")?),
+            airport_ident: row.get(1).context("airport_ident")?,
+            icao_code: row.get(2).context("icao_code")?,
+            procedure_kind: row
+                .get::<_, String>(3)
+                .context("procedure_kind")?
+                .chars()
+                .next()
+                .unwrap_or(' '),
+            procedure_ident: row.get(4).context("procedure_ident")?,
+            route_type: row.get(5).context("route_type")?,
+            transition_ident: row.get(6).context("transition_ident")?,
+            sequence_number: row.get(7).context("sequence_number")?,
+            fix_ident: row.get(8).context("fix_ident")?,
+            fix_icao_code: row.get(9).context("fix_icao_code")?,
+            fix_section: row.get(10).context("fix_section")?,
+            waypoint_description: row.get(11).context("waypoint_description")?,
+            turn_direction: row
+                .get::<_, Option<String>>(12)
+                .context("turn_direction")?
+                .and_then(|s| s.chars().next()),
+            rnp_nm: row.get(13).context("rnp_nm")?,
+            path_terminator: row.get(14).context("path_terminator")?,
+            recommended_navaid: row.get(15).context("recommended_navaid")?,
+            arc_radius_nm: row.get(16).context("arc_radius_nm")?,
+            course_a_deg: row.get(17).context("course_a_deg")?,
+            distance_a_nm: row.get(18).context("distance_a_nm")?,
+            course_b_deg: row.get(19).context("course_b_deg")?,
+            distance_b_nm: row.get(20).context("distance_b_nm")?,
+            altitude_descriptor: row
+                .get::<_, Option<String>>(21)
+                .context("altitude_descriptor")?
+                .and_then(|s| s.chars().next()),
+            altitude_1_ft: row.get(22).context("altitude_1_ft")?,
+            altitude_2_ft: row.get(23).context("altitude_2_ft")?,
+            speed_limit_kts: row.get(24).context("speed_limit_kts")?,
+            course_c_deg: row.get(25).context("course_c_deg")?,
+            vertical_angle_deg: row.get(26).context("vertical_angle_deg")?,
+            msa_center_fix: row.get(27).context("msa_center_fix")?,
+            route_qualifiers: row.get(28).context("route_qualifiers")?,
+            raw: row.get(29).context("raw")?,
+            temporal: TemporalValidity {
+                valid_from: parse_utc(
+                    &row.get::<_, String>(31).context("valid_from")?,
+                    "valid_from",
+                )?,
+                valid_until: row
+                    .get::<_, Option<String>>(32)
+                    .context("valid_until")?
+                    .map(|s| parse_utc(&s, "valid_until"))
+                    .transpose()?,
+                source_snapshot_id: SourceSnapshotId(row.get(30).context("source_snapshot_id")?),
+            },
+        })
+    })?;
+
+    let mut legs = Vec::new();
+    for row in rows {
+        legs.push(row?);
+    }
+    Ok(legs)
+}
+
 /// Query airway legs valid at a given UTC instant, ordered by route.
 pub fn query_airway_legs_at(
     conn: &Connection,
@@ -1518,7 +1858,7 @@ mod tests {
         let store = WorldStore::open_in_memory().unwrap();
         let status = store.status().unwrap();
         assert!(status.integrity_ok);
-        assert_eq!(status.migration_version, 3);
+        assert_eq!(status.migration_version, 4);
         assert_eq!(status.total_airports, 0);
 
         let snap = snapshot("snap-001");
@@ -1837,7 +2177,7 @@ mod tests {
 
         // Opening with the current code must migrate v1 -> v3 in place.
         let store = WorldStore::open(&path).unwrap();
-        assert_eq!(store.migration_version().unwrap(), 3);
+        assert_eq!(store.migration_version().unwrap(), 4);
         let at = store.query_airports_at(Utc::now()).unwrap();
         assert_eq!(at.len(), 1);
         assert_eq!(at[0].ident, "KSFO");

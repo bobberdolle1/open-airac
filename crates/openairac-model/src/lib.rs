@@ -83,6 +83,8 @@ pub struct CanonicalWaypoint {
     pub longitude: f64,
     pub is_enroute: bool,
     pub region_code: String,
+    /// Airport the waypoint belongs to (terminal waypoints only, ARINC 5.6).
+    pub terminal_area_ident: Option<String>,
     /// ARINC 424-18 field 5.42 (3 columns, cols 27-29) encoded as a
     /// little-endian u32 with the 4th byte 0 (X-Plane FIX1200 waypoint type).
     pub waypoint_type: Option<u32>,
@@ -230,6 +232,69 @@ pub struct CanonicalAirwayLeg {
     pub temporal: TemporalValidity,
 }
 
+/// Canonical procedure leg (one record of an ARINC 424 PD/PE/PF procedure).
+/// convert424toxplane output; anything not decodable stays in `raw`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CanonicalProcedureLeg {
+    pub object_id: ProcedureLegId,
+    pub airport_ident: String,
+    pub icao_code: String,
+    /// Record kind: `D` = SID, `E` = STAR, `F` = approach.
+    pub procedure_kind: char,
+    pub procedure_ident: String,
+    /// ARINC 5.7 route type (e.g. `4`, `T`, `A`, `F`, `R`).
+    pub route_type: String,
+    /// ARINC 5.11 transition identifier (blank = common route).
+    pub transition_ident: String,
+    pub sequence_number: u32,
+    pub fix_ident: String,
+    pub fix_icao_code: String,
+    pub fix_section: String,
+    /// ARINC 5.17 waypoint description codes (4 chars).
+    pub waypoint_description: String,
+    /// ARINC 5.20 turn direction (`L`/`R`).
+    pub turn_direction: Option<char>,
+    /// ARINC 5.211 required navigation performance, nautical miles.
+    pub rnp_nm: Option<f64>,
+    /// Path and terminator (ARINC 5.21, cols 48-49), kept verbatim.
+    pub path_terminator: String,
+    /// Recommended navaid reference (ident + ICAO + section/subsection).
+    pub recommended_navaid: Option<String>,
+    /// ARINC 5.204 arc radius (RF legs), nautical miles.
+    pub arc_radius_nm: Option<f64>,
+    /// Course A (cols 63-66), degrees.
+    pub course_a_deg: Option<f64>,
+    /// Distance A (cols 67-70), nautical miles.
+    pub distance_a_nm: Option<f64>,
+    /// Course B (cols 71-74), degrees.
+    pub course_b_deg: Option<f64>,
+    /// Distance B (cols 75-78), nautical miles.
+    pub distance_b_nm: Option<f64>,
+    /// Altitude descriptor (col 83): `+`, `-`, `B` or blank.
+    pub altitude_descriptor: Option<char>,
+    /// ARINC 5.30 altitude 1, feet.
+    pub altitude_1_ft: Option<u32>,
+    /// ARINC 5.30 altitude 2, feet.
+    pub altitude_2_ft: Option<u32>,
+    /// ARINC 5.53 speed limit, knots.
+    pub speed_limit_kts: Option<u32>,
+    /// Course C (cols 100-102, e.g. DF legs), whole degrees.
+    pub course_c_deg: Option<u32>,
+    /// ARINC 5.70 vertical angle, degrees.
+    pub vertical_angle_deg: Option<f64>,
+    /// MSA center fix (ident + ICAO + section/subsection).
+    pub msa_center_fix: Option<String>,
+    /// ARINC 5.7 route qualifiers (cols 119-120).
+    pub route_qualifiers: String,
+    /// The raw 132-column record: lossless preservation of unsupported
+    /// semantics.
+    pub raw: String,
+    pub temporal: TemporalValidity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ProcedureLegId(pub String);
+
 /// Database & Storage Status Summary
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoreStatus {
@@ -244,4 +309,5 @@ pub struct StoreStatus {
     pub total_navaids: usize,
     pub total_waypoints: usize,
     pub total_airway_legs: usize,
+    pub total_procedure_legs: usize,
 }
