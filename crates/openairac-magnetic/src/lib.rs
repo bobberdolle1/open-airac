@@ -34,7 +34,9 @@ pub enum WmmError {
     DateOutsideValidityRange { year: f64, min: f64, max: f64 },
     #[error("Latitude {lat:.4}° is invalid (must be in range [-90.0, +90.0])")]
     InvalidLatitude { lat: f64 },
-    #[error("Longitude {lon:.4}° is invalid (must be in range [-180.0, +180.0])")]
+    #[error(
+        "Longitude {lon:.4}° is invalid (must be in range [-360.0, +360.0]; 0..360°E accepted)"
+    )]
     InvalidLongitude { lon: f64 },
     #[error("Altitude {alt_km:.2} km is invalid (must be in range [-1.0, 850.0] km)")]
     InvalidAltitude { alt_km: f64 },
@@ -832,17 +834,6 @@ impl Wmm2025 {
         Ok(Self::calculate_km_unchecked(lat_deg, lon_deg, alt_km, year))
     }
 
-    /// Calculate WMM2025 result (unchecked, for backwards compatibility)
-    pub fn calculate_km(lat_deg: f64, lon_deg: f64, alt_km: f64, year: f64) -> WmmResult {
-        Self::calculate_km_unchecked(lat_deg, lon_deg, alt_km, year)
-    }
-
-    /// Calculate WMM2025 result where altitude is provided in feet (unchecked)
-    pub fn calculate(lat_deg: f64, lon_deg: f64, alt_ft: f64, year: f64) -> WmmResult {
-        let alt_km = alt_ft * 0.0003048;
-        Self::calculate_km_unchecked(lat_deg, lon_deg, alt_km, year)
-    }
-
     fn calculate_km_unchecked(lat_deg: f64, lon_deg: f64, alt_km: f64, year: f64) -> WmmResult {
         let dt = year - WMM_EPOCH;
 
@@ -1083,33 +1074,245 @@ pub fn analyze_runway_magnetic_drift(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Golden test against the official NOAA/NCEI WMM2025 test values
+    /// (https://www.ncei.noaa.gov/sites/default/files/2025-02/WMM2025_TEST_VALUES.txt).
+    /// Every vector checks date, altitude, latitude, longitude and all field components.
+    /// Official values are published to 0.1 nT / 0.01 deg; we allow 0.3 nT and 0.02 deg.
+    struct GoldenVector {
+        year: f64,
+        alt_km: f64,
+        lat: f64,
+        lon: f64,
+        x: f64,
+        y: f64,
+        z: f64,
+        h: f64,
+        f: f64,
+        inc: f64,
+        dec: f64,
+    }
+    impl GoldenVector {
+        fn check(&self) {
+            let v = Wmm2025::calculate_km_checked(self.lat, self.lon, self.alt_km, self.year)
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "WMM failed for ({}, {}, {}, {}): {e}",
+                        self.lat, self.lon, self.alt_km, self.year
+                    )
+                });
+            assert!(
+                (v.north_component_nt - self.x).abs() < 0.3,
+                "X mismatch: got {:.2}, expected {:.1}",
+                v.north_component_nt,
+                self.x
+            );
+            assert!(
+                (v.east_component_nt - self.y).abs() < 0.3,
+                "Y mismatch: got {:.2}, expected {:.1}",
+                v.east_component_nt,
+                self.y
+            );
+            assert!(
+                (v.down_component_nt - self.z).abs() < 0.3,
+                "Z mismatch: got {:.2}, expected {:.1}",
+                v.down_component_nt,
+                self.z
+            );
+            assert!(
+                (v.horizontal_intensity_nt - self.h).abs() < 0.3,
+                "H mismatch: got {:.2}, expected {:.1}",
+                v.horizontal_intensity_nt,
+                self.h
+            );
+            assert!(
+                (v.total_intensity_nt - self.f).abs() < 0.3,
+                "F mismatch: got {:.2}, expected {:.1}",
+                v.total_intensity_nt,
+                self.f
+            );
+            assert!(
+                (v.inclination_deg - self.inc).abs() < 0.02,
+                "I mismatch: got {:.3}, expected {:.2}",
+                v.inclination_deg,
+                self.inc
+            );
+            assert!(
+                (v.declination_deg - self.dec).abs() < 0.02,
+                "D mismatch: got {:.3}, expected {:.2}",
+                v.declination_deg,
+                self.dec
+            );
+        }
+    }
 
-    /// Test against official NOAA WMM2025 Reference Vectors (from WMM2025testvalues.pdf)
     #[test]
     fn test_noaa_wmm2025_reference_vectors() {
-        // Test Vector 1: Lat 80°N, Lon 0°E, Year 2025.0, Alt 0 km
-        // Official values: X=6521.6, Y=145.9, Z=54791.5, H=6523.2, F=55178.5, I=83.21°, D=1.28°
-        let v1 = Wmm2025::calculate_km_checked(80.0, 0.0, 0.0, 2025.0).unwrap();
-        assert_eq!(v1.declination_deg.round(), 1.0); // Strict direction check
-        assert!((v1.inclination_deg - 83.21).abs() < 1.0);
-        assert!((v1.total_intensity_nt - 55178.5).abs() < 200.0);
-
-        // Test Vector 2: Lat 0°N, Lon 120°E, Year 2025.0, Alt 0 km
-        // Official values: X=39677.8, Y=-109.6, Z=-10580.2, H=39677.9, F=41064.3, I=-14.93°, D=-0.16°
-        let v2 = Wmm2025::calculate_km_checked(0.0, 120.0, 0.0, 2025.0).unwrap();
-        assert!((v2.declination_deg - (-0.16)).abs() < 1.5);
-        assert!((v2.inclination_deg - (-14.93)).abs() < 1.0);
-
-        // Test Vector 3: Lat 80°S (-80.0), Lon 240°E, Year 2027.5, Alt 0 km
-        // Official values: X=6200.7, Y=15730.3, Z=-51783.7, H=16908.3, F=54474.2, I=-71.92°, D=68.49°
-        let v3 = Wmm2025::calculate_km_checked(-80.0, 240.0, 0.0, 2027.5).unwrap();
-        assert!((v3.declination_deg - 68.49).abs() < 1.5);
-        assert!((v3.inclination_deg - (-71.92)).abs() < 1.0);
-
-        // Test Vector 4: Lat 80°N, Lon 0°E, Year 2025.0, Alt 100 km
-        // Official values: X=6216.0, Y=92.4, Z=52598.8, H=6216.7, F=52964.9, I=83.26°, D=0.85°
-        let v4 = Wmm2025::calculate_km_checked(80.0, 0.0, 100.0, 2025.0).unwrap();
-        assert!((v4.declination_deg - 0.85).abs() < 1.5);
+        // Official NOAA/NCEI WMM2025 test values, transcribed verbatim.
+        let vectors = [
+            // 2025.0, 0 km
+            GoldenVector {
+                year: 2025.0,
+                alt_km: 0.0,
+                lat: 80.0,
+                lon: 0.0,
+                x: 6521.6,
+                y: 145.9,
+                z: 54791.5,
+                h: 6523.2,
+                f: 55178.5,
+                inc: 83.21,
+                dec: 1.28,
+            },
+            GoldenVector {
+                year: 2025.0,
+                alt_km: 0.0,
+                lat: 0.0,
+                lon: 120.0,
+                x: 39677.8,
+                y: -109.6,
+                z: -10580.2,
+                h: 39677.9,
+                f: 41064.3,
+                inc: -14.93,
+                dec: -0.16,
+            },
+            GoldenVector {
+                year: 2025.0,
+                alt_km: 0.0,
+                lat: -80.0,
+                lon: 240.0,
+                x: 6117.5,
+                y: 15751.9,
+                z: -52022.5,
+                h: 16898.1,
+                f: 54698.2,
+                inc: -72.00,
+                dec: 68.78,
+            },
+            // 2025.0, 100 km
+            GoldenVector {
+                year: 2025.0,
+                alt_km: 100.0,
+                lat: 80.0,
+                lon: 0.0,
+                x: 6216.0,
+                y: 92.4,
+                z: 52598.8,
+                h: 6216.7,
+                f: 52964.9,
+                inc: 83.26,
+                dec: 0.85,
+            },
+            GoldenVector {
+                year: 2025.0,
+                alt_km: 100.0,
+                lat: 0.0,
+                lon: 120.0,
+                x: 37688.6,
+                y: -96.2,
+                z: -10152.1,
+                h: 37688.7,
+                f: 39032.1,
+                inc: -15.08,
+                dec: -0.15,
+            },
+            GoldenVector {
+                year: 2025.0,
+                alt_km: 100.0,
+                lat: -80.0,
+                lon: 240.0,
+                x: 5907.6,
+                y: 14780.3,
+                z: -49540.7,
+                h: 15917.1,
+                f: 52035.0,
+                inc: -72.19,
+                dec: 68.21,
+            },
+            // 2027.5, 0 km
+            GoldenVector {
+                year: 2027.5,
+                alt_km: 0.0,
+                lat: 80.0,
+                lon: 0.0,
+                x: 6500.8,
+                y: 294.5,
+                z: 54869.4,
+                h: 6507.5,
+                f: 55253.9,
+                inc: 83.24,
+                dec: 2.59,
+            },
+            GoldenVector {
+                year: 2027.5,
+                alt_km: 0.0,
+                lat: 0.0,
+                lon: 120.0,
+                x: 39701.6,
+                y: -167.4,
+                z: -10381.8,
+                h: 39702.0,
+                f: 41036.9,
+                inc: -14.65,
+                dec: -0.24,
+            },
+            GoldenVector {
+                year: 2027.5,
+                alt_km: 0.0,
+                lat: -80.0,
+                lon: 240.0,
+                x: 6200.7,
+                y: 15730.3,
+                z: -51783.7,
+                h: 16908.3,
+                f: 54474.2,
+                inc: -71.92,
+                dec: 68.49,
+            },
+            // 2027.5, 100 km
+            GoldenVector {
+                year: 2027.5,
+                alt_km: 100.0,
+                lat: 80.0,
+                lon: 0.0,
+                x: 6196.7,
+                y: 233.8,
+                z: 52670.5,
+                h: 6201.1,
+                f: 53034.3,
+                inc: 83.29,
+                dec: 2.16,
+            },
+            GoldenVector {
+                year: 2027.5,
+                alt_km: 100.0,
+                lat: 0.0,
+                lon: 120.0,
+                x: 37711.5,
+                y: -148.7,
+                z: -9969.8,
+                h: 37711.8,
+                f: 39007.4,
+                inc: -14.81,
+                dec: -0.23,
+            },
+            GoldenVector {
+                year: 2027.5,
+                alt_km: 100.0,
+                lat: -80.0,
+                lon: 240.0,
+                x: 5984.0,
+                y: 14760.1,
+                z: -49317.7,
+                h: 15927.0,
+                f: 51825.7,
+                inc: -72.10,
+                dec: 67.93,
+            },
+        ];
+        for v in &vectors {
+            v.check();
+        }
     }
 
     #[test]
