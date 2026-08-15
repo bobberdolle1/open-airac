@@ -650,6 +650,166 @@ impl WorldStore {
             }
         }
 
+        // 8. Procedure legs: altitude descriptor membership and band
+        // consistency (a 'B' band must carry both altitudes).
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, altitude_descriptor, altitude_1_ft, altitude_2_ft
+                 FROM procedure_legs ORDER BY id",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, Option<i64>>(2)?,
+                    r.get::<_, Option<i64>>(3)?,
+                ))
+            })?;
+            for row in rows {
+                let (id, desc, a1, a2) = row?;
+                let desc = desc.unwrap_or_default();
+                if !desc.is_empty() && desc != "+" && desc != "-" && desc != "B" {
+                    push(
+                        "error",
+                        "procedure_legs",
+                        id.clone(),
+                        format!("unknown altitude descriptor '{desc}'"),
+                    );
+                }
+                if desc == "B" && (a1.is_none() || a2.is_none()) {
+                    push(
+                        "error",
+                        "procedure_legs",
+                        id.clone(),
+                        "altitude band 'B' requires both altitudes".into(),
+                    );
+                }
+                if a1.is_none() && a2.is_some() {
+                    push(
+                        "error",
+                        "procedure_legs",
+                        id.clone(),
+                        "altitude 2 set without altitude 1".into(),
+                    );
+                }
+            }
+        }
+
+        // 9. Procedure legs: known path terminators only.
+        {
+            let known = [
+                "IF", "TF", "CF", "DF", "FA", "FC", "FD", "FM", "CA", "CD", "CI", "CR", "VA", "VD",
+                "VI", "VM", "VR", "HA", "HF", "HM", "RF",
+            ];
+            let mut stmt = self
+                .conn
+                .prepare("SELECT id, path_terminator FROM procedure_legs ORDER BY id")?;
+            let rows =
+                stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+            for row in rows {
+                let (id, term) = row?;
+                if !known.contains(&term.as_str()) {
+                    push(
+                        "warning",
+                        "procedure_legs",
+                        id.clone(),
+                        format!("path terminator '{term}' is not in the ARINC 424 set"),
+                    );
+                }
+            }
+        }
+
+        // 10. Procedure legs: duplicate sequence numbers within one
+        // (airport, kind, procedure, transition, route type) at one
+        // validity instant.
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT airport_ident, procedure_kind, procedure_ident,
+                        transition_ident, route_type, valid_from,
+                        sequence_number, COUNT(*) AS n
+                 FROM procedure_legs
+                 GROUP BY airport_ident, procedure_kind, procedure_ident,
+                          transition_ident, route_type, valid_from,
+                          sequence_number
+                 HAVING n > 1 ORDER BY airport_ident LIMIT 20",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, i64>(6)?,
+                    r.get::<_, i64>(7)?,
+                ))
+            })?;
+            for row in rows {
+                let (airport, kind, ident, transition, seq, n) = row?;
+                push(
+                    "error",
+                    "procedure_legs",
+                    format!("{airport}/{kind}/{ident}/{transition}"),
+                    format!("sequence {seq} duplicated {n} times"),
+                );
+            }
+        }
+
+        // 11. Cross-table: procedure fix references must resolve to a
+        // waypoint or navaid in the store.
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT p.id, p.fix_ident, p.fix_icao_code
+                 FROM procedure_legs p
+                 WHERE p.fix_ident NOT IN (SELECT ident FROM waypoints)
+                   AND p.fix_ident NOT IN (SELECT ident FROM navaids)
+                 ORDER BY p.id LIMIT 20",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?;
+            for row in rows {
+                let (id, fix, icao) = row?;
+                push(
+                    "warning",
+                    "procedure_legs",
+                    id,
+                    format!("fix {fix} ({icao}) has no waypoint or navaid row"),
+                );
+            }
+        }
+
+        // 12. Cross-table: airway endpoints must resolve to a waypoint or
+        // navaid.
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT l.id, l.start_fix, l.end_fix
+                 FROM airway_legs l
+                 WHERE l.start_fix NOT IN (SELECT ident FROM waypoints)
+                    OR l.end_fix NOT IN (SELECT ident FROM waypoints)
+                 ORDER BY l.id LIMIT 20",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?;
+            for row in rows {
+                let (id, start, end) = row?;
+                push(
+                    "warning",
+                    "airway_legs",
+                    id,
+                    format!("endpoint {start}/{end} has no waypoint row"),
+                );
+            }
+        }
+
         issues.sort_by_key(|i| (i.table.clone(), i.id.clone()));
         Ok(issues)
     }
@@ -1999,6 +2159,125 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_procedure_and_airway_checks() {
+        let mut store = WorldStore::open_in_memory().unwrap();
+        store.insert_source_snapshot(&snapshot("snap-001")).unwrap();
+        let t = Utc::now();
+
+        let mut counter = 0u32;
+        let mut ple = |seq: u32, term: &str| {
+            counter += 1;
+            let id = format!("faa:PD:KSFO:D:CIITY3:{seq}:{counter}");
+            CanonicalProcedureLeg {
+                object_id: ProcedureLegId(id),
+                airport_ident: "KSFO".to_string(),
+                icao_code: "K2".to_string(),
+                procedure_kind: 'D',
+                procedure_ident: "CIITY3".to_string(),
+                route_type: String::new(),
+                transition_ident: String::new(),
+                sequence_number: seq,
+                fix_ident: "NOFIX".to_string(),
+                fix_icao_code: "K2".to_string(),
+                fix_section: " ".to_string(),
+                waypoint_description: "E ".to_string(),
+                turn_direction: None,
+                rnp_nm: None,
+                path_terminator: term.to_string(),
+                recommended_navaid: None,
+                arc_radius_nm: None,
+                course_a_deg: None,
+                distance_a_nm: None,
+                course_b_deg: None,
+                distance_b_nm: None,
+                altitude_descriptor: Some('B'),
+                altitude_1_ft: Some(5000),
+                altitude_2_ft: None,
+                speed_limit_kts: None,
+                course_c_deg: None,
+                vertical_angle_deg: None,
+                msa_center_fix: None,
+                route_qualifiers: String::new(),
+                raw: String::new(),
+                temporal: TemporalValidity {
+                    valid_from: t,
+                    valid_until: None,
+                    source_snapshot_id: SourceSnapshotId("snap-001".to_string()),
+                },
+            }
+        };
+        // Unknown terminator + incomplete band + missing fix row.
+        store
+            .transact(|conn| insert_procedure_leg_conn(conn, &ple(10, "ZZ")))
+            .unwrap();
+        // Duplicate sequence in the same procedure group.
+        store
+            .transact(|conn| insert_procedure_leg_conn(conn, &ple(10, "TF")))
+            .unwrap();
+        // Airway leg whose endpoints have no waypoint rows.
+        let leg = CanonicalAirwayLeg {
+            object_id: AirwayLegId("faa:ER:V9:2".to_string()),
+            route_ident: "V9".to_string(),
+            route_type: "O".to_string(),
+            level: Some('L'),
+            sequence_number: 2,
+            start_fix: "GHOST".to_string(),
+            start_icao_code: "K2".to_string(),
+            end_fix: "NOWHERE".to_string(),
+            end_icao_code: "K2".to_string(),
+            direction: 'N',
+            minimum_altitude_ft: None,
+            maximum_altitude_ft: None,
+            temporal: TemporalValidity {
+                valid_from: t,
+                valid_until: None,
+                source_snapshot_id: SourceSnapshotId("snap-001".to_string()),
+            },
+        };
+        store
+            .transact(|conn| insert_airway_leg_conn(conn, &leg))
+            .unwrap();
+
+        let issues = store.validate().unwrap();
+        let mut tables: Vec<(&str, String)> = issues
+            .iter()
+            .map(|i| (i.table.as_str(), i.message.clone()))
+            .collect();
+        tables.sort();
+        assert!(
+            tables
+                .iter()
+                .any(|(tb, m)| *tb == "procedure_legs" && m.contains("not in the ARINC 424 set")),
+            "{tables:?}"
+        );
+        assert!(
+            tables
+                .iter()
+                .any(|(tb, m)| *tb == "procedure_legs" && m.contains("requires both altitudes")),
+            "{tables:?}"
+        );
+        assert!(
+            tables
+                .iter()
+                .any(|(tb, m)| *tb == "procedure_legs" && m.contains("duplicated")),
+            "{tables:?}"
+        );
+        assert!(
+            tables
+                .iter()
+                .any(|(tb, m)| *tb == "procedure_legs"
+                    && m.contains("has no waypoint or navaid row")),
+            "{tables:?}"
+        );
+        assert!(
+            tables
+                .iter()
+                .any(|(tb, m)| *tb == "airway_legs" && m.contains("has no waypoint row")),
+            "{tables:?}"
+        );
+    }
+
+    #[test]
     fn test_future_revision_preloading() {
         let store = WorldStore::open_in_memory().unwrap();
         let snap = snapshot("snap-001");
@@ -2220,6 +2499,28 @@ mod tests {
                 source_snapshot_id: SourceSnapshotId("snap-001".to_string()),
             },
         };
+        // Endpoint fixes exist in the world so referential validation is
+        // clean.
+        for fix in ["AADCO", "LOLIC"] {
+            store
+                .insert_waypoint(&CanonicalWaypoint {
+                    object_id: WaypointId(format!("WP-{fix}")),
+                    ident: fix.to_string(),
+                    name: fix.to_string(),
+                    latitude: 39.0,
+                    longitude: -110.0,
+                    is_enroute: true,
+                    region_code: "K2".to_string(),
+                    terminal_area_ident: None,
+                    waypoint_type: Some(0x202057),
+                    temporal: TemporalValidity {
+                        valid_from: t,
+                        valid_until: None,
+                        source_snapshot_id: SourceSnapshotId("snap-001".to_string()),
+                    },
+                })
+                .unwrap();
+        }
         store
             .transact(|conn| insert_airway_leg_conn(conn, &leg))
             .unwrap();
