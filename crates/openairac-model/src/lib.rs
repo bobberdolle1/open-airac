@@ -9,8 +9,10 @@ pub struct AirportId(pub String);
 pub struct NavaidId(pub String);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct WaypointId(pub String);
+pub struct RunwayId(pub String);
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct WaypointId(pub String);
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SourceSnapshotId(pub String);
 
@@ -44,6 +46,7 @@ pub struct SourceSnapshot {
     pub retrieved_at: DateTime<Utc>,
     pub source_uri: String,
     pub content_sha256: String,
+    pub license_id: Option<String>,
     pub license_notes: Option<String>,
     pub parser_version: String,
 }
@@ -65,7 +68,6 @@ pub struct TemporalValidity {
     pub valid_until: Option<DateTime<Utc>>,
     pub source_snapshot_id: SourceSnapshotId,
 }
-
 /// Canonical Waypoint (Fix)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CanonicalWaypoint {
@@ -76,6 +78,9 @@ pub struct CanonicalWaypoint {
     pub longitude: f64,
     pub is_enroute: bool,
     pub region_code: String,
+    /// ARINC 424-18 field 5.42 (3 columns, cols 27-29) encoded as a
+    /// little-endian u32 with the 4th byte 0 (X-Plane FIX1200 waypoint type).
+    pub waypoint_type: Option<u32>,
     pub temporal: TemporalValidity,
 }
 
@@ -86,6 +91,8 @@ pub enum NavaidKind {
     Vordme,
     Vortac,
     Ndb,
+    Dme,
+    Tacan,
     IlsLocalizer,
     IlsGlidepath,
 }
@@ -97,6 +104,8 @@ impl NavaidKind {
             NavaidKind::Vordme => "VOR-DME",
             NavaidKind::Vortac => "VORTAC",
             NavaidKind::Ndb => "NDB",
+            NavaidKind::Dme => "DME",
+            NavaidKind::Tacan => "TACAN",
             NavaidKind::IlsLocalizer => "ILS-LOC",
             NavaidKind::IlsGlidepath => "ILS-GS",
         }
@@ -108,6 +117,8 @@ impl NavaidKind {
             "VOR-DME" | "VORDME" => Some(NavaidKind::Vordme),
             "VORTAC" => Some(NavaidKind::Vortac),
             "NDB" => Some(NavaidKind::Ndb),
+            "DME" => Some(NavaidKind::Dme),
+            "TACAN" => Some(NavaidKind::Tacan),
             "ILS-LOC" | "LOC" | "ILS" => Some(NavaidKind::IlsLocalizer),
             "ILS-GS" | "GS" => Some(NavaidKind::IlsGlidepath),
             _ => None,
@@ -124,20 +135,28 @@ pub struct CanonicalNavaid {
     pub frequency: FrequencyKhz,
     pub latitude: f64,
     pub longitude: f64,
-    pub elevation_ft: i32,
+    pub elevation_ft: Option<i32>,
+    pub region_code: Option<String>,
     pub associated_airport: Option<String>,
     pub magnetic_variation_deg: Option<f64>,
+    /// ILS-specific data. `None` when the kind is not an ILS component or the
+    /// source did not provide the value; exporters MUST NOT fabricate it.
+    pub associated_runway: Option<String>,
+    pub localizer_bearing_true_deg: Option<f64>,
+    pub localizer_bearing_mag_deg: Option<f64>,
+    pub glideslope_angle_deg: Option<f64>,
     pub temporal: TemporalValidity,
 }
 
 /// Canonical Airport & Runway with Dual Designators
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CanonicalRunway {
-    pub id: String,
+    pub id: RunwayId,
+    pub airport_id: AirportId,
     pub airport_ident: String,
-    pub official_designator: String,          // e.g. "09"
-    pub computed_magnetic_designator: String, // e.g. "10"
-    pub true_heading_deg: f64,
+    pub official_designator: String,                  // e.g. "09"
+    pub computed_magnetic_designator: Option<String>, // WMM analysis; None = unknown
+    pub true_heading_deg: Option<f64>,                // None = source did not publish it
     pub length_ft: u32,
     pub width_ft: u32,
     pub surface: Option<String>,
