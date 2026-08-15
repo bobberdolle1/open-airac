@@ -6,6 +6,8 @@ members = [
     "crates/openairac-store",
     "crates/openairac-ingest",
     "crates/openairac-procedures",
+    "crates/openairac-integration",
+    "crates/openairac-service",
     "crates/openairac-routing",
     "crates/openairac-export-xplane",
     "crates/openairac-cli",

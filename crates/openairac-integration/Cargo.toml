@@ -1,0 +1,15 @@
+[package]
+name = "openairac-integration"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+openairac-model = { path = "../openairac-model" }
+openairac-store = { path = "../openairac-store" }
+openairac-procedures = { path = "../openairac-procedures" }
+openairac-routing = { path = "../openairac-routing" }
+anyhow.workspace = true
+chrono.workspace = true
+serde.workspace = true
