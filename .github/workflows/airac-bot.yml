@@ -24,4 +24,5 @@ jobs:
           mkdir -p dist/xplane
           cargo run -p openairac-cli -- sync --provider ourairports --db ./data/world.sqlite --fixture
           cargo run -p openairac-cli -- doctor --db ./data/world.sqlite
-          cargo run -p openairac-cli -- export xplane --db ./data/world.sqlite --out ./dist/xplane
+          cargo run -p openairac-cli -- validate --db ./data/world.sqlite
+          cargo run -p openairac-cli -- export xplane --db ./data/world.sqlite --out ./dist/xplane --allow-empty
