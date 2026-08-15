@@ -37,13 +37,12 @@ Traditional flight simulation navigation relies on expensive recurring subscript
 | **NOAA WMM2025 Geomagnetic Field Solver** | **Implemented** | `openairac-magnetic` |
 | **Runway Magnetic Drift Analysis** | **Implemented** | `openairac-magnetic` |
 | **Canonical Domain Model & Provenance** | **Implemented** | `openairac-model` |
-| **Embedded Temporal SQLite Store & Migrations** | **Implemented** | `openairac-store` |
-| **OurAirports Ingestion (Airports/Runways/Navaids)** | **Implemented** | `openairac-ingest` |
-| **Experimental FAA CIFP ARINC 424 Adapter** | **Experimental** | `openairac-ingest` |
+| **Temporal SQLite Store (revisioned `world_at`) & Migrations** | **Implemented** | `openairac-store` |
+| **Transactional, Fail-Closed Ingestion + Diagnostics** | **Implemented** | `openairac-ingest` |
+| **OurAirports Ingestion (live fetch: Airports/Runways/Navaids)** | **Implemented** | `openairac-ingest` |
+| **Experimental FAA CIFP ARINC 424 Adapter (EA/D/DB/PN records)** | **Experimental** | `openairac-ingest` |
 | **Geodesic Direct Route Engine (WGS84)** | **Implemented** | `openairac-routing` |
-| **X-Plane 12 dat Exporter (`earth_fix`/`earth_nav`)** | **Implemented** | `openairac-export-xplane` |
-| **X-Plane 12 C-ABI Status Bridge Plugin** | **Implemented** | `openairac-plugin` |
-| **Production CLI (`doctor`, `magnetic`, `magdrift`, `sync`, `status`, `export`)** | **Implemented** | `openairac-cli` |
+| **X-Plane 12 dat Exporter (`earth_fix`/`earth_nav`, staged & fail-closed)** | **Implemented** | `openairac-export-xplane` |
 | **Full SID / STAR / Approach Leg Execution** | *Planned* | `openairac-procedures` |
 | **MSFS 2024 Packager** | *Planned* | Roadmap |
 | **Flight Deck EFB Interface** | *Planned* | Roadmap |
@@ -84,20 +83,32 @@ openairac magnetic --lat 80.0 --lon 0.0 --alt-ft 0 --date 2025-01-01
 openairac magdrift --designator "09" --heading 96.7 --lat 55.97 --lon 37.41 --date 2026-08-12
 ```
 
-### 4. Synchronize Navigation Data from OurAirports
+### 4. Synchronize Navigation Data from OurAirports (live network fetch)
 ```bash
 openairac sync --provider ourairports --db ./data/world.openairac.sqlite
 ```
+Use `--fixture` for an offline sample dataset (CI / smoke testing).
 
 ### 5. Inspect Database Status & Entity Counts
 ```bash
 openairac status --db ./data/world.openairac.sqlite
 ```
 
-### 6. Export X-Plane 12 Navigation Data (`earth_fix.dat`, `earth_nav.dat`)
+### 6. Validate Canonical Store Integrity
+```bash
+openairac validate --db ./data/world.openairac.sqlite
+```
+
+### 7. Export X-Plane 12 Navigation Data (`earth_fix.dat`, `earth_nav.dat`)
 ```bash
 openairac export xplane --db ./data/world.openairac.sqlite --out ./dist/xplane
 ```
+
+The exporter is fail-closed: records missing fields the X-Plane format
+requires (ICAO region, waypoint type, localizer bearings) are skipped with
+diagnostics instead of being fabricated, files are staged and swapped in
+atomically, and an export that would produce an empty nav layer is refused
+unless `--allow-empty` is passed explicitly.
 
 ---
 

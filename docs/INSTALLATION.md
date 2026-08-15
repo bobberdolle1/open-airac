@@ -1,63 +1,95 @@
-# 📖 OpenAIRAC Installation & Setup Guide
+# OpenAIRAC Installation & Setup Guide
 
-This guide explains how to install, configure, and use **OpenAIRAC** with **X-Plane 12** and **MSFS 2024**.
+This guide explains how to install, configure, and use **OpenAIRAC**.
 
----
-
-## 📥 Option 1: Pre-compiled ZIP (Recommended for Users)
-
-1. Go to **[OpenAIRAC Releases](https://github.com/bobberdolle1/open-airac/releases)**.
-2. Download `OpenAIRAC-v0.1.0-Windows-x64.zip`.
-3. Unpack the ZIP archive to any folder (e.g., `C:\OpenAIRAC`).
-4. Open **PowerShell** or **Command Prompt** in that directory.
-5. Run the sync command pointing to your simulator installation:
-
-### For X-Plane 12:
-```powershell
-.\openairac.exe sync --sim xp12 --path "F:\SteamLibrary\steamapps\common\X-Plane 12"
-```
-
-The tool will:
-- Connect to open aeronautical data repositories (OurAirports / FAA).
-- Compute dynamic WMM magnetic variation for all navaids and runways for the current year.
-- Export native `earth_nav.dat` into `X-Plane 12/Custom Data/`.
+> Status note: v0.2 is a foundation release. The CLI, the canonical temporal
+> store, WMM2025, OurAirports ingestion and the X-Plane 12 navaid/fix exporter
+> are functional. Simulator *installation* of the exported files (backup,
+> swap, rollback) and MSFS support are planned — do not point the exporter at
+> a live simulator installation yet.
 
 ---
 
-## 🛠️ Option 2: Building from Source (Developer Setup)
+## Building from Source (Developer Setup)
 
-### Prerequisites:
-- [Rust Toolchain](https://www.rust-lang.org/) (1.85+)
-- Git
+### Prerequisites
 
-### Build & Run:
+- Rust toolchain 1.85+ (edition 2024)
+
+### Build & Run
+
 ```bash
 # Clone the repository
 git clone https://github.com/bobberdolle1/open-airac.git
 cd open-airac
 
 # Run tests
-cargo test --workspace
+cargo test --workspace --all-features
 
 # Build optimized binary
 cargo build --release
 
-# Execute sync
-./target/release/openairac-cli sync --sim xp12 --path "C:/Program Files/X-Plane 12"
+# Initialize the local database (live OurAirports fetch)
+./target/release/openairac sync --provider ourairports --db ./data/world.openairac.sqlite
+
+# Offline smoke test
+./target/release/openairac sync --fixture --db ./data/world.openairac.sqlite
 ```
 
 ---
 
-## 🧭 Calculating Dynamic Magnetic Variation (CLI Tool)
-
-You can check Earth's magnetic variation for any coordinate and year using the WMM engine:
+## Typical Workflow
 
 ```powershell
-.\openairac.exe magvar --lat 55.9726 --lon 37.4146 --year 2026.6
+# 1. Fetch current navigation data (airports, runways, navaids)
+.\openairac.exe sync --provider ourairports --db .\data\world.openairac.sqlite
+
+# 2. Check database integrity and counts
+.\openairac.exe status --db .\data\world.openairac.sqlite
+
+# 3. Validate canonical structural integrity (references, coordinates,
+#    temporal ranges, frequencies)
+.\openairac.exe validate --db .\data\world.openairac.sqlite
+
+# 4. Export X-Plane 12 dat files into a scratch directory
+.\openairac.exe export xplane --db .\data\world.openairac.sqlite --out .\dist\xplane
+
+# 5. Health check
+.\openairac.exe doctor --db .\data\world.openairac.sqlite
+```
+
+### Export behavior (fail-closed)
+
+- The exporter writes `earth_fix.dat` / `earth_nav.dat` per Laminar's
+  XPFIX1200 / XPNAV1200 specifications, staged and swapped in atomically.
+- Records missing fields the format requires (e.g. ICAO region) are skipped
+  with diagnostics — values are never invented.
+- An export that would produce an empty nav layer is refused unless
+  `--allow-empty` is passed. Never use `--allow-empty` against a simulator
+  installation.
+
+---
+
+## Calculating Magnetic Variation (CLI Tool)
+
+```powershell
+.\openairac.exe magvar --lat 55.9726 --lon 37.4146 --date 2026-08-12
 ```
 
 Output:
+
 ```text
-🧭 Lat: 55.9726, Lon: 37.4146, Year: 2026.6
-📍 Magnetic Declination (Variation): +11.8°
+WMM2025 Calculation Result:
+  Date: 2026-08-12 (Decimal Year 2026.6110)
+  Latitude: 55.9726°
+  Longitude: 37.4146°
+  Altitude: 0.0 ft
+  Declination (MagVar): 11.2846°
+  ...
+```
+
+Runway drift analysis:
+
+```powershell
+.\openairac.exe magdrift --designator 09 --heading 96.7 --lat 55.97 --lon 37.41 --date 2026-08-12
 ```

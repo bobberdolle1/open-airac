@@ -34,7 +34,7 @@ jobs:
         run: cargo check --workspace --all-targets
 
       - name: Clippy Linter Check
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
       - name: Run Workspace Tests
-        run: cargo test --workspace
+        run: cargo test --workspace --all-features
