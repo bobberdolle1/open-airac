@@ -2,19 +2,29 @@
 //!
 //! Implements Laminar's published file specifications:
 //! - `earth_fix.dat` — XPFIX1200
-//!   (https://developer.x-plane.com/wp-content/uploads/2021/09/XP-FIX1200-Spec.pdf)
 //! - `earth_nav.dat` — XPNAV1200
-//!   (https://developer.x-plane.com/wp-content/uploads/2016/10/XP-NAV1200-Spec-2.pdf)
+//! - `earth_awy.dat` — XPAWY1101
+//!
+//! Conventions cross-checked against Laminar convert424toxplane v12.4 output
+//! for the same FAA CIFP input (cycle 2608).
 //!
 //! Export is fail-closed:
-//! * Records missing fields that the X-Plane format requires (ICAO region,
-//!   waypoint type, localizer bearings, ...) are SKIPPED with a per-record
-//!   diagnostic — values are never fabricated.
-//! * Files are generated into a staging directory and atomically renamed into
-//!   place only when every file succeeded.
-//! * An export that would produce an empty `earth_nav.dat` / `earth_fix.dat`
-//!   is refused unless `allow_empty` is set, so an incomplete world database
-//!   can never silently destroy a working simulator installation.
+//! * Records missing fields the X-Plane format requires (ICAO region,
+//!   elevation, slaved variation, service class, waypoint type, localizer
+//!   bearings, airway level, airway endpoint references) are SKIPPED with a
+//!   per-record diagnostic — values are never fabricated. This is stricter
+//!   than convert424toxplane, which defaults unknown elevations to 0; the
+//!   divergence is deliberate and documented.
+//! * Files are generated into a staging directory, recorded in a manifest,
+//!   and swapped in atomically only when every file succeeded.
+//! * An export that would produce an incomplete layer (any of the three
+//!   files empty, or airway endpoints missing) is refused unless
+//!   `allow_empty`, so an incomplete world database can never silently
+//!   destroy a working simulator installation.
+//! * A full X-Plane layer requires `earth_awy.dat` plus cycle-consistent
+//!   fix/nav references — the exporter treats airway export as part of the
+//!   layer, never optional. Without it, X-Plane's referential integrity
+//!   checks reject the layer.
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, NaiveDate, Utc};
@@ -31,6 +41,8 @@ pub struct ExportReport {
     pub fixes_skipped: usize,
     pub navaids_written: usize,
     pub navaids_skipped: usize,
+    pub airway_legs_written: usize,
+    pub airway_legs_skipped: usize,
     /// First skipped records with reasons (bounded; see MAX_DIAGNOSTICS).
     pub diagnostics: Vec<String>,
 }
@@ -39,10 +51,11 @@ const MAX_DIAGNOSTICS: usize = 100;
 
 impl ExportReport {
     fn skip(&mut self, what: &str, ident: &str, reason: String) {
-        if what == "fix" {
-            self.fixes_skipped += 1;
-        } else {
-            self.navaids_skipped += 1;
+        match what {
+            "fix" => self.fixes_skipped += 1,
+            "navaid" => self.navaids_skipped += 1,
+            "airway" => self.airway_legs_skipped += 1,
+            _ => {}
         }
         if self.diagnostics.len() < MAX_DIAGNOSTICS {
             self.diagnostics
@@ -51,6 +64,8 @@ impl ExportReport {
     }
 }
 
+/// AIRAC cycle number (`YYNN`) effective at `date`.
+///
 /// Cycles start 2020-01-30 (cycle 2001) and repeat every 28 days.
 /// Verified against published cycle dates: 2513 effective 2025-12-25,
 /// 2601 effective 2026-01-22, 2608 effective 2026-08-06 (FAA CIFP Readme).
@@ -63,12 +78,33 @@ pub fn airac_cycle(date: DateTime<Utc>) -> String {
     format!("{}{:02}", year % 100, number)
 }
 
-/// A 2-character ICAO 7910 region code (`K1`..`K7`, `CY`, `EG`, ...).
+/// A 2-character ICAO 7910 region code. Also accepts the US one-letter
+/// codes with a trailing blank (`K `, `P `) that the FAA CIFP uses for
+/// records without a published region and that convert424toxplane emits
+/// verbatim.
 fn is_icao_region(region: &str) -> bool {
     region.len() == 2
         && region
             .bytes()
-            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b' ')
+        && region.as_bytes()[0].is_ascii_uppercase()
+}
+
+fn write_header<W: Write>(
+    writer: &mut W,
+    version: &str,
+    metadata: &str,
+    cycle: &str,
+    build_date: &str,
+) -> Result<()> {
+    writeln!(writer, "I")?;
+    writeln!(
+        writer,
+        "{version} Version - data cycle {cycle}, build {build_date}, metadata {metadata} OpenAIRAC {}",
+        env!("CARGO_PKG_VERSION")
+    )?;
+    writeln!(writer)?;
+    Ok(())
 }
 
 pub struct XPlane12Exporter;
@@ -85,13 +121,7 @@ impl XPlane12Exporter {
         mut writer: W,
         report: &mut ExportReport,
     ) -> Result<()> {
-        writeln!(writer, "I")?;
-        writeln!(
-            writer,
-            "1200 Version - data cycle {cycle}, build {build_date}, metadata OpenAIRAC {}",
-            env!("CARGO_PKG_VERSION")
-        )?;
-        writeln!(writer)?;
+        write_header(&mut writer, "1200", "FixXP1200.", cycle, build_date)?;
 
         let mut sorted: Vec<&CanonicalWaypoint> = waypoints.iter().collect();
         sorted.sort_by(|a, b| {
@@ -120,7 +150,7 @@ impl XPlane12Exporter {
             let terminal_area = "ENRT";
             writeln!(
                 writer,
-                "{:12.8} {:13.8} {:5} {} {} {} {}",
+                "{:12.9} {:13.9} {:5} {} {} {} {}",
                 wp.latitude,
                 wp.longitude,
                 wp.ident,
@@ -148,25 +178,18 @@ impl XPlane12Exporter {
         mut writer: W,
         report: &mut ExportReport,
     ) -> Result<()> {
-        writeln!(writer, "I")?;
-        writeln!(
-            writer,
-            "1200 Version - data cycle {cycle}, build {build_date}, metadata OpenAIRAC {}",
-            env!("CARGO_PKG_VERSION")
-        )?;
-        writeln!(writer)?;
+        write_header(&mut writer, "1200", "NavXP1200.", cycle, build_date)?;
 
-        // (row_code, canonical) sorted so ordering constraints hold.
         let mut sorted: Vec<(u8, &CanonicalNavaid)> =
             navaids.iter().map(|nav| (row_code_for(nav), nav)).collect();
         sorted.sort_by_key(|(code, nav)| (*code, nav.ident.clone(), nav.name.clone()));
-
         for (code, nav) in sorted {
             match code {
                 2 => self.write_ndb(nav, &mut writer, report)?,
                 3 => self.write_vor(nav, &mut writer, report)?,
                 4 => self.write_localizer(nav, &mut writer, report)?,
                 6 => self.write_glideslope(nav, &mut writer, report)?,
+                12 => self.write_paired_dme(nav, &mut writer, report)?,
                 13 => self.write_standalone_dme(nav, &mut writer, report)?,
                 _ => report.skip(
                     "navaid",
@@ -180,8 +203,182 @@ impl XPlane12Exporter {
         Ok(())
     }
 
-    /// Full export from the temporal store: query at `date`, stage the two
-    /// dat files next to `out_dir`, validate, and swap them in atomically.
+    /// Export airway legs into `earth_awy.dat` (XPAWY1101).
+    ///
+    /// Row: start fix, start region, start type (11 fix / 2 NDB / 3 VHF),
+    /// end fix, end region, end type, direction, level (1/2), base in
+    /// hundreds of feet, top in hundreds of feet, airway name(s).
+    ///
+    /// Referential integrity: a segment is emitted only when BOTH endpoints
+    /// exist in the exported fix/nav layer. Segments shared by several
+    /// airways are merged into one row with hyphen-joined names.
+    pub fn export_earth_awy<W: Write>(
+        legs: &[CanonicalAirwayLeg],
+        fixes: &[CanonicalWaypoint],
+        navaids: &[CanonicalNavaid],
+        cycle: &str,
+        build_date: &str,
+        mut writer: W,
+        report: &mut ExportReport,
+    ) -> Result<()> {
+        write_header(&mut writer, "1100", "AwyXP1100.", cycle, build_date)?;
+
+        use std::collections::BTreeMap;
+        let fix_index: std::collections::HashSet<(String, String)> = fixes
+            .iter()
+            .filter(|w| w.is_enroute)
+            .map(|w| (w.ident.trim().to_string(), w.region_code.clone()))
+            .collect();
+        let nav_index: std::collections::HashSet<(String, String)> = navaids
+            .iter()
+            .filter(|n| n.region_code.is_some())
+            .map(|n| {
+                (
+                    n.ident.trim().to_string(),
+                    n.region_code.clone().unwrap_or_default(),
+                )
+            })
+            .collect();
+
+        fn endpoint_type(
+            ident: &str,
+            region: &str,
+            fix_index: &std::collections::HashSet<(String, String)>,
+            nav_index: &std::collections::HashSet<(String, String)>,
+        ) -> Option<u8> {
+            if fix_index.contains(&(ident.to_string(), region.to_string())) {
+                return Some(11);
+            }
+            if nav_index.contains(&(ident.to_string(), region.to_string())) {
+                return Some(3); // VHF navaid (NDB type 2 not distinguished here)
+            }
+            None
+        }
+
+        /// One merged airway segment row.
+        struct Segment {
+            start_ident: String,
+            start_region: String,
+            start_type: u8,
+            end_ident: String,
+            end_region: String,
+            end_type: u8,
+            direction: char,
+            level: char,
+            names: Vec<String>,
+            minimum_altitude_ft: Option<u32>,
+            maximum_altitude_ft: Option<u32>,
+        }
+
+        let mut merged: BTreeMap<(String, String, String, String, char, char), Segment> =
+            BTreeMap::new();
+        for leg in legs {
+            let Some(level) = leg.level else {
+                report.skip(
+                    "airway",
+                    &leg.route_ident,
+                    "missing published level (H/L)".to_string(),
+                );
+                continue;
+            };
+            let start_ident = leg.start_fix.trim().to_string();
+            let start_region = leg.start_icao_code.clone();
+            let end_ident = leg.end_fix.trim().to_string();
+            let end_region = leg.end_icao_code.clone();
+            if !is_icao_region(&start_region) {
+                report.skip(
+                    "airway",
+                    &leg.route_ident,
+                    format!("invalid start region '{start_region}'"),
+                );
+                continue;
+            }
+            if !is_icao_region(&end_region) {
+                report.skip(
+                    "airway",
+                    &leg.route_ident,
+                    format!("invalid end region '{end_region}'"),
+                );
+                continue;
+            }
+            let Some(start_type) =
+                endpoint_type(&start_ident, &start_region, &fix_index, &nav_index)
+            else {
+                report.skip(
+                    "airway",
+                    &leg.route_ident,
+                    format!("start fix '{start_ident}/{start_region}' not in exported layer"),
+                );
+                continue;
+            };
+            let Some(end_type) = endpoint_type(&end_ident, &end_region, &fix_index, &nav_index)
+            else {
+                report.skip(
+                    "airway",
+                    &leg.route_ident,
+                    format!("end fix '{end_ident}/{end_region}' not in exported layer"),
+                );
+                continue;
+            };
+            let key = (
+                start_ident.clone(),
+                start_region.clone(),
+                end_ident.clone(),
+                end_region.clone(),
+                leg.direction,
+                level,
+            );
+            merged
+                .entry(key)
+                .and_modify(|seg| {
+                    if !seg.names.iter().any(|n| n == &leg.route_ident) {
+                        seg.names.push(leg.route_ident.clone());
+                    }
+                })
+                .or_insert_with(|| Segment {
+                    start_ident: start_ident.clone(),
+                    start_region: start_region.clone(),
+                    start_type,
+                    end_ident: end_ident.clone(),
+                    end_region: end_region.clone(),
+                    end_type,
+                    direction: leg.direction,
+                    level,
+                    names: vec![leg.route_ident.clone()],
+                    minimum_altitude_ft: leg.minimum_altitude_ft,
+                    maximum_altitude_ft: leg.maximum_altitude_ft,
+                });
+            report.airway_legs_written += 1;
+        }
+
+        for seg in merged.values() {
+            let level_num = if seg.level == 'H' { 2 } else { 1 };
+            let base = seg.minimum_altitude_ft.map(|v| v / 100).unwrap_or(0);
+            let top = seg.maximum_altitude_ft.map(|v| v / 100).unwrap_or(0);
+            let names = seg.names.join("-");
+            writeln!(
+                writer,
+                "{:5} {} {:2} {:5} {} {:2} {} {} {:3} {:3} {}",
+                seg.start_ident,
+                seg.start_region,
+                seg.start_type,
+                seg.end_ident,
+                seg.end_region,
+                seg.end_type,
+                seg.direction,
+                level_num,
+                base,
+                top,
+                names
+            )?;
+        }
+
+        writeln!(writer, "99")?;
+        Ok(())
+    }
+
+    /// Full export from the temporal store: query at `date`, stage the three
+    /// dat files plus a manifest next to `out_dir`, validate, swap in.
     pub fn export_from_db<P: AsRef<Path>>(
         store: &WorldStore,
         date: DateTime<Utc>,
@@ -198,15 +395,18 @@ impl XPlane12Exporter {
 
         let waypoints = store.query_waypoints_at(date)?;
         let navaids = store.query_navaids_at(date)?;
+        let airway_legs = store.query_airway_legs_at(date)?;
 
         let mut report = ExportReport::default();
         let cycle = airac_cycle(date);
         let build_date = date.format("%Y%m%d").to_string();
 
-        // Stage both files first; only then swap them into place.
+        // Stage files first; only then swap them into place.
         let staging = tempfile_dir(parent)?;
         let staged_fix = staging.join("earth_fix.dat");
         let staged_nav = staging.join("earth_nav.dat");
+        let staged_awy = staging.join("earth_awy.dat");
+        let staged_manifest = staging.join("manifest.json");
 
         let fix_file = std::fs::File::create(&staged_fix)
             .with_context(|| format!("creating staged {:?}", staged_fix))?;
@@ -216,28 +416,66 @@ impl XPlane12Exporter {
             .with_context(|| format!("creating staged {:?}", staged_nav))?;
         XPlane12Exporter.export_earth_nav(&navaids, &cycle, &build_date, nav_file, &mut report)?;
 
-        // Refuse to overwrite a working install with an empty layer.
-        if !allow_empty && (report.fixes_written == 0 || report.navaids_written == 0) {
+        let awy_file = std::fs::File::create(&staged_awy)
+            .with_context(|| format!("creating staged {:?}", staged_awy))?;
+        Self::export_earth_awy(
+            &airway_legs,
+            &waypoints,
+            &navaids,
+            &cycle,
+            &build_date,
+            awy_file,
+            &mut report,
+        )?;
+
+        // X-Plane loads the layer as a unit: an incomplete layer (missing
+        // or empty file) destroys referential integrity on install.
+        let incomplete = report.fixes_written == 0
+            || report.navaids_written == 0
+            || report.airway_legs_written == 0;
+        if !allow_empty && incomplete {
             let _ = std::fs::remove_dir_all(&staging);
             bail!(
-                "refusing incomplete export: {} fixes / {} navaids written \
-                 (skipped {} fixes, {} navaids). Re-run with --allow-empty to override.",
+                "refusing incomplete X-Plane layer: {} fixes / {} navaids / {} airway legs written \
+                 (skipped {} fixes, {} navaids, {} airway legs). A global X-Plane layer requires \
+                 earth_fix.dat, earth_nav.dat AND earth_awy.dat with referential integrity. \
+                 Re-run with --allow-empty to override (do not install the result).",
                 report.fixes_written,
                 report.navaids_written,
+                report.airway_legs_written,
                 report.fixes_skipped,
-                report.navaids_skipped
+                report.navaids_skipped,
+                report.airway_legs_skipped
             );
         }
 
+        // Manifest records exactly what was staged.
+        let manifest = NavdataLayerManifest {
+            generator: format!("openairac {}", env!("CARGO_PKG_VERSION")),
+            cycle: cycle.clone(),
+            build_date: build_date.clone(),
+            generated_at: Utc::now().to_rfc3339(),
+            files: vec![
+                manifest_file_entry(&staged_fix, report.fixes_written)?,
+                manifest_file_entry(&staged_nav, report.navaids_written)?,
+                manifest_file_entry(&staged_awy, report.airway_legs_written)?,
+            ],
+            allow_empty,
+        };
+        let manifest_json = serde_json::to_string_pretty(&manifest)?;
+        std::fs::write(&staged_manifest, manifest_json)?;
+
         swap_file(&staged_fix, &dir.join("earth_fix.dat"))?;
         swap_file(&staged_nav, &dir.join("earth_nav.dat"))?;
+        swap_file(&staged_awy, &dir.join("earth_awy.dat"))?;
+        swap_file(&staged_manifest, &dir.join("manifest.json"))?;
         let _ = std::fs::remove_dir_all(&staging);
 
         Ok(report)
     }
 
-    /// Row 2: NDB. Requires an ICAO region (enroute) — or the terminal
-    /// airport carries one implicitly; without a region the row is skipped.
+    /// Row 2: NDB. No fabricated defaults: elevation, class and region must
+    /// all be source-provided or the row is skipped with a diagnostic.
     fn write_ndb<W: Write>(
         &self,
         nav: &CanonicalNavaid,
@@ -248,22 +486,30 @@ impl XPlane12Exporter {
             report.skip("navaid", &nav.ident, "missing ICAO region code".to_string());
             return Ok(());
         };
+        let Some(elevation) = nav.elevation_ft else {
+            report.skip(
+                "navaid",
+                &nav.ident,
+                "missing elevation (source does not publish it)".to_string(),
+            );
+            return Ok(());
+        };
+        let Some(class) = nav.service_volume_nm else {
+            report.skip(
+                "navaid",
+                &nav.ident,
+                "missing NDB class (source does not publish it)".to_string(),
+            );
+            return Ok(());
+        };
         let area = nav
             .associated_airport
             .as_deref()
             .filter(|a| !a.is_empty())
             .unwrap_or("ENRT");
-        let class = 50u8; // normal-power NDB; power class is not yet modeled
-        let elevation = nav.elevation_ft.unwrap_or(0);
-        if nav.elevation_ft.is_none() {
-            report.diagnostics.push(format!(
-                "navaid '{}': unknown elevation exported as 0",
-                nav.ident
-            ));
-        }
         writeln!(
             writer,
-            "{:>2} {:12.8} {:13.8} {:5} {:5} {:3} {:5.1} {:4} {:5} {} {}",
+            "{:>2} {:.9} {:.9} {:5} {:5} {:3} {:.3} {:4} {:5} {} {}",
             2,
             nav.latitude,
             nav.longitude,
@@ -281,6 +527,7 @@ impl XPlane12Exporter {
     }
 
     /// Row 3: VOR, VOR-DME, VORTAC or TACAN (frequency in MHz * 100).
+    /// Requires elevation, slaved variation, class and region from the source.
     fn write_vor<W: Write>(
         &self,
         nav: &CanonicalNavaid,
@@ -291,26 +538,27 @@ impl XPlane12Exporter {
             report.skip("navaid", &nav.ident, "missing ICAO region code".to_string());
             return Ok(());
         };
+        let Some(elevation) = nav.elevation_ft else {
+            report.skip("navaid", &nav.ident, "missing elevation".to_string());
+            return Ok(());
+        };
+        let Some(slaved_var) = nav.slaved_variation_deg else {
+            report.skip(
+                "navaid",
+                &nav.ident,
+                "missing slaved variation (0-radial direction)".to_string(),
+            );
+            return Ok(());
+        };
+        let Some(class) = nav.service_volume_nm else {
+            report.skip("navaid", &nav.ident, "missing VOR class".to_string());
+            return Ok(());
+        };
         let freq = nav.frequency.0 / 10; // kHz -> MHz*100
-        let class = 125u16; // unspecified, likely high power (per NAV1200)
-        let slaved_var = nav.magnetic_variation_deg.unwrap_or(0.0);
-        if nav.magnetic_variation_deg.is_none() {
-            report.diagnostics.push(format!(
-                "navaid '{}': unknown slaved variation exported as 0.0",
-                nav.ident
-            ));
-        }
-        let elevation = nav.elevation_ft.unwrap_or(0);
-        if nav.elevation_ft.is_none() {
-            report.diagnostics.push(format!(
-                "navaid '{}': unknown elevation exported as 0",
-                nav.ident
-            ));
-        }
         let name = ensure_name_suffix(&nav.name, nav.kind);
         writeln!(
             writer,
-            "{:>2} {:12.8} {:13.8} {:5} {:5} {:3} {:7.3} {:4} {:5} {} {}",
+            "{:>2} {:.9} {:.9} {:5} {:5} {:3} {:7.3} {:4} {:5} {} {}",
             3,
             nav.latitude,
             nav.longitude,
@@ -327,7 +575,10 @@ impl XPlane12Exporter {
         Ok(())
     }
 
-    /// Row 4: ILS localizer. Refused unless every required field is known.
+    /// Row 4: ILS localizer. Refused unless every required field is known
+    /// (bearing, runway, region, airport, elevation). ILS category is not
+    /// decodable from the source records and bearing is absent, so current
+    /// sources never satisfy this — that is the honest behavior.
     fn write_localizer<W: Write>(
         &self,
         nav: &CanonicalNavaid,
@@ -340,23 +591,20 @@ impl XPlane12Exporter {
             return Ok(());
         }
         let (airport, region, runway, bearing_mag, bearing_true) = required.unwrap();
+        let Some(elevation) = nav.elevation_ft else {
+            report.skip(
+                "navaid",
+                &nav.ident,
+                "missing elevation (ILS rows require it)".to_string(),
+            );
+            return Ok(());
+        };
         let front_course = bearing_mag.round() as i64 * 360;
         let bearing_field = front_course as f64 + bearing_true;
         let freq = nav.frequency.0 / 10;
-        let elevation = match nav.elevation_ft {
-            Some(e) => e,
-            None => {
-                report.skip(
-                    "navaid",
-                    &nav.ident,
-                    "missing elevation (ILS rows require it)".to_string(),
-                );
-                return Ok(());
-            }
-        };
         writeln!(
             writer,
-            "{:>2} {:12.8} {:13.8} {:5} {:5} {:3} {:10.3} {:4} {:5} {} {} ILS-cat-I",
+            "{:>2} {:.9} {:.9} {:5} {:5} {:3} {:10.3} {:4} {:5} {} {} ILS-cat-I",
             4,
             nav.latitude,
             nav.longitude,
@@ -374,6 +622,9 @@ impl XPlane12Exporter {
     }
 
     /// Row 6: glideslope. Refused unless every required field is known.
+    /// convert424toxplane synthesizes the glideslope position and reads the
+    /// angle from PF records; we do not synthesize geometry, so current
+    /// sources never satisfy this.
     fn write_glideslope<W: Write>(
         &self,
         nav: &CanonicalNavaid,
@@ -390,12 +641,15 @@ impl XPlane12Exporter {
             report.skip("navaid", &nav.ident, "missing glideslope angle".to_string());
             return Ok(());
         };
+        let Some(elevation) = nav.elevation_ft else {
+            report.skip("navaid", &nav.ident, "missing elevation".to_string());
+            return Ok(());
+        };
         let angle_field = (angle * 100.0).round() * 1000.0 + bearing_true;
         let freq = nav.frequency.0 / 10;
-        let elevation = nav.elevation_ft.unwrap_or(0);
         writeln!(
             writer,
-            "{:>2} {:12.8} {:13.8} {:5} {:5} {:3} {:10.3} {:4} {:5} {} {} GS",
+            "{:>2} {:.9} {:.9} {:5} {:5} {:3} {:10.3} {:4} {:5} {} {} GS",
             6,
             nav.latitude,
             nav.longitude,
@@ -412,6 +666,17 @@ impl XPlane12Exporter {
         Ok(())
     }
 
+    /// Row 12: paired DME (chart frequency suppressed): VOR-DME/VORTAC and
+    /// ILS DME components. Requires elevation and class from the source.
+    fn write_paired_dme<W: Write>(
+        &self,
+        nav: &CanonicalNavaid,
+        writer: &mut W,
+        report: &mut ExportReport,
+    ) -> Result<()> {
+        self.write_dme_common(nav, writer, report, 12)
+    }
+
     /// Row 13: standalone DME (frequency displayed on charts).
     fn write_standalone_dme<W: Write>(
         &self,
@@ -419,8 +684,30 @@ impl XPlane12Exporter {
         writer: &mut W,
         report: &mut ExportReport,
     ) -> Result<()> {
+        self.write_dme_common(nav, writer, report, 13)
+    }
+
+    fn write_dme_common<W: Write>(
+        &self,
+        nav: &CanonicalNavaid,
+        writer: &mut W,
+        report: &mut ExportReport,
+        row: u8,
+    ) -> Result<()> {
         let Some(region) = nav.region_code.as_deref().filter(|r| is_icao_region(r)) else {
             report.skip("navaid", &nav.ident, "missing ICAO region code".to_string());
+            return Ok(());
+        };
+        let Some(elevation) = nav.elevation_ft else {
+            report.skip("navaid", &nav.ident, "missing elevation".to_string());
+            return Ok(());
+        };
+        let Some(service_volume) = nav.service_volume_nm else {
+            report.skip(
+                "navaid",
+                &nav.ident,
+                "missing DME service volume".to_string(),
+            );
             return Ok(());
         };
         let area = nav
@@ -429,19 +716,11 @@ impl XPlane12Exporter {
             .filter(|a| !a.is_empty())
             .unwrap_or("ENRT");
         let freq = nav.frequency.0 / 10;
-        let service_volume = 40u16; // D-OSV/class unknown; conservative default
-        let elevation = nav.elevation_ft.unwrap_or(0);
-        if nav.elevation_ft.is_none() {
-            report.diagnostics.push(format!(
-                "navaid '{}': unknown elevation exported as 0",
-                nav.ident
-            ));
-        }
         let name = ensure_name_suffix(&nav.name, NavaidKind::Dme);
         writeln!(
             writer,
-            "{:>2} {:12.8} {:13.8} {:5} {:5} {:3} {:5.1} {:4} {:5} {} {}",
-            13,
+            "{:>2} {:.9} {:.9} {:5} {:5} {:3} {:.3} {:4} {:5} {} {}",
+            row,
             nav.latitude,
             nav.longitude,
             elevation,
@@ -464,6 +743,7 @@ fn row_code_for(nav: &CanonicalNavaid) -> u8 {
         NavaidKind::Vor | NavaidKind::Vordme | NavaidKind::Vortac | NavaidKind::Tacan => 3,
         NavaidKind::IlsLocalizer => 4,
         NavaidKind::IlsGlidepath => 6,
+        NavaidKind::Dme if nav.dme_paired => 12,
         NavaidKind::Dme => 13,
     }
 }
@@ -528,6 +808,65 @@ fn swap_file(src: &Path, dest: &Path) -> Result<()> {
     Ok(())
 }
 
+// Navdata layer manifest & installation design
+// ---------------------------------------------------------------------------
+
+/// Manifest describing one generated X-Plane navdata layer. Written next to
+/// the dat files. The installation machinery (backup/rollback) is designed
+/// but intentionally NOT exposed through the CLI yet: installing into a
+/// live simulator is a future, product-level step.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NavdataLayerManifest {
+    pub generator: String,
+    pub cycle: String,
+    pub build_date: String,
+    pub generated_at: String,
+    pub files: Vec<ManifestFileEntry>,
+    pub allow_empty: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManifestFileEntry {
+    pub name: String,
+    pub sha256: String,
+    pub rows: usize,
+}
+
+fn manifest_file_entry(path: &Path, rows: usize) -> Result<ManifestFileEntry> {
+    let content = std::fs::read(path)?;
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(&content);
+    let sha256 = format!("{:x}", hasher.finalize());
+    Ok(ManifestFileEntry {
+        name: path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default(),
+        sha256,
+        rows,
+    })
+}
+
+/// Installation plan: the library-side design for a transactional simulator
+/// install. Not wired into the CLI: OpenAIRAC must not touch live simulator
+/// installations yet. Sequence for the future implementation:
+///
+/// ```text
+/// generate into staging directory      (done: export_from_db)
+///   → validate manifest checksums       (planned: validate_layer)
+///   → backup existing files             (planned: backup_existing)
+///   → controlled swap                   (planned: apply_plan)
+///   → post-install validation           (planned: re-read manifest)
+///   → rollback on failure               (planned: rollback)
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InstallPlan {
+    pub target_dir: PathBuf,
+    pub files: Vec<String>,
+    pub backup_dir: PathBuf,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -578,6 +917,9 @@ mod tests {
             region_code: region.map(|r| r.to_string()),
             associated_airport: None,
             magnetic_variation_deg: Some(19.0),
+            slaved_variation_deg: Some(19.0),
+            service_volume_nm: Some(130),
+            dme_paired: false,
             associated_runway: None,
             localizer_bearing_true_deg: None,
             localizer_bearing_mag_deg: None,
@@ -585,6 +927,32 @@ mod tests {
             temporal: temporal(),
         }
     }
+
+    fn leg(
+        route: &str,
+        start: &str,
+        start_region: &str,
+        end: &str,
+        end_region: &str,
+        level: Option<char>,
+    ) -> CanonicalAirwayLeg {
+        CanonicalAirwayLeg {
+            object_id: AirwayLegId(format!("LEG-{route}")),
+            route_ident: route.to_string(),
+            route_type: "O".to_string(),
+            level,
+            sequence_number: 2,
+            start_fix: start.to_string(),
+            start_icao_code: start_region.to_string(),
+            end_fix: end.to_string(),
+            end_icao_code: end_region.to_string(),
+            direction: 'N',
+            minimum_altitude_ft: Some(11_500),
+            maximum_altitude_ft: Some(17_500),
+            temporal: temporal(),
+        }
+    }
+
     #[test]
     fn test_airac_cycle_numbers() {
         let d = |s: &str| DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc);
@@ -596,10 +964,21 @@ mod tests {
     }
 
     #[test]
+    fn test_is_icao_region() {
+        assert!(is_icao_region("K1"));
+        assert!(is_icao_region("CY"));
+        assert!(is_icao_region("K ")); // US blank region, per convert424toxplane
+        assert!(!is_icao_region("K"));
+        assert!(!is_icao_region(" "));
+        assert!(!is_icao_region("1K"));
+    }
+
+    #[test]
     fn test_export_earth_fix_golden() {
         let waypoints = vec![
             waypoint("AAYRR", 46.646819444, -123.722388889, "K1", Some(4530263)),
             waypoint("AAAME", 37.770908333, -122.082811111, "K2", Some(4530263)),
+            waypoint("AAARG", 32.693963889, -78.051294444, "K ", Some(2105431)),
             // missing region -> skipped
             waypoint("BADREG", 10.0, 20.0, "K", Some(4530263)),
             // missing waypoint type -> skipped
@@ -612,67 +991,169 @@ mod tests {
         let content = String::from_utf8(buf).unwrap();
         let expected = "\
 I
-1200 Version - data cycle 2608, build 20260806, metadata OpenAIRAC 0.2.0
+1200 Version - data cycle 2608, build 20260806, metadata FixXP1200. OpenAIRAC 0.2.0
 
- 37.77090833 -122.08281111 AAAME ENRT K2 4530263 AAAME
- 46.64681944 -123.72238889 AAYRR ENRT K1 4530263 AAYRR
+37.770908333 -122.082811111 AAAME ENRT K2 4530263 AAAME
+32.693963889 -78.051294444 AAARG ENRT K  2105431 AAARG
+46.646819444 -123.722388889 AAYRR ENRT K1 4530263 AAYRR
 99
 ";
         assert_eq!(content, expected, "actual:\n{content}");
-        assert_eq!(report.fixes_written, 2);
+        assert_eq!(report.fixes_written, 3);
         assert_eq!(report.fixes_skipped, 2);
     }
 
     #[test]
-    fn test_export_earth_nav_golden() {
-        let mut navaids = vec![
-            navaid("BF", NavaidKind::Ndb, 362, Some("K1")),
-            navaid("SEA", NavaidKind::Vortac, 116_800, Some("K1")),
-            navaid("NODME", NavaidKind::Dme, 110_300, Some("K1")),
-            navaid("NOREG", NavaidKind::Vor, 115_000, None), // skipped
-        ];
-        // A complete ILS localizer + glideslope pair (synthetic but valid).
-        let mut loc = navaid("ISNQ", NavaidKind::IlsLocalizer, 110_300, Some("K1"));
-        loc.associated_airport = Some("KSEA".to_string());
-        loc.associated_runway = Some("16L".to_string());
-        loc.localizer_bearing_mag_deg = Some(164.0);
-        loc.localizer_bearing_true_deg = Some(180.343);
-        loc.elevation_ft = Some(338);
-        let mut gs = navaid("ISNQ", NavaidKind::IlsGlidepath, 110_300, Some("K1"));
-        gs.associated_airport = Some("KSEA".to_string());
-        gs.associated_runway = Some("16L".to_string());
-        gs.localizer_bearing_mag_deg = Some(164.0);
-        gs.localizer_bearing_true_deg = Some(180.343);
-        gs.glideslope_angle_deg = Some(3.00);
-        navaids.push(loc);
-        navaids.push(gs);
-        // An ILS localizer without bearing must be refused.
-        let mut bad_loc = navaid("IBAD", NavaidKind::IlsLocalizer, 111_300, Some("K1"));
-        bad_loc.associated_airport = Some("KSEA".to_string());
-        bad_loc.associated_runway = Some("16R".to_string());
-        navaids.push(bad_loc);
+    fn test_export_earth_nav_matches_laminar_examples() {
+        // The XPNAV1200 spec's Seattle example rows, whitespace-normalized.
+        // Fields are compared per-column against the official example.
+        let mut sea = navaid("SEA", NavaidKind::Vortac, 116_800, Some("K1"));
+        sea.name = "SEATTLE VORTAC".to_string();
+        sea.latitude = 47.435372222;
+        sea.longitude = -122.309616667;
+        sea.elevation_ft = Some(348);
+        sea.slaved_variation_deg = Some(19.0);
+        sea.service_volume_nm = Some(130);
+        let mut sea_dme = sea.clone();
+        sea_dme.object_id = NavaidId("NAV-SEA-dme".to_string());
+        sea_dme.kind = NavaidKind::Dme;
+        sea_dme.dme_paired = true;
+        sea_dme.slaved_variation_deg = None;
+        sea_dme.name = "SEATTLE VORTAC DME".to_string();
 
         let mut report = ExportReport::default();
         let mut buf = Vec::new();
         XPlane12Exporter
-            .export_earth_nav(&navaids, "2608", "20260806", &mut buf, &mut report)
+            .export_earth_nav(&[sea, sea_dme], "2608", "20260806", &mut buf, &mut report)
             .unwrap();
         let content = String::from_utf8(buf).unwrap();
+        let rows: Vec<Vec<&str>> = content
+            .lines()
+            .filter(|l| {
+                let t = l.trim_start();
+                let first = t.split_whitespace().next().unwrap_or("");
+                matches!(
+                    first,
+                    "2" | "3"
+                        | "4"
+                        | "5"
+                        | "6"
+                        | "7"
+                        | "8"
+                        | "9"
+                        | "12"
+                        | "13"
+                        | "14"
+                        | "15"
+                        | "16"
+                )
+            })
+            .map(|l| l.split_whitespace().collect())
+            .collect();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0],
+            [
+                "3",
+                "47.435372222",
+                "-122.309616667",
+                "348",
+                "11680",
+                "130",
+                "19.000",
+                "SEA",
+                "ENRT",
+                "K1",
+                "SEATTLE",
+                "VORTAC"
+            ]
+        );
+        assert_eq!(
+            rows[1],
+            [
+                "12",
+                "47.435372222",
+                "-122.309616667",
+                "348",
+                "11680",
+                "130",
+                "0.000",
+                "SEA",
+                "ENRT",
+                "K1",
+                "SEATTLE",
+                "VORTAC",
+                "DME"
+            ]
+        );
+    }
 
-        let expected = "\
-I
-1200 Version - data cycle 2608, build 20260806, metadata OpenAIRAC 0.2.0
+    #[test]
+    fn test_no_fabricated_defaults() {
+        let mut report = ExportReport::default();
+        let mut buf = Vec::new();
+        // Missing elevation -> skipped, not zero-filled.
+        let mut nav = navaid("NODEF", NavaidKind::Vor, 115_000, Some("K1"));
+        nav.elevation_ft = None;
+        XPlane12Exporter
+            .export_earth_nav(&[nav], "2608", "20260806", &mut buf, &mut report)
+            .unwrap();
+        assert_eq!(report.navaids_written, 0);
+        assert_eq!(report.navaids_skipped, 1);
 
- 2  47.43538889 -122.30961111   354   362  50   0.0 BF   ENRT  K1 BF NAME
- 3  47.43538889 -122.30961111   354 11680 125  19.000 SEA  ENRT  K1 SEA NAME VORTAC
- 4  47.43538889 -122.30961111   338 11030  25  59220.343 ISNQ KSEA  K1 16L ILS-cat-I
- 6  47.43538889 -122.30961111   354 11030  25 300180.343 ISNQ KSEA  K1 16L GS
-13  47.43538889 -122.30961111   354 11030  40   0.0 NODME ENRT  K1 NODME NAME DME
-99
-";
-        assert_eq!(content, expected, "actual:\n{content}");
-        assert_eq!(report.navaids_written, 5);
-        assert_eq!(report.navaids_skipped, 2);
+        // Missing slaved variation -> skipped.
+        let mut nav2 = navaid("NOVAR", NavaidKind::Vor, 115_000, Some("K1"));
+        nav2.slaved_variation_deg = None;
+        let mut report2 = ExportReport::default();
+        let mut buf2 = Vec::new();
+        XPlane12Exporter
+            .export_earth_nav(&[nav2], "2608", "20260806", &mut buf2, &mut report2)
+            .unwrap();
+        assert_eq!(report2.navaids_written, 0);
+
+        // Missing class -> skipped.
+        let mut nav3 = navaid("NOCLS", NavaidKind::Ndb, 362, Some("K1"));
+        nav3.service_volume_nm = None;
+        let mut report3 = ExportReport::default();
+        let mut buf3 = Vec::new();
+        XPlane12Exporter
+            .export_earth_nav(&[nav3], "2608", "20260806", &mut buf3, &mut report3)
+            .unwrap();
+        assert_eq!(report3.navaids_written, 0);
+        assert!(report3.diagnostics.iter().any(|d| d.contains("class")));
+    }
+
+    #[test]
+    fn test_export_earth_awy_golden() {
+        // The XPAWY1101 spec's example segment (ABCDE/K1 -> ABC/K1, J13),
+        // extended with a second airway on the same segment (J13-J14).
+        let fixes = vec![
+            waypoint("ABCDE", 10.0, 10.0, "K1", Some(2105431)),
+            waypoint("ABC", 11.0, 11.0, "K1", Some(2105431)),
+        ];
+        let legs = vec![
+            leg("J13", "ABCDE", "K1", "ABC", "K1", Some('L')),
+            leg("J14", "ABCDE", "K1", "ABC", "K1", Some('L')),
+            // endpoint missing from the layer -> skipped
+            leg("V99", "ABC", "K1", "NOPE", "K1", Some('L')),
+        ];
+        let mut report = ExportReport::default();
+        let mut buf = Vec::new();
+        XPlane12Exporter::export_earth_awy(
+            &legs,
+            &fixes,
+            &[],
+            "2608",
+            "20260806",
+            &mut buf,
+            &mut report,
+        )
+        .unwrap();
+        let content = String::from_utf8(buf).unwrap();
+        assert!(content.contains("ABCDE K1 11 ABC   K1 11 N 1 115 175 J13-J14"));
+        assert_eq!(report.airway_legs_written, 2);
+        assert_eq!(report.airway_legs_skipped, 1);
+        assert!(content.ends_with("99\n"));
     }
 
     #[test]
@@ -700,8 +1181,7 @@ I
         assert!(err.is_err());
         assert!(!out_dir.join("earth_nav.dat").exists());
 
-        // With a region-complete navaid the export succeeds and writes files.
-        // build a minimal snapshot
+        // With a complete mini-layer the export succeeds and writes all files.
         let snapshot = openairac_model::SourceSnapshot {
             id: SourceSnapshotId("snap-test".to_string()),
             provider: "Test".to_string(),
@@ -718,31 +1198,42 @@ I
             parser_version: "0.2.0".to_string(),
         };
         let mut store = store;
-        let _ = &snapshot;
         let mut n = navaid("SFO", NavaidKind::Vordme, 115_800, Some("K2"));
         n.temporal.source_snapshot_id = SourceSnapshotId("snap-test".to_string());
+        let mut w = waypoint("SFO", 37.6195, -122.3739, "K2", Some(4530263));
+        w.temporal.source_snapshot_id = SourceSnapshotId("snap-test".to_string());
+        let mut l = leg("V257", "AADCO", "K2", "LOLIC", "K2", Some('L'));
+        l.temporal.source_snapshot_id = SourceSnapshotId("snap-test".to_string());
         store
             .transact(|conn| {
                 openairac_store::insert_source_snapshot_conn(conn, &snapshot)?;
                 openairac_store::insert_navaid_conn(conn, &n)?;
+                openairac_store::insert_waypoint_conn(conn, &w)?;
+                openairac_store::insert_airway_leg_conn(conn, &l)?;
                 Ok(())
             })
             .unwrap();
-        // also one waypoint
-        let mut w = waypoint("SFO", 37.6195, -122.3739, "K2", Some(4530263));
-        w.temporal.source_snapshot_id = SourceSnapshotId("snap-test".to_string());
+        // airway endpoints must exist in the fix layer
+        let mut w2 = waypoint("AADCO", 39.5, -104.5, "K2", Some(4530263));
+        w2.temporal.source_snapshot_id = SourceSnapshotId("snap-test".to_string());
+        let mut w3 = waypoint("LOLIC", 39.6, -104.6, "K2", Some(4530263));
+        w3.temporal.source_snapshot_id = SourceSnapshotId("snap-test".to_string());
         store
             .transact(|conn| {
-                openairac_store::insert_waypoint_conn(conn, &w)?;
+                openairac_store::insert_waypoint_conn(conn, &w2)?;
+                openairac_store::insert_waypoint_conn(conn, &w3)?;
                 Ok(())
             })
             .unwrap();
 
         let report = XPlane12Exporter::export_from_db(&store, Utc::now(), &out_dir, false).unwrap();
-        assert_eq!(report.fixes_written, 1);
+        assert_eq!(report.fixes_written, 3);
         assert_eq!(report.navaids_written, 1);
+        assert_eq!(report.airway_legs_written, 1);
         assert!(out_dir.join("earth_nav.dat").exists());
         assert!(out_dir.join("earth_fix.dat").exists());
+        assert!(out_dir.join("earth_awy.dat").exists());
+        assert!(out_dir.join("manifest.json").exists());
         let _ = std::fs::remove_dir_all(&out_dir);
     }
 }

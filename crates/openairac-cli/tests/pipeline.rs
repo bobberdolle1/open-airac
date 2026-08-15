@@ -6,7 +6,7 @@
 //!    → temporal SQLite store
 //!    → temporal queries (world_at)
 //!    → structural validation
-//!    → X-Plane 12 export (staged, atomic)
+//!    → X-Plane 12 export (staged, manifest, atomic; full layer)
 //! ```
 
 use chrono::{DateTime, TimeDelta, Utc};
@@ -30,17 +30,22 @@ id,airport_ref,airport_ident,length_ft,width_ft,surface,le_ident,le_latitude_deg
 ";
 
 const NAVAIDS_CSV: &str = "\
-id,filename,ident,name,type,frequency_khz,latitude_deg,longitude_deg,elevation_ft,associated_airport,magnetic_variation_deg
-201,SFO.navaid,SFO,San Francisco VOR-DME,VOR-DME,115800,37.6195,-122.3739,13,KSFO,-13.0
-202,ABI.navaid,ABI,Abilene VORTAC,VORTAC,113700,32.4813,-99.8635,1809,,10.0
+id,filename,ident,name,type,frequency_khz,latitude_deg,longitude_deg,elevation_ft,iso_country,dme_frequency_khz,dme_channel,dme_latitude_deg,dme_longitude_deg,dme_elevation_ft,slaved_variation_deg,magnetic_variation_deg,usageType,power,associated_airport
+201,SFO.navaid,SFO,San Francisco VOR-DME,VOR-DME,115800,37.6195,-122.3739,13,US,115800,115X,37.6195,-122.3739,13,-13.0,-13.0,BOTH,HIGH,KSFO
+202,ABI.navaid,ABI,Abilene VORTAC,VORTAC,113700,32.4813,-99.8635,1809,US,113700,101X,32.4813,-99.8635,1809,10.0,10.0,BOTH,HIGH,
 ";
-
 // Real records from FAA CIFP cycle 2608 (public domain US Government work).
+// Includes an A315 airway chain whose endpoints are also present as fixes.
 const CIFP_CONTENT: &str = "\
 SUSAEAENRT   AABBZ K50    W     N37522460W086183136                       W0047     NAR           AABBZ                    272032407
 SUSAD        ABI   K4011370VTHW N32285279W099514843    N32285279W099514843E0100018092     NARABILENE                       249601810
 SUSADB       AA    K3003650HOLW N47003259W096485466                       E0040           NARKENIE                         268711805
-SUSAERENRT   J1    K 0J1    001J1  A                                           NAR           J1                         200091305   
+SUSAER       V257        0100ZBV  MYD 0V    OL                        13540185     05000     60000                         557442605
+SUSAER       V257        0110SWIMMK7EA0E    OL                        135404691355 08000     60000                         557452605
+SUSAER       V257        0120TINKYK EA0E    OL                        135702181357 12500     60000                         557462411
+SUSAEAENRT   ZBV   MY0    W     N25181448W076392521                       E0106     NAR           ZBV                      272032407
+SUSAEAENRT   SWIMM K70    W     N26111020W078413037                       W0075     NAR           SWIMM                    272032407
+SUSAEAENRT   TINKY K 0    W     N27120007W078412508                       W0062     NAR           TINKY                    272032407
 ";
 
 fn fixture_dataset(name: &str, content: &str, retrieved_at: DateTime<Utc>) -> FetchedDataset {
@@ -83,7 +88,11 @@ fn test_fixture_to_export_pipeline() {
             "ingest errors: {:?}",
             report.errors
         );
-        assert_eq!(report.records_accepted(), 2);
+        // airports: 2, runways: 2, navaids: 2 facilities + 2 paired DME rows.
+        assert_eq!(
+            report.records_accepted(),
+            if name == "navaids" { 4 } else { 2 }
+        );
     }
 
     // ---- 2. Ingest FAA CIFP fixtures ---------------------------------------
@@ -116,9 +125,10 @@ fn test_fixture_to_export_pipeline() {
         &mut store,
     )
     .unwrap();
-    assert_eq!(scan.waypoints_decoded, 1);
-    assert_eq!(scan.navaids_decoded, 2);
-    assert_eq!(scan.unsupported_records, 1); // the ER airway record
+    assert_eq!(scan.waypoints_decoded, 4);
+    // ABI VORTAC (+ paired DME) + KENIE NDB = 3 navaid rows.
+    assert_eq!(scan.navaids_decoded, 3);
+    assert_eq!(scan.airway_legs_decoded, 2);
 
     // ---- 3. Temporal queries ------------------------------------------------
     let airports = store.query_airports_at(now).unwrap();
@@ -126,15 +136,20 @@ fn test_fixture_to_export_pipeline() {
     let ksfo = airports.iter().find(|a| a.ident == "KSFO").unwrap();
     assert_eq!(ksfo.runways.len(), 1);
 
-    // CIFP records become valid one second after the OurAirports batch.
     let waypoints = store
         .query_waypoints_at(now + TimeDelta::seconds(1))
         .unwrap();
-    assert_eq!(waypoints.len(), 1);
-    assert_eq!(waypoints[0].ident, "AABBZ");
+    assert_eq!(waypoints.len(), 4);
 
     let navaids = store.query_navaids_at(now + TimeDelta::seconds(1)).unwrap();
-    assert_eq!(navaids.len(), 4); // 2 OurAirports + ABI VORTAC + KENIE NDB
+    assert_eq!(navaids.len(), 7); // 2 OA + 2 OA-DME + ABI VOR + ABI DME + KENIE NDB
+
+    let legs = store
+        .query_airway_legs_at(now + TimeDelta::seconds(1))
+        .unwrap();
+    assert_eq!(legs.len(), 2);
+    assert_eq!(legs[0].start_fix, "ZBV");
+    assert_eq!(legs[1].end_fix, "TINKY");
 
     // ---- 4. Structural validation ------------------------------------------
     let issues = store.validate().unwrap();
@@ -146,12 +161,13 @@ fn test_fixture_to_export_pipeline() {
     let _ = std::fs::remove_dir_all(&out_dir);
     let export_date = now + TimeDelta::seconds(2);
 
-    // OurAirports navaids lack ICAO regions -> skipped; CIFP navaids and the
-    // waypoint carry regions -> exported. The export must succeed.
+    // OurAirports navaids lack ICAO regions -> skipped; the CIFP-sourced
+    // navaids, fixes and airway legs form a complete (if tiny) layer.
     let report = XPlane12Exporter::export_from_db(&store, export_date, &out_dir, false).unwrap();
-    assert_eq!(report.fixes_written, 1);
-    assert_eq!(report.navaids_written, 2); // ABI VORTAC + KENIE NDB
-    assert_eq!(report.navaids_skipped, 2); // SFO/ABI OurAirports duplicates
+    assert_eq!(report.fixes_written, 4); // AABBZ K5, SWIMM K7, ZBV MY, TINKY K-blank
+    assert_eq!(report.navaids_written, 2); // ABI VORTAC + ABI DME (KENIE NDB: no elevation -> skipped)
+    assert_eq!(report.airway_legs_written, 2);
+    assert_eq!(report.navaids_skipped, 5);
 
     let fix_content = std::fs::read_to_string(out_dir.join("earth_fix.dat")).unwrap();
     assert!(fix_content.contains("AABBZ ENRT K5"));
@@ -159,13 +175,21 @@ fn test_fixture_to_export_pipeline() {
 
     let nav_content = std::fs::read_to_string(out_dir.join("earth_nav.dat")).unwrap();
     assert!(nav_content.contains("ABI  ENRT  K4 NARABILENE VORTAC"));
-    assert!(nav_content.contains("AA   ENRT  K3"));
+    assert!(nav_content.contains("ABI  ENRT  K4 NARABILENE DME"));
     assert!(nav_content.contains("1200 Version - data cycle"));
     assert!(nav_content.ends_with("99\n"));
 
+    let awy_content = std::fs::read_to_string(out_dir.join("earth_awy.dat")).unwrap();
+    assert!(awy_content.contains("ZBV"));
+    assert!(awy_content.contains("SWIMM"));
+    assert!(awy_content.contains("V257"));
+
+    let manifest = std::fs::read_to_string(out_dir.join("manifest.json")).unwrap();
+    assert!(manifest.contains("earth_awy.dat"));
+    assert!(manifest.contains("earth_fix.dat"));
+
     let _ = std::fs::remove_dir_all(&out_dir);
     let _ = std::fs::remove_file(&db_path);
-    // WAL sidecar files.
     let _ = std::fs::remove_file(format!("{}-wal", db_path.display()));
     let _ = std::fs::remove_file(format!("{}-shm", db_path.display()));
 }

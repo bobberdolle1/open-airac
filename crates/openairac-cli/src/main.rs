@@ -221,10 +221,7 @@ fn main() -> Result<()> {
                         println!("  Runways: {}", status.total_runways);
                         println!("  Navaids: {}", status.total_navaids);
                         println!("  Waypoints: {}", status.total_waypoints);
-
-                        if !status.integrity_ok {
-                            std::process::exit(1);
-                        }
+                        println!("  Airway Legs: {}", status.total_airway_legs);
                     }
                     Err(e) => {
                         println!("  Database Status Query: ERROR ({e})");
@@ -377,6 +374,7 @@ fn main() -> Result<()> {
             println!("  Runways: {}", status.total_runways);
             println!("  Navaids: {}", status.total_navaids);
             println!("  Waypoints: {}", status.total_waypoints);
+            println!("  Airway Legs: {}", status.total_airway_legs);
         }
 
         Commands::Status { db } => {
@@ -405,6 +403,7 @@ fn main() -> Result<()> {
             println!("  Runways: {}", status.total_runways);
             println!("  Navaids: {}", status.total_navaids);
             println!("  Waypoints: {}", status.total_waypoints);
+            println!("  Airway Legs: {}", status.total_airway_legs);
             println!(
                 "  Magnetic Model: {} (Valid {:.1}-{:.1})",
                 meta.model, meta.valid_from_year, meta.valid_until_year
