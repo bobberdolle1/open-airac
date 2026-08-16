@@ -141,6 +141,20 @@ Cycle 2608 run results (2026-08-16):
    150, standalone DME `U`-class to 125 — verified against converter
    output for CDO/ADK/EEA.
 
+
+## Procedure golden harness (RC)
+
+`crates/openairac-export-xplane/examples/golden_procedures.rs`
+compares every decoded procedure leg chain (fix sequence + path
+terminator per procedure/transition) against the converter's
+per-airport `CIFP/<airport>.dat` files.
+
+Cycle 2608 result: **1,379/1,379 chains identical** across
+KSFO (180), KDEN (467), KJFK (83), KLAX (400), KORD (249) — zero
+differences in either direction. Coverage: SIDs, STARs, ILS
+approaches (I-series), localizer-only (L-series), RNAV (H-series),
+transitions, and missed-approach legs (FM/HA/HM terminators).
+
 ## Related
 
 * `crates/openairac-ingest/src/faa_cifp.rs` — layered CIFP decoder
