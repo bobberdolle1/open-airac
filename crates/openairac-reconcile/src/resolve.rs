@@ -18,6 +18,7 @@ pub const FIELD_SELECTORS: &[(&str, &str)] = &[
     ("airports", "latitude"),
     ("airports", "longitude"),
     ("airports", "elevation_ft"),
+    ("airports", "iso_country"),
     ("navaids", "ident"),
     ("navaids", "name"),
     ("navaids", "kind"),
@@ -47,6 +48,10 @@ fn field_values(
                     values.push((
                         "elevation_ft".into(),
                         a.elevation_ft.map(|e| e.to_string()).unwrap_or_default(),
+                    ));
+                    values.push((
+                        "iso_country".into(),
+                        a.iso_country.clone().unwrap_or_default(),
                     ));
                 }
             }
@@ -106,6 +111,57 @@ pub fn resolved_entity(
         .collect();
     let member_refs: Vec<SourceEntityRef> = members.iter().map(|m| m.source.clone()).collect();
 
+    // Region hint for authority scoping: airports -> ISO country of
+    // the first member; other entity tables use their ICAO regions
+    // implicitly via provider data (None = world default).
+    /// ICAO region first letter -> ISO country hint (conservative:
+    /// only the unambiguous North American prefixes; anything else
+    /// falls back to the world default).
+    fn region_country_hint(region: &str) -> Option<&'static str> {
+        match region.chars().next() {
+            Some('K') => Some("US"),
+            Some('C') => Some("CA"),
+            Some('M') => Some("MX"),
+            _ => None,
+        }
+    }
+
+    let region_hint: Option<String> = if entity_table == "airports" {
+        members
+            .iter()
+            .filter_map(|m| {
+                field_values(&entity_table, &m.source.entity_id, store, as_of)
+                    .into_iter()
+                    .find(|(f, _)| f == "iso_country")
+                    .map(|(_, v)| v)
+                    .filter(|v| !v.is_empty())
+            })
+            .next()
+    } else {
+        // Navaids/waypoints: ICAO region -> country hint.
+        members
+            .iter()
+            .filter_map(|m| {
+                let ident = &m.source.entity_id;
+                store
+                    .query_navaids_at(as_of)
+                    .ok()?
+                    .into_iter()
+                    .find(|n| n.object_id.0 == *ident)
+                    .and_then(|n| n.region_code)
+                    .or_else(|| {
+                        store
+                            .query_waypoints_at(as_of)
+                            .ok()?
+                            .into_iter()
+                            .find(|w| w.object_id.0 == *ident)
+                            .map(|w| w.region_code.clone())
+                    })
+            })
+            .filter_map(|r| region_country_hint(&r).map(|s| s.to_string()))
+            .next()
+    };
+
     let mut fields: Vec<ResolvedField> = Vec::new();
     for (_table, field) in FIELD_SELECTORS.iter().filter(|(t, _)| *t == entity_table) {
         // Gather each member's value for this field.
@@ -123,7 +179,14 @@ pub fn resolved_entity(
         // Select per authority policy; disagreements are conflicts.
         let selected = by_source
             .iter()
-            .min_by_key(|(source, _)| provider_rank(&entity_table, field, &source.provider))
+            .min_by_key(|(source, _)| {
+                provider_rank(
+                    &entity_table,
+                    field,
+                    region_hint.as_deref(),
+                    &source.provider,
+                )
+            })
             .expect("non-empty");
         let distinct: std::collections::BTreeSet<&String> =
             by_source.iter().map(|(_, v)| v).collect();

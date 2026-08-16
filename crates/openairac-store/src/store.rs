@@ -677,6 +677,19 @@ impl WorldStore {
         plan: &PublicationPlan,
         lifecycle: Option<&PublicationLifecycle>,
     ) -> Result<PublicationReport> {
+        self.apply_dataset_publication_with_revision(snapshot, version, plan, lifecycle, None)
+    }
+
+    /// Same as `apply_dataset_publication` plus a world revision row
+    /// (continuous providers record one revision per publication).
+    pub fn apply_dataset_publication_with_revision(
+        &mut self,
+        snapshot: &SourceSnapshot,
+        version: &DatasetVersion,
+        plan: &PublicationPlan,
+        lifecycle: Option<&PublicationLifecycle>,
+        revision: Option<&WorldRevision>,
+    ) -> Result<PublicationReport> {
         let txn = self.conn.transaction()?;
         let report = apply_dataset_publication_conn(
             &txn,
@@ -685,6 +698,7 @@ impl WorldStore {
             plan,
             lifecycle,
             &PublicationFailpoints::default(),
+            revision,
         )?;
         txn.commit()?;
         Ok(report)
@@ -3984,8 +3998,12 @@ pub fn apply_dataset_publication_conn(
     plan: &PublicationPlan,
     lifecycle: Option<&PublicationLifecycle>,
     failpoints: &PublicationFailpoints,
+    revision: Option<&WorldRevision>,
 ) -> Result<PublicationReport> {
     insert_source_snapshot_conn(conn, snapshot)?;
+    if let Some(revision) = revision {
+        insert_world_revision_conn(conn, revision)?;
+    }
 
     // Identity guard inside the SAME transaction as the application.
     let outcome = record_dataset_publication_conn(conn, version)?;
@@ -6787,6 +6805,7 @@ mod tests {
                     &plan,
                     Some(&lifecycle),
                     &failpoint,
+                    None,
                 )
             });
             assert!(result.is_err(), "{failpoint:?}");

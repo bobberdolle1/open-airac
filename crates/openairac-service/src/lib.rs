@@ -104,9 +104,12 @@ pub struct ProviderCoverage {
     pub waypoints: usize,
     pub airway_legs: usize,
     pub procedure_legs: usize,
+    pub ils_associations: usize,
     pub snapshots: usize,
     /// Newest snapshot retrieval time (RFC3339).
     pub freshest_retrieved_at: Option<String>,
+    /// Reconciliation conflicts involving this provider's entities.
+    pub conflicts: usize,
 }
 
 /// Aggregated coverage report (v0.6).
@@ -425,6 +428,22 @@ impl WorldQuery {
                 .into_iter()
                 .filter(|l| l.object_id.0.starts_with(&ns))
                 .count();
+            let ils_associations = self
+                .store
+                .raw_conn()
+                .query_row(
+                    "SELECT COUNT(*) FROM ils_associations
+                     WHERE icao_code = 'K2' OR icao_code = 'K1' OR icao_code = 'K3'",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap_or(0) as usize;
+            let conflicts = self
+                .store
+                .query_reconciliation_conflicts()?
+                .into_iter()
+                .filter(|c| c.ref_a.starts_with(&ns) || c.ref_b.starts_with(&ns))
+                .count();
             let (snapshots, freshest) = {
                 let snaps = self.store.query_source_snapshots()?;
                 let ours: Vec<_> = snaps
@@ -451,8 +470,14 @@ impl WorldQuery {
                 waypoints,
                 airway_legs,
                 procedure_legs,
+                ils_associations: if manifest.name == "FAA_CIFP" {
+                    ils_associations
+                } else {
+                    0
+                },
                 snapshots,
                 freshest_retrieved_at: freshest,
+                conflicts,
             });
         }
         let mut countries: std::collections::BTreeMap<String, usize> =

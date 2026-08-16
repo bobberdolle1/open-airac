@@ -2,8 +2,7 @@ use anyhow::{Context, Result};
 use chrono::{Datelike, NaiveDate, Utc};
 use clap::{Parser, Subcommand};
 use openairac_export_xplane::XPlane12Exporter;
-use openairac_ingest::ourairports::OurAirportsImporter;
-use openairac_ingest::provider::{DataProvider, FetchedDataset, sha256_hex};
+use openairac_ingest::provider::{FetchedDataset, sha256_hex};
 use openairac_magnetic::{Wmm2025, analyze_runway_magnetic_drift, wmm2025_metadata};
 use openairac_store::WorldStore;
 use std::path::PathBuf;
@@ -315,7 +314,8 @@ fn sync_fixture(store: &mut WorldStore) -> Result<()> {
             publication_id: None,
             raw_content: content.to_string(),
         };
-        let report = OurAirportsImporter::ingest_dataset(&dataset, store)?;
+        let report =
+            openairac_ingest::ourairports::OurAirportsImporter::ingest_dataset(&dataset, store)?;
         println!(
             "  {}: accepted {}, unchanged {}, quarantined {}, rejected {}",
             report.dataset_name,
@@ -463,8 +463,15 @@ fn main() -> Result<()> {
 
             let mut store = WorldStore::open(db)?;
 
-            if provider != "ourairports" && provider != "faa_cifp" {
-                anyhow::bail!("Unknown provider '{provider}' (supported: ourairports, faa_cifp)");
+            let known: Vec<&str> = openairac_ingest::registry::provider_constructors()
+                .iter()
+                .map(|(k, _)| *k)
+                .collect();
+            if !known.contains(&provider.as_str()) {
+                anyhow::bail!(
+                    "Unknown provider '{provider}' (supported: {})",
+                    known.join(", ")
+                );
             }
 
             if provider == "faa_cifp" {
@@ -558,7 +565,8 @@ fn main() -> Result<()> {
                 println!("  Using offline fixture content.");
                 sync_fixture(&mut store)?;
             } else {
-                let importer = openairac_ingest::ourairports::OurAirportsProvider;
+                let importer =
+                    openairac_ingest::registry::provider("ourairports").expect("registered");
                 let requested: Vec<String> = datasets
                     .as_deref()
                     .map(|d| d.split(',').map(|s| s.trim().to_string()).collect())

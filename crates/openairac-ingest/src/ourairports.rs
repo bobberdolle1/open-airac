@@ -3,10 +3,7 @@ use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
 use openairac_magnetic::analyze_runway_magnetic_drift;
 use openairac_model::*;
-use openairac_store::{
-    WorldStore, insert_airport_conn, insert_navaid_conn, insert_runway_conn,
-    insert_source_snapshot_conn, insert_world_revision_conn,
-};
+use openairac_store::WorldStore;
 use serde::Deserialize;
 
 const AIRPORTS_URL: &str = "https://davidmegginson.github.io/ourairports-data/airports.csv";
@@ -530,69 +527,123 @@ impl OurAirportsImporter {
         let year = decimal_year(retrieved_at);
         let checksum = dataset.content_sha256.clone();
         let mut report = IngestReport::new("OurAirports", &dataset.dataset_name, &checksum);
+        let _ = &mut report; // populated per dataset below
 
-        store.transact(|conn| {
-            insert_source_snapshot_conn(conn, &snapshot)?;
-            insert_world_revision_conn(conn, &revision)?;
-
-            match dataset.dataset_name.as_str() {
-                "airports" => {
-                    let (airports, parse_report) = Self::parse_airports(
-                        &dataset.raw_content,
-                        &snapshot_id,
-                        &checksum,
-                        valid_from,
-                    );
-                    report = parse_report;
-                    for airport in &airports {
-                        // Nested runways are inserted by the importer via the
-                        // airport writer, but OurAirports airports carry none.
-                        report.record_write(insert_airport_conn(conn, airport)?);
-                    }
+        // Parse OUTSIDE the transaction; apply atomically via the
+        // publication machinery (identity guard, payloads, full-snapshot
+        // close, audit — all in one commit).
+        let mut payloads = openairac_store::EntityPayloads::default();
+        let mut masked: std::collections::BTreeSet<openairac_store::EntityTable> =
+            std::collections::BTreeSet::new();
+        match dataset.dataset_name.as_str() {
+            "airports" => {
+                let (airports, parse_report) =
+                    Self::parse_airports(&dataset.raw_content, &snapshot_id, &checksum, valid_from);
+                report = parse_report;
+                // Fail-closed full-snapshot semantics: any rejected or
+                // quarantined record masks close_absent for this table
+                // (absence must never be confused with unparseable).
+                if report.records_rejected > 0 || report.records_quarantined > 0 {
+                    masked.insert(openairac_store::EntityTable::Airports);
                 }
-                "runways" => {
-                    let (runways, parse_report) = Self::parse_runways(
-                        &dataset.raw_content,
-                        &snapshot_id,
-                        &checksum,
-                        year,
-                        valid_from,
-                    );
-                    report = parse_report;
-                    let mut known = std::collections::HashSet::new();
-                    let mut stmt = conn.prepare("SELECT DISTINCT id FROM airports")?;
+                payloads.airports = airports;
+            }
+            "runways" => {
+                let (runways, parse_report) = Self::parse_runways(
+                    &dataset.raw_content,
+                    &snapshot_id,
+                    &checksum,
+                    year,
+                    valid_from,
+                );
+                report = parse_report;
+                if report.records_rejected > 0 {
+                    masked.insert(openairac_store::EntityTable::Runways);
+                }
+                let mut known = std::collections::HashSet::new();
+                {
+                    let mut stmt = store
+                        .raw_conn()
+                        .prepare("SELECT DISTINCT id FROM airports")?;
                     let ids = stmt.query_map([], |r| r.get::<_, String>(0))?;
                     for id in ids {
                         known.insert(id?);
                     }
-
-                    for runway in runways {
-                        if !known.contains(&runway.airport_id.0) {
-                            report.record_quarantined(format!(
-                                "Runway {}: airport {} not in store",
-                                runway.id.0, runway.airport_id.0
-                            ));
-                            continue;
-                        }
-                        report.record_write(insert_runway_conn(conn, &runway)?);
-                    }
                 }
-                "navaids" => {
-                    let (navaids, parse_report) = Self::parse_navaids(
-                        &dataset.raw_content,
-                        &snapshot_id,
-                        &checksum,
-                        valid_from,
-                    );
-                    report = parse_report;
-                    for navaid in &navaids {
-                        report.record_write(insert_navaid_conn(conn, navaid)?);
+                for runway in runways {
+                    if !known.contains(&runway.airport_id.0) {
+                        report.record_quarantined(format!(
+                            "Runway {}: airport {} not in store",
+                            runway.id.0, runway.airport_id.0
+                        ));
+                        // Quarantined = present in source but
+                        // unrepresentable: mask close for this table.
+                        masked.insert(openairac_store::EntityTable::Runways);
+                        continue;
                     }
+                    payloads.runways.push(runway);
                 }
-                other => return Err(anyhow!("Unknown OurAirports dataset: {other}")),
             }
-            Ok(())
-        })?;
+            "navaids" => {
+                let (navaids, parse_report) =
+                    Self::parse_navaids(&dataset.raw_content, &snapshot_id, &checksum, valid_from);
+                report = parse_report;
+                if report.records_rejected > 0 || report.records_quarantined > 0 {
+                    masked.insert(openairac_store::EntityTable::Navaids);
+                }
+                payloads.navaids = navaids;
+            }
+            other => return Err(anyhow!("Unknown OurAirports dataset: {other}")),
+        }
+
+        // Publication identity: content-addressed, continuous model
+        // (no AIRAC cycle — never faked).
+        let publication_id = format!("ourairports:{}:{}", dataset.dataset_name, &checksum[..16]);
+        let version = openairac_model::DatasetVersion {
+            id: 0,
+            provider: "OurAirports".to_string(),
+            dataset: dataset.dataset_name.clone(),
+            airac_cycle: None,
+            content_sha256: checksum.clone(),
+            retrieved_at,
+            revision_kind: openairac_model::RevisionKind::Baseline,
+            coverage: openairac_model::Coverage::FullSnapshot,
+            publication_id: Some(publication_id.clone()),
+            valid_from: Some(valid_from),
+            notes: Some("continuous full-snapshot publication".to_string()),
+        };
+        let plan = openairac_store::PublicationPlan {
+            namespace: "ourairports".to_string(),
+            kind: openairac_model::UpdateKind::FullSnapshot,
+            valid_from,
+            payloads,
+            tombstones: Vec::new(),
+            ils_associations: Vec::new(),
+            masked_tables: masked,
+            publication_id: publication_id.clone(),
+        };
+        let applied = store.apply_dataset_publication_with_revision(
+            &snapshot,
+            &version,
+            &plan,
+            None,
+            Some(&revision),
+        )?;
+        if applied.duplicate {
+            report.warnings.push(format!(
+                "publication {publication_id} is an exact replay; skipped"
+            ));
+        } else {
+            report.records_created = applied.created;
+            report.records_updated = applied.updated;
+            report.records_unchanged = applied.unchanged;
+            if applied.rows_closed > 0 {
+                report.warnings.push(format!(
+                    "{} entity row(s) closed as absent from the snapshot",
+                    applied.rows_closed
+                ));
+            }
+        }
 
         report.duration_ms = started.elapsed().as_millis() as u64;
         Ok(report)

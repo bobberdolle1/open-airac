@@ -23,6 +23,32 @@ pub fn entity_tables_for_snapshot_provider(provider: &str) -> Option<Vec<&'stati
     tables_for_provider(provider)
 }
 
+/// Registry-driven provider construction: CLI and services select a
+/// provider by CLI key through this table instead of expanding
+/// if/match chains.
+/// A provider constructor entry: (CLI key, constructor).
+pub type ProviderConstructor = (&'static str, fn() -> Box<dyn crate::provider::DataProvider>);
+
+pub fn provider_constructors() -> &'static [ProviderConstructor] {
+    &[
+        ("ourairports", || {
+            Box::new(crate::ourairports::OurAirportsProvider)
+                as Box<dyn crate::provider::DataProvider>
+        }),
+        ("faa_cifp", || {
+            Box::new(crate::faa_cifp::CifpProvider) as Box<dyn crate::provider::DataProvider>
+        }),
+    ]
+}
+
+/// Construct a provider by CLI key.
+pub fn provider(key: &str) -> Option<Box<dyn crate::provider::DataProvider>> {
+    provider_constructors()
+        .iter()
+        .find(|(k, _)| *k == key)
+        .map(|(_, ctor)| ctor())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
