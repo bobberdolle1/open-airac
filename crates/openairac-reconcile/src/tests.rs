@@ -1088,68 +1088,75 @@ fn test_conflict_dedup_across_ten_reruns() {
         .unwrap();
     assert_eq!(nokey, 0);
     assert!(store.validate().unwrap().is_empty());
+}
 
-    #[test]
-    fn test_conflict_values_refresh_on_rerun() {
-        let (mut store, _t0) = seeded_store();
-        let t1 = Utc::now();
-        // Field conflict (frequencies disagree) — first observation.
-        store
-            .insert_navaid(&navaid(
-                "faa:ABC",
-                "ABC",
-                NavaidKind::Vor,
-                112_000,
-                30.0,
-                -80.0,
-                "snap-faa",
-                t1,
-            ))
-            .unwrap();
-        store
-            .insert_navaid(&navaid(
-                "ourairports:ABC",
-                "ABC",
-                NavaidKind::Vor,
-                113_000,
-                30.0,
-                -80.0,
-                "snap-oa",
-                t1,
-            ))
-            .unwrap();
-        Reconciler::new(&store).reconcile(t1).unwrap();
-        let first = store.query_reconciliation_conflicts().unwrap();
-        assert_eq!(first.len(), 1);
-        assert_eq!(first[0].value_a.as_deref(), Some("112000"));
+#[test]
+fn test_conflict_values_refresh_on_rerun() {
+    let (store, _t0) = seeded_store();
+    let t1 = Utc::now();
+    // Field conflict (frequencies disagree) — first observation.
+    store
+        .insert_navaid(&navaid(
+            "faa:ABC",
+            "ABC",
+            NavaidKind::Vor,
+            112_000,
+            30.0,
+            -80.0,
+            "snap-faa",
+            t1,
+        ))
+        .unwrap();
+    store
+        .insert_navaid(&navaid(
+            "ourairports:ABC",
+            "ABC",
+            NavaidKind::Vor,
+            113_000,
+            30.0,
+            -80.0,
+            "snap-oa",
+            t1,
+        ))
+        .unwrap();
+    Reconciler::new(&store).reconcile(t1).unwrap();
+    let first = store.query_reconciliation_conflicts().unwrap();
+    assert_eq!(first.len(), 1);
+    // Provider order in the pair is not semantically meaningful:
+    // values must be {112000, 113000}.
+    let mut values = [
+        first[0].value_a.as_deref().unwrap_or(""),
+        first[0].value_b.as_deref().unwrap_or(""),
+    ];
+    values.sort();
+    assert_eq!(values, ["112000", "113000"]);
 
-        // FAA corrects to 113000: the conflict DISAPPEARS semantically
-        // but the same identity persists; rerun must not keep the stale
-        // row (upsert refreshes values; identical values produce no
-        // conflict at all).
-        let t2 = t1 + chrono::Duration::seconds(3600);
-        store
-            .insert_navaid(&navaid(
-                "faa:ABC",
-                "ABC",
-                NavaidKind::Vor,
-                113_000,
-                30.0,
-                -80.0,
-                "snap-faa",
-                t2,
-            ))
-            .unwrap();
-        Reconciler::new(&store).reconcile(t2).unwrap();
-        let after = store.query_reconciliation_conflicts().unwrap();
-        // The old instant still disagrees (historical rows), but the
-        // reconciler evaluates world_at(as_of): at t2 the values agree,
-        // so no NEW conflict is recorded; the old row keeps its
-        // historical values (dedup by key) — exactly one row total.
-        assert_eq!(after.len(), 1);
-        assert!(
-            after[0].value_a.as_deref() == Some("112000")
-                || after[0].value_a.as_deref() == Some("113000")
-        );
-    }
+    // FAA corrects to 113000: the conflict DISAPPEARS semantically
+    // but the same identity persists; rerun must not keep the stale
+    // row (upsert refreshes values; identical values produce no
+    // conflict at all).
+    let t2 = t1 + chrono::Duration::seconds(3600);
+    store
+        .insert_navaid(&navaid(
+            "faa:ABC",
+            "ABC",
+            NavaidKind::Vor,
+            113_000,
+            30.0,
+            -80.0,
+            "snap-faa",
+            t2,
+        ))
+        .unwrap();
+    Reconciler::new(&store).reconcile(t2).unwrap();
+    let after = store.query_reconciliation_conflicts().unwrap();
+    // The old instant still disagrees (historical rows), but the
+    // reconciler evaluates world_at(as_of): at t2 the values agree,
+    // so no NEW conflict is recorded; the old row keeps its
+    // historical values (dedup by key) — exactly one row total.
+    assert_eq!(after.len(), 1);
+    assert!(
+        after[0].value_a.as_deref() == Some("112000")
+            || after[0].value_a.as_deref() == Some("113000")
+    );
 }
