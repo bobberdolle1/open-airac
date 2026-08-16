@@ -54,11 +54,26 @@ distributable as verified artifacts.
 - [x] Procedure completeness diagnostics (deterministic severities: unresolved fixes, unsupported terminators, impossible bands, missing RF data, runway mismatches)
 - [ ] Remaining verified ARINC path-terminator semantics (vertical-angle GP legs, course-C DF legs, MSA sectors)
 
-## Milestone v0.6 — Worldwide Coverage & Providers
+## Milestone v0.6 — Worldwide Coverage & Providers (Shipped)
 
-- [ ] Worldwide provider architecture (provider registry replacing the two hardcoded adapters)
-- [ ] Regional coverage expansion beyond US CIFP (ICAO AIP sources, community providers)
-- [ ] Provider failover and per-region confidence reporting
+- [x] Worldwide provider architecture: registry-driven provider
+  selection (`provider_constructors()`), unified publication path
+  (OurAirports and FAA CIFP both apply atomically through the same
+  dataset-publication machinery — identity guard, tombstones,
+  close_absent, audit)
+- [x] Provider capabilities in manifests (coverage scope, temporal
+  model, update model, authority note) + `coverage` report with
+  per-provider entity counts, snapshots, ILS associations, and
+  reconciliation conflicts
+- [x] Data-driven regional authority: region-scoped authority rules
+  (US: FAA first; world default: open metadata first), exposed via the
+  resolved view — replaces static US-only assumptions
+- [x] Worldwide source licensing research (DATA_SOURCES.md): only
+  legally redistributable sources ship in bundles; proprietary sets
+  rejected; ODbL/AIP candidates need per-license review
+- [ ] Regional coverage expansion beyond US CIFP (candidates vetted
+  legally; none implemented yet — needs per-country license review)
+- [ ] Provider failover (designed: never mix worlds; not yet exercised)
 
 ## Milestone v0.7 — Simulator Output & Distribution Maturity
 
