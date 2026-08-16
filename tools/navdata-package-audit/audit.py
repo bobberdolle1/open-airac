@@ -334,14 +334,9 @@ def classify_item(item: dict) -> dict:
         "is_inno": is_inno,
     }
 
-def main():
-    parser = argparse.ArgumentParser(description="OpenAIRAC Navdata Forensic & Audit CLI")
-    subparsers = parser.add_subparsers(dest="command")
-
-    subparsers.add_parser("inventory-root").add_argument("path", type=str)
-    subparsers.add_parser("inspect-archive").add_argument("path", type=str)
-    subparsers.add_parser("cluster").add_argument("path", type=str)
     subparsers.add_parser("duplicate-groups").add_argument("path", type=str)
+    subparsers.add_parser("provenance-audit").add_argument("path", type=str)
+    subparsers.add_parser("coverage-table").add_argument("path", type=str)
     
     t_parser = subparsers.add_parser("target-matrix")
     t_parser.add_argument("path", type=str)
@@ -369,6 +364,60 @@ def main():
         print(f"Total Archive Size: {total_size / (1024*1024*1024):.2f} GB ({total_size} bytes)")
         print(f"Total Uncompressed: {total_uncomp / (1024*1024*1024):.2f} GB ({total_uncomp} bytes)")
 
+    elif args.command == "provenance-audit":
+        inv = scan_distribution(target_path)
+        classified = [classify_item(x) for x in inv]
+        by_fmt = collections.defaultdict(list)
+        for c in classified:
+            by_fmt[c["format_family"]].append(c)
+        print("\n================ KNOWLEDGE PROVENANCE AUDIT ================")
+        print(f"{'FAMILY':8s} | {'CLASS':5s} | {'COUNT':5s} | {'PROVENANCE TYPE':36s} | {'INDEPENDENT SOURCE / AUTHORITY'}")
+        print("-" * 120)
+        provenance_map = {
+            "FMT-001": ("A", "OFFICIAL_PUBLIC_SPEC", "Laminar Research XP-NAV1100/1150/1200 Specs & FAA CIFP Spec"),
+            "FMT-002": ("A", "OFFICIAL_PUBLIC_SPEC", "Laminar Research XP-NAV1000 Spec"),
+            "FMT-003": ("C", "PUBLIC_VENDOR_COMPAT_INTERFACE", "PMDG Navdata Format Spec & published flight planner interfaces"),
+            "FMT-004": ("D", "OBSERVED_LOCAL_FORMAT_ONLY", "Jeppesen DFD Relational Schema mapped to open relational models"),
+            "FMT-005": ("A", "OFFICIAL_PUBLIC_SPEC", "ARINC 424-18/19/20 Standard Specification (1:1 Table-Prefix Mapping)"),
+            "FMT-006": ("B", "OPEN_SOURCE_REFERENCE", "Little Navmap / navdatareader Open-Source Schema (GPL-3.0)"),
+            "FMT-007": ("C", "PUBLIC_VENDOR_COMPAT_INTERFACE", "Aerosoft NavDataPro Interface Specifications"),
+            "FMT-008": ("B", "OPEN_SOURCE_REFERENCE", "vasFMC Open-Source GPL & Level-D XML Schema Specifications"),
+            "FMT-009": ("B", "OPEN_SOURCE_REFERENCE", "KLN 90B Open-Source GPL Implementation & Leonardo/Wilco Procedure Parsers"),
+            "FMT-010": ("C", "PUBLIC_VENDOR_COMPAT_INTERFACE", "FSBuild / Flight1 Navigation Data Interface Documentation"),
+            "FMT-011": ("D", "OBSERVED_LOCAL_FORMAT_ONLY", "Fenix nd.db3 & TFDi JSON self-describing relational schemas"),
+            "FMT-012": ("A", "OFFICIAL_PUBLIC_SPEC", "Official MSFS 2020/2024 SDK (SimpleNavData XML + fspackagetool)"),
+            "FMT-013": ("E", "PROPRIETARY_UNKNOWN", "Closed FlightFactor Thales binary format (fallback: X-Plane native CIFP)"),
+            "FMT-014": ("C", "PUBLIC_VENDOR_COMPAT_INTERFACE", "PSS / Phoenix Simulation Software Community Specifications"),
+            "FMT-015": ("C", "PUBLIC_VENDOR_COMPAT_INTERFACE", "Aerowinx Precision Simulator X Developer Specifications"),
+            "FMT-016": ("C", "PUBLIC_VENDOR_COMPAT_INTERFACE", "Project Magenta Developer Interface Specifications"),
+            "FMT-017": ("A", "OFFICIAL_PUBLIC_SPEC", "Global Simulator Scenery & Standard Metadata Interfaces"),
+        }
+        for fmt in sorted(by_fmt.keys()):
+            code, title, desc = provenance_map.get(fmt, ("E", "UNKNOWN", "Unknown"))
+            print(f"{fmt:8s} | [{code}]   | {len(by_fmt[fmt]):5d} | {title:36s} | {desc}")
+    elif args.command == "coverage-table":
+        inv = scan_distribution(target_path)
+        classified = [classify_item(x) for x in inv]
+        by_fmt = collections.defaultdict(list)
+        for c in classified:
+            by_fmt[c["format_family"]].append(c)
+        total = len(classified)
+        
+        waves = [
+            ("Baseline / Shipped (1.0.x)", ["FMT-001"]),
+            ("Wave 1 Core Exporters (1.1)", ["FMT-001", "FMT-012", "FMT-004", "FMT-005", "FMT-007", "FMT-003", "FMT-006"]),
+            ("Wave 2 Modern Airliners (1.2)", ["FMT-001", "FMT-012", "FMT-004", "FMT-005", "FMT-007", "FMT-003", "FMT-006", "FMT-011", "FMT-008", "FMT-009", "FMT-010"]),
+            ("Wave 2 + Global Scenery Targets", ["FMT-001", "FMT-012", "FMT-004", "FMT-005", "FMT-007", "FMT-003", "FMT-006", "FMT-011", "FMT-008", "FMT-009", "FMT-010", "FMT-017"]),
+            ("Full Legacy & Specialist (2.0)", ["FMT-001", "FMT-012", "FMT-004", "FMT-005", "FMT-007", "FMT-003", "FMT-006", "FMT-011", "FMT-008", "FMT-009", "FMT-010", "FMT-017", "FMT-002", "FMT-014", "FMT-015", "FMT-016", "FMT-013"]),
+        ]
+        print("\n================ EXACT DEDUPLICATED CUMULATIVE COVERAGE TABLE ================")
+        print(f"{'MILESTONE / WAVE':35s} | {'EXPORTERS':10s} | {'UNLOCKED':8s} | {'REMAINING':9s} | {'COVERAGE %':10s}")
+        print("-" * 85)
+        for title, fmts in waves:
+            unlocked_targets = sum(len(by_fmt[f]) for f in fmts if f in by_fmt)
+            rem = total - unlocked_targets
+            pct = unlocked_targets / total * 100
+            print(f"{title:35s} | {len([f for f in fmts if f != 'FMT-017']):10d} | {unlocked_targets:8d} | {rem:9d} | {pct:9.2f}%")
     elif args.command == "cluster" or args.command == "family-matrix":
         inv = scan_distribution(target_path)
         classified = [classify_item(x) for x in inv]
