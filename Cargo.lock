@@ -1285,6 +1285,7 @@ dependencies = [
  "openairac-service",
  "openairac-store",
  "reqwest",
+ "rusqlite",
  "tokio",
  "tracing",
  "tracing-subscriber",

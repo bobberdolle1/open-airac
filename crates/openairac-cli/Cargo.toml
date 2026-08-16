@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+rusqlite.workspace = true
 openairac-model = { path = "../openairac-model" }
 openairac-magnetic = { path = "../openairac-magnetic" }
 openairac-store = { path = "../openairac-store" }
