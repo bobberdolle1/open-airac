@@ -534,6 +534,70 @@ pub struct DatasetManifest {
     pub entity_tables: &'static [&'static str],
 }
 
+/// Geographic coverage declared by a provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CoverageScope {
+    /// One nation's official data (e.g. US FAA CIFP).
+    Nationwide,
+    /// Global dataset without procedure coverage.
+    Worldwide,
+}
+
+impl CoverageScope {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CoverageScope::Nationwide => "nationwide",
+            CoverageScope::Worldwide => "worldwide",
+        }
+    }
+}
+
+/// How a provider publishes revisions over time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TemporalModel {
+    /// 28-day AIRAC cycles with confirmed effective instants.
+    AiracCycle,
+    /// Continuous (daily) snapshots without cycles.
+    Continuous,
+}
+
+impl TemporalModel {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TemporalModel::AiracCycle => "airac_cycle",
+            TemporalModel::Continuous => "continuous",
+        }
+    }
+}
+
+/// The publication shapes a provider can deliver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UpdateModel {
+    FullSnapshot,
+    FullSnapshotAndDifferential,
+}
+
+impl UpdateModel {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            UpdateModel::FullSnapshot => "full_snapshot",
+            UpdateModel::FullSnapshotAndDifferential => "full_snapshot_and_differential",
+        }
+    }
+}
+
+/// Declared capabilities of one provider (v0.6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderCapabilities {
+    pub coverage: CoverageScope,
+    pub temporal: TemporalModel,
+    pub update: UpdateModel,
+    /// Authority scope note (entity classes this provider is preferred
+    /// for; the reconciliation authority policy remains the decisive
+    /// mechanism — this is declarative metadata).
+    pub authority_note: &'static str,
+}
+
 /// Static metadata of one provider: the ownership contract between
 /// providers, object-id namespaces, and entity tables. The object-id
 /// prefix (`<namespace>:` in entity ids) is the ONLY ownership signal in
@@ -546,6 +610,7 @@ pub struct ProviderManifest {
     pub name: &'static str,
     /// Object-id namespace prefix (ids are `<namespace>:...`).
     pub namespace: &'static str,
+    pub capabilities: ProviderCapabilities,
     pub datasets: &'static [DatasetManifest],
 }
 
@@ -559,6 +624,12 @@ pub const PROVIDER_MANIFESTS: &[ProviderManifest] = &[
     ProviderManifest {
         name: "OurAirports",
         namespace: "ourairports",
+        capabilities: ProviderCapabilities {
+            coverage: CoverageScope::Worldwide,
+            temporal: TemporalModel::Continuous,
+            update: UpdateModel::FullSnapshot,
+            authority_note: "worldwide airport/runway/navaid metadata",
+        },
         datasets: &[
             DatasetManifest {
                 name: "airports",
@@ -577,6 +648,12 @@ pub const PROVIDER_MANIFESTS: &[ProviderManifest] = &[
     ProviderManifest {
         name: "FAA_CIFP",
         namespace: "faa",
+        capabilities: ProviderCapabilities {
+            coverage: CoverageScope::Nationwide,
+            temporal: TemporalModel::AiracCycle,
+            update: UpdateModel::FullSnapshot,
+            authority_note: "US navigation semantics: procedures, navaids, fixes, terminals",
+        },
         datasets: &[DatasetManifest {
             name: "FAACIFP18",
             // The decoder emits airports and runways (PA/PG, paired by

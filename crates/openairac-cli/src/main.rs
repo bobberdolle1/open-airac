@@ -128,6 +128,12 @@ enum Commands {
         cmd: UpdateCmd,
     },
 
+    /// Coverage report per provider and country
+    Coverage {
+        #[arg(short, long, default_value = "./data/world.openairac.sqlite")]
+        db: PathBuf,
+    },
+
     /// Export canonical navigation data into simulator format
     Export {
         #[command(subcommand)]
@@ -636,6 +642,34 @@ fn main() -> Result<()> {
             );
         }
 
+        Commands::Coverage { db } => {
+            let store = WorldStore::open(db)?;
+            let service = openairac_service::WorldQuery::from_store(store);
+            let report = service.coverage_report(chrono::Utc::now())?;
+            println!("OpenAIRAC Coverage Report (as of {})", report.as_of);
+            for p in &report.providers {
+                println!(
+                    "  {}: {} ({}, {})",
+                    p.provider, p.coverage, p.temporal, p.update
+                );
+                println!(
+                    "    airports {} runways {} navaids {} waypoints {} airways {} procedure legs {} snapshots {}",
+                    p.airports,
+                    p.runways,
+                    p.navaids,
+                    p.waypoints,
+                    p.airway_legs,
+                    p.procedure_legs,
+                    p.snapshots
+                );
+            }
+            let total: usize = report.airports_by_country.iter().map(|(_, n)| n).sum();
+            println!(
+                "  countries with airports: {} (total {})",
+                report.airports_by_country.len(),
+                total
+            );
+        }
         Commands::Reconcile { db, as_of } => {
             let as_of = match as_of {
                 Some(s) => chrono::DateTime::parse_from_rfc3339(s)

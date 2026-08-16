@@ -153,6 +153,12 @@ impl IngestReport {
 pub trait DataProvider: Send + Sync {
     fn name(&self) -> &'static str;
 
+    /// The provider's declared manifest (ownership contract + v0.6
+    /// capabilities: coverage, temporal model, update model).
+    fn manifest(&self) -> &'static openairac_model::ProviderManifest {
+        openairac_model::manifest_for_provider(self.name()).expect("registered provider")
+    }
+
     /// The datasets this provider publishes.
     fn datasets(&self) -> &'static [&'static str];
 

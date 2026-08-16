@@ -1143,6 +1143,7 @@ dependencies = [
  "openairac-procedures",
  "openairac-reconcile",
  "openairac-routing",
+ "openairac-service",
  "openairac-store",
  "reqwest",
  "tokio",

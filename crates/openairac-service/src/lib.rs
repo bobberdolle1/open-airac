@@ -90,6 +90,34 @@ pub struct ReconciliationStatus {
     pub conflicts: usize,
 }
 
+/// Per-provider coverage facts at one instant (v0.6).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderCoverage {
+    pub provider: String,
+    pub coverage: String,
+    pub temporal: String,
+    pub update: String,
+    pub authority_note: String,
+    pub airports: usize,
+    pub runways: usize,
+    pub navaids: usize,
+    pub waypoints: usize,
+    pub airway_legs: usize,
+    pub procedure_legs: usize,
+    pub snapshots: usize,
+    /// Newest snapshot retrieval time (RFC3339).
+    pub freshest_retrieved_at: Option<String>,
+}
+
+/// Aggregated coverage report (v0.6).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoverageReport {
+    pub as_of: DateTime<Utc>,
+    pub providers: Vec<ProviderCoverage>,
+    /// Airports per ISO country (from the store, all providers).
+    pub airports_by_country: Vec<(String, usize)>,
+}
+
 /// Service entry point.
 pub struct WorldQuery {
     store: WorldStore,
@@ -106,6 +134,11 @@ impl WorldQuery {
         let mut store = WorldStore::open_in_memory()?;
         store.migrate()?;
         Ok(Self { store })
+    }
+
+    /// Wrap an already-open store.
+    pub fn from_store(store: WorldStore) -> Self {
+        Self { store }
     }
 
     /// Read access to the underlying store (ingestion happens elsewhere).
@@ -347,6 +380,97 @@ impl WorldQuery {
         self.store.query_reconciliation_conflicts()
     }
 
+    /// Coverage report for the world valid at `as_of`.
+    pub fn coverage_report(&self, as_of: DateTime<Utc>) -> Result<CoverageReport> {
+        let mut providers = Vec::new();
+        for manifest in openairac_model::PROVIDER_MANIFESTS {
+            let ns = format!("{}:", manifest.namespace);
+            let airports = self
+                .store
+                .query_airports_at(as_of)?
+                .into_iter()
+                .filter(|a| a.id.0.starts_with(&ns))
+                .count();
+            let runways = self
+                .store
+                .raw_conn()
+                .query_row(
+                    "SELECT COUNT(*) FROM runways WHERE id LIKE ?1
+                     AND valid_from <= ?2 AND (valid_until IS NULL OR valid_until > ?2)",
+                    [format!("{ns}%"), as_of.to_rfc3339()],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap_or(0) as usize;
+            let navaids = self
+                .store
+                .query_navaids_at(as_of)?
+                .into_iter()
+                .filter(|n| n.object_id.0.starts_with(&ns))
+                .count();
+            let waypoints = self
+                .store
+                .query_waypoints_at(as_of)?
+                .into_iter()
+                .filter(|w| w.object_id.0.starts_with(&ns))
+                .count();
+            let airway_legs = self
+                .store
+                .query_airway_legs_at(as_of)?
+                .into_iter()
+                .filter(|l| l.object_id.0.starts_with(&ns))
+                .count();
+            let procedure_legs = self
+                .store
+                .query_procedure_legs_at(as_of)?
+                .into_iter()
+                .filter(|l| l.object_id.0.starts_with(&ns))
+                .count();
+            let (snapshots, freshest) = {
+                let snaps = self.store.query_source_snapshots()?;
+                let ours: Vec<_> = snaps
+                    .iter()
+                    .filter(|s| s.provider == manifest.name)
+                    .collect();
+                (
+                    ours.len(),
+                    ours.iter()
+                        .map(|s| s.retrieved_at)
+                        .max()
+                        .map(|t| t.to_rfc3339()),
+                )
+            };
+            providers.push(ProviderCoverage {
+                provider: manifest.name.to_string(),
+                coverage: manifest.capabilities.coverage.as_str().to_string(),
+                temporal: manifest.capabilities.temporal.as_str().to_string(),
+                update: manifest.capabilities.update.as_str().to_string(),
+                authority_note: manifest.capabilities.authority_note.to_string(),
+                airports,
+                runways,
+                navaids,
+                waypoints,
+                airway_legs,
+                procedure_legs,
+                snapshots,
+                freshest_retrieved_at: freshest,
+            });
+        }
+        let mut countries: std::collections::BTreeMap<String, usize> =
+            std::collections::BTreeMap::new();
+        for airport in self.store.query_airports_at(as_of)? {
+            if let Some(country) = airport.iso_country
+                && !country.is_empty()
+            {
+                *countries.entry(country).or_default() += 1;
+            }
+        }
+        Ok(CoverageReport {
+            as_of,
+            providers,
+            airports_by_country: countries.into_iter().collect(),
+        })
+    }
+
     /// The current waypoint list (for diagnostics and exporters).
     pub fn waypoints(&self, date: DateTime<Utc>) -> Result<Vec<CanonicalWaypoint>> {
         self.store.query_waypoints_at(date)
@@ -392,7 +516,7 @@ mod tests {
             parser_version: "test".to_string(),
         })?;
         let airport = CanonicalAirport {
-            id: AirportId("AP-KSFO".to_string()),
+            id: AirportId("ourairports:1".to_string()),
             ident: "KSFO".to_string(),
             name: "San Francisco International".to_string(),
             airport_type: "large_airport".to_string(),
@@ -419,7 +543,7 @@ mod tests {
         };
         service.store.insert_waypoint(&wp)?;
         let navaid = CanonicalNavaid {
-            object_id: openairac_model::NavaidId("NAV-SFO".to_string()),
+            object_id: openairac_model::NavaidId("ourairports:NAV-SFO".to_string()),
             ident: "SFO".to_string(),
             name: "SAN FRANCISCO VORTAC".to_string(),
             kind: NavaidKind::Vortac,
@@ -571,6 +695,33 @@ mod tests {
         // One leg W1 -> SFO: a single component of size 2.
         let components = service.graph_components(t).unwrap();
         assert_eq!(components, vec![2]);
+    }
+
+    #[test]
+    fn test_coverage_report() {
+        let t = Utc::now();
+        let service = seeded(t).unwrap();
+        let report = service.coverage_report(t).unwrap();
+        assert_eq!(report.providers.len(), 2);
+        let oa = report
+            .providers
+            .iter()
+            .find(|p| p.provider == "OurAirports")
+            .unwrap();
+        assert_eq!(oa.coverage, "worldwide");
+        assert_eq!(oa.temporal, "continuous");
+        assert_eq!(oa.airports, 1);
+        assert_eq!(oa.navaids, 1);
+        let faa = report
+            .providers
+            .iter()
+            .find(|p| p.provider == "FAA_CIFP")
+            .unwrap();
+        assert_eq!(faa.coverage, "nationwide");
+        assert_eq!(faa.temporal, "airac_cycle");
+        assert_eq!(faa.airports, 0); // fixture has no FAA entities
+        assert_eq!(report.airports_by_country.len(), 1);
+        assert_eq!(report.airports_by_country[0].1, 1);
     }
 
     #[test]
