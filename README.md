@@ -23,6 +23,13 @@ navigation datasets, stores them in a canonical temporal database, and
 produces validated simulator navigation data — with the ambition of
 being free/open Navigraph-class infrastructure.
 
+> **OpenAIRAC is for FLIGHT SIMULATION ONLY.** It is not certified,
+> not for real-world navigation, and must never be used for planning or
+> flying real aircraft. The data sources are public datasets (US
+> Government CIFP, OurAirports) that carry no operational guarantees.
+> See [docs/SECURITY.md](docs/SECURITY.md) for the signing model and
+> [docs/DATA_SOURCES.md](docs/DATA_SOURCES.md) for licensing.
+
 ## Why temporal navigation data matters
 
 Flight-sim navigation data changes on the real-world 28-day AIRAC
@@ -36,7 +43,28 @@ provenance, so the engine can:
 * never fabricate values: every missing field is skipped with a
   diagnostic, never guessed.
 
-## What actually works today (v0.4)
+## What actually works today (release candidate)
+
+The 1.0 release candidate covers the full engine: AIRAC cycle
+lifecycle (discover -> preload -> activate -> rollback), layered CIFP
+decoding (airports, runways, navaids incl. ILS localizers and
+glideslopes, waypoints, airway legs, SID/STAR/approach legs), the
+canonical temporal store, publications/corrections/tombstones,
+multi-source reconciliation with regional authority, deterministic
+content-addressed bundles with Ed25519 signing, transactional X-Plane
+installation with crash recovery, and a machine-enforced release gate.
+
+Golden-verified against the Laminar reference converter
+(convert424toxplane v12.4) on FAA cycles 2608 and 2609: every emitted
+earth_fix row value-identical; 1,379/1,379 procedure chains identical
+across KSFO/KDEN/KJFK/KLAX/KORD.
+
+Run the release gate:
+
+```bash
+scripts/release-gate.sh
+scripts/release-gate.sh --cifp <FAACIFP18> --effective <RFC3339> --converter <convert424toxplane.exe>
+```
 
 | Feature | Status | Crate / Component |
 | :--- | :---: | :--- |

@@ -2,18 +2,16 @@
 
 This guide explains how to install, configure, and use **OpenAIRAC**.
 
-> Status note: v0.4 (AIRAC Lifecycle, Reconciliation & Distribution). The
-> CLI, the canonical temporal store (schema v8), WMM2025, OurAirports and
-> FAA CIFP ingestion (incl. SID/STAR/approach legs), the AIRAC cycle
-> catalog, publications/corrections/tombstones, rollback, multi-source
-> reconciliation, and deterministic data bundles are functional. The CLI, the
-> canonical temporal store (schema v4), WMM2025, OurAirports ingestion,
-> the routing/procedures/integration layers, and the X-Plane 12
-> navaid/fix/airway exporter are functional. FAA CIFP ingestion
-> (incl. SID/STAR/approach legs) is implemented at the library level but
-> not yet wired into the CLI. Simulator *installation* of the exported
-> files (backup, swap, rollback) and MSFS support are planned — do not
-> point the exporter at a live simulator installation yet.
+> Status: 1.0 release candidate. The full engine is functional and
+> golden-verified against convert424toxplane v12.4 on FAA cycles 2608
+> and 2609. **OpenAIRAC is for flight simulation only** — not certified,
+> not for real-world navigation. See SECURITY.md for the signing
+> workflow and 1.0_READINESS.md for the audit state.
+>
+> X-Plane installation is transactional (backup, journaled swap,
+> post-validation, rollback) via `export xplane --install-to`. Never
+> point it at a live simulator installation without a backup; the
+> preferred path is an isolated Custom Data directory first.
 
 ---
 
