@@ -1,0 +1,19 @@
+[package]
+name = "xplane-reference-audit"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+[dependencies]
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+sha2 = { workspace = true }
+zip = "2.2"
+walkdir = "2.5"
+openairac-model = { path = "../../crates/openairac-model" }
+openairac-store = { path = "../../crates/openairac-store" }
+openairac-ingest = { path = "../../crates/openairac-ingest" }
+openairac-export-xplane = { path = "../../crates/openairac-export-xplane" }
