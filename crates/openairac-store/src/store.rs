@@ -3582,16 +3582,26 @@ pub fn record_dataset_publication_conn(
         .publication_id
         .clone()
         .ok_or_else(|| anyhow::anyhow!("publication requires a publication_id (identity)"))?;
-    let existing: Option<(String, String)> = conn
+    let existing: Option<(String, String, String)> = conn
         .query_row(
-            "SELECT content_sha256, revision_kind FROM dataset_versions
+            "SELECT content_sha256, revision_kind, provider FROM dataset_versions
              WHERE publication_id = ?1
              ORDER BY retrieved_at DESC, id DESC LIMIT 1",
             params![publication_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()?;
-    if let Some((sha, kind)) = existing {
+    if let Some((sha, kind, owner)) = existing {
+        if owner != version.provider {
+            // Cross-provider identity collision: ids are meant to be
+            // provider-unique (e.g. "faa_cifp:2608:<sha>"). Silent
+            // suppression would drop one provider's entire dataset —
+            // fail loud instead.
+            anyhow::bail!(
+                "publication '{publication_id}' is owned by provider '{owner}'                  (attempted by '{}'); publication ids must be provider-unique",
+                version.provider
+            );
+        }
         if sha == version.content_sha256 {
             return Ok(PublicationOutcome::Duplicate);
         }
@@ -6245,6 +6255,42 @@ mod tests {
         );
         assert!(store.query_waypoints_at(t1).unwrap().is_empty());
         assert_eq!(store.query_waypoints_at(t0).unwrap().len(), 1); // history intact
+    }
+
+    #[test]
+    fn test_cross_provider_publication_id_collision_fails_loud() {
+        let store = WorldStore::open_in_memory().unwrap();
+        store.insert_source_snapshot(&snapshot("snap-x")).unwrap();
+        let t0 = Utc::now();
+        let v = s7_version(
+            "FAA_CIFP",
+            "FAACIFP18",
+            Some("2608"),
+            "a".repeat(64).as_str(),
+            RevisionKind::Baseline,
+            Coverage::FullSnapshot,
+            "shared-id",
+            t0,
+            t0,
+        );
+        assert_eq!(
+            store.record_dataset_publication(&v).unwrap(),
+            PublicationOutcome::Recorded
+        );
+        // Another provider reusing the same publication id: must fail
+        // loud, never silently suppress the second provider's data.
+        let mut other = v.clone();
+        other.provider = "OurAirports".to_string();
+        let err = store.record_dataset_publication(&other).unwrap_err();
+        assert!(err.to_string().contains("provider-unique"), "{err}");
+        // Nothing mutated: the first publication remains the only row.
+        let rows = store
+            .raw_conn()
+            .query_row("SELECT COUNT(*) FROM dataset_versions", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap();
+        assert_eq!(rows, 1);
     }
 
     #[test]

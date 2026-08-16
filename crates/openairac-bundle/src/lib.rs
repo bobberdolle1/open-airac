@@ -1083,6 +1083,20 @@ mod tests {
     }
 
     #[test]
+    fn test_signed_bundle_install_without_trust_fails_closed() {
+        let (store, dir) = fixture_store();
+        let out = dir.join("bundles");
+        let (_, bundle_dir) = build_bundle(&store, &out, Utc::now()).unwrap();
+        let kp = SigningKeyPair::generate();
+        sign_bundle(&bundle_dir, &kp).unwrap();
+        // Install refuses a SignedTrusted bundle when no trust root is
+        // configured (and the previous state stays untouched).
+        let root = dir.join("install");
+        assert!(install_bundle(&root, &bundle_dir, Utc::now()).is_err());
+        assert!(!root.join("state").exists());
+    }
+
+    #[test]
     fn test_update_decisions() {
         let dir = unique_dir("chan");
         let _ = std::fs::remove_dir_all(&dir);

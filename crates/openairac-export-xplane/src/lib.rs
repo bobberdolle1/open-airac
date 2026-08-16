@@ -1692,6 +1692,39 @@ mod tests {
     }
 
     #[test]
+    fn test_truncated_journal_blocks_install() {
+        let root = unique_dir("journal_trunc");
+        let _ = std::fs::remove_dir_all(&root);
+        let target = root.join("custom_data");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join(INSTALL_LOCK), "op-1\n").unwrap();
+        std::fs::write(target.join(INSTALL_JOURNAL), "{\"operation_id\":").unwrap();
+        let staging = root.join("staging");
+        std::fs::create_dir_all(&staging).unwrap();
+        staged_layer(&staging, &[("earth_fix.dat", "I\n1100 Version\n")]);
+        // Unparsable journal: recovery fails closed; the install is
+        // refused and the lock/journal remain for operator attention.
+        let result = install_layer(&staging, &target);
+        assert!(result.is_err());
+        assert!(target.join(INSTALL_LOCK).exists());
+        assert!(target.join(INSTALL_JOURNAL).exists());
+        assert!(!target.join("earth_fix.dat").exists());
+    }
+
+    #[test]
+    fn test_install_target_is_file_fails() {
+        let root = unique_dir("target_file");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let staging = root.join("staging");
+        std::fs::create_dir_all(&staging).unwrap();
+        staged_layer(&staging, &[("earth_fix.dat", "I\n1100 Version\n")]);
+        let target_file = root.join("custom_data");
+        std::fs::write(&target_file, "not a directory").unwrap();
+        assert!(install_layer(&staging, &target_file).is_err());
+    }
+
+    #[test]
     fn test_install_lock_and_validation() {
         let root = unique_dir("install_lock");
         let _ = std::fs::remove_dir_all(&root);
