@@ -890,7 +890,12 @@ impl WorldStore {
                                 (108_000, 118_000, "VHF 108-118 MHz")
                             }
                             NavaidKind::IlsLocalizer => (108_000, 112_000, "ILS-LOC 108-112 MHz"),
-                            NavaidKind::IlsGlidepath => (328_000, 336_000, "ILS-GS 328-336 MHz"),
+                            // The model stores the PAIRED VHF frequency
+                            // (the CIFP publishes no GS UHF channel; X-Plane
+                            // explicitly wants the paired frequency).
+                            NavaidKind::IlsGlidepath => {
+                                (108_000, 112_000, "ILS-GS paired 108-112 MHz")
+                            }
                             NavaidKind::Dme => (108_000, 118_000, "DME 108-118 MHz paired"),
                             NavaidKind::Tacan => (108_000, 136_000, "TACAN 108-136 MHz paired"),
                         };

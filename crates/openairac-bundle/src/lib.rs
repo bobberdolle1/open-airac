@@ -164,6 +164,29 @@ impl SigningKeyPair {
             verifying: self.signing.verifying_key(),
         }
     }
+
+    /// Serialize the 32-byte private seed (base64). Treat this as
+    /// secret material: it MUST be provisioned offline and never
+    /// committed to a repository.
+    pub fn to_seed_base64(&self) -> String {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.encode(self.signing.to_bytes())
+    }
+
+    /// Restore a keypair from a base64 32-byte seed.
+    pub fn from_seed_base64(encoded: &str) -> Result<Self> {
+        use base64::Engine;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded.trim())
+            .context("decoding private key seed")?;
+        let seed: [u8; 32] = bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| anyhow!("private key seed must be 32 bytes"))?;
+        Ok(Self {
+            signing: SigningKey::from_bytes(&seed),
+        })
+    }
 }
 
 /// Trust root: an Ed25519 public key accepted for SignedTrusted bundles.
@@ -192,6 +215,13 @@ impl TrustRoot {
         use base64::Engine;
         base64::engine::general_purpose::STANDARD.encode(self.verifying.as_bytes())
     }
+}
+
+/// Stable key id: first 16 hex chars of sha256(public key). Used for
+/// rotation bookkeeping and audit trails.
+pub fn key_id(trust: &TrustRoot) -> String {
+    let digest = Sha256::digest(trust.verifying.as_bytes());
+    format!("{:x}", digest)[..16].to_string()
 }
 
 /// Sign an unsigned bundle in place: flips authenticity to
@@ -553,6 +583,22 @@ pub fn verify_bundle_with_trust(
     })
 }
 
+/// Verify against ANY of the supplied trust roots (rotation: multiple
+/// published keys may sign concurrently during a rollover window).
+pub fn verify_bundle_with_trust_any(
+    bundle_dir: &Path,
+    roots: &[TrustRoot],
+) -> Result<VerifyReport> {
+    let mut last_err: Option<anyhow::Error> = None;
+    for root in roots {
+        match verify_bundle_with_trust(bundle_dir, Some(root)) {
+            Ok(report) => return Ok(report),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow!("no trust roots supplied")))
+}
+
 /// Verify with no trust root (SignedTrusted bundles are rejected).
 pub fn verify_bundle(bundle_dir: &Path) -> Result<VerifyReport> {
     verify_bundle_with_trust(bundle_dir, None)
@@ -572,8 +618,23 @@ pub fn inspect_bundle(bundle_dir: &Path) -> Result<BundleManifest> {
 /// `<root>/state/installed.json`, `<root>/state/world.sqlite`,
 /// `<root>/staging/`, `<root>/backups/`.
 pub fn install_bundle(root: &Path, bundle_dir: &Path, now: DateTime<Utc>) -> Result<InstallReport> {
+    install_bundle_with_trust(root, bundle_dir, now, &[])
+}
+
+/// Install with trust roots: SignedTrusted bundles must verify against
+/// at least one of the supplied roots (empty = no trust configured).
+pub fn install_bundle_with_trust(
+    root: &Path,
+    bundle_dir: &Path,
+    now: DateTime<Utc>,
+    roots: &[TrustRoot],
+) -> Result<InstallReport> {
     // 1. Verify the bundle completely before touching local state.
-    let report = verify_bundle(bundle_dir)?;
+    let report = if roots.is_empty() {
+        verify_bundle(bundle_dir)?
+    } else {
+        verify_bundle_with_trust_any(bundle_dir, roots)?
+    };
     let manifest = inspect_bundle(bundle_dir)?;
 
     // 2. Schema compatibility: the bundle's schema version must not be
@@ -1124,6 +1185,44 @@ mod tests {
         let (_, bundle2) = build_bundle(&store2, &out2, Utc::now()).unwrap();
         std::fs::write(bundle2.join(SIGNATURE_FILE), "AAAA").unwrap();
         assert!(verify_bundle(&bundle2).is_err());
+    }
+
+    #[test]
+    fn test_seed_roundtrip_and_key_id() {
+        let kp = SigningKeyPair::generate();
+        let seed = kp.to_seed_base64();
+        let restored = SigningKeyPair::from_seed_base64(&seed).unwrap();
+        assert_eq!(
+            restored.public_key().to_base64(),
+            kp.public_key().to_base64()
+        );
+        // Key id: deterministic, 16 hex chars.
+        let id1 = key_id(&kp.public_key());
+        let id2 = key_id(&restored.public_key());
+        assert_eq!(id1, id2);
+        assert_eq!(id1.len(), 16);
+        assert!(id1.chars().all(|c| c.is_ascii_hexdigit()));
+        // Wrong-length seeds fail.
+        assert!(SigningKeyPair::from_seed_base64("QUJD").is_err());
+    }
+
+    #[test]
+    fn test_verify_any_trust_root() {
+        let (store, dir) = fixture_store();
+        let out = dir.join("bundles");
+        let (_, bundle_dir) = build_bundle(&store, &out, Utc::now()).unwrap();
+        let kp1 = SigningKeyPair::generate();
+        sign_bundle(&bundle_dir, &kp1).unwrap();
+        // Signed by kp1: verify with [kp2, kp1] succeeds (rotation window).
+        let kp2 = SigningKeyPair::generate();
+        assert!(
+            verify_bundle_with_trust_any(&bundle_dir, &[kp2.public_key(), kp1.public_key()])
+                .is_ok()
+        );
+        // Only wrong keys: fails.
+        assert!(verify_bundle_with_trust_any(&bundle_dir, &[kp2.public_key()]).is_err());
+        // Empty set: fails.
+        assert!(verify_bundle_with_trust_any(&bundle_dir, &[]).is_err());
     }
 
     #[test]

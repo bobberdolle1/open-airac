@@ -121,6 +121,12 @@ enum Commands {
         cmd: BundleCmd,
     },
 
+    /// Signing key management (offline provisioning)
+    Keygen {
+        #[command(subcommand)]
+        cmd: KeygenCmd,
+    },
+
     /// Local update channel: check and apply
     Update {
         #[command(subcommand)]
@@ -158,6 +164,10 @@ enum BundleCmd {
     Verify {
         #[arg(short, long)]
         bundle: PathBuf,
+        /// Trust root file (base64 Ed25519 public key); repeatable for
+        /// rotation windows. Required for SignedTrusted bundles.
+        #[arg(long)]
+        trust: Vec<PathBuf>,
     },
     /// Install a bundle into a local root (staged, validated, swapped)
     Install {
@@ -165,6 +175,17 @@ enum BundleCmd {
         root: PathBuf,
         #[arg(short, long)]
         bundle: PathBuf,
+        /// Trust root file(s); required for SignedTrusted bundles
+        #[arg(long)]
+        trust: Vec<PathBuf>,
+    },
+    /// Sign an unsigned bundle in place (Ed25519). Use the offline
+    /// private key; the bundle flips to SignedTrusted.
+    Sign {
+        #[arg(short, long)]
+        bundle: PathBuf,
+        #[arg(long)]
+        private_key: PathBuf,
     },
     /// List installed bundle state (current / next)
     List {
@@ -193,6 +214,27 @@ enum UpdateCmd {
         root: PathBuf,
         #[arg(short, long)]
         channel: PathBuf,
+    },
+}
+
+/// Signing key management (offline provisioning). Use `keygen
+/// generate` on an OFFLINE machine; commit only the public key.
+#[derive(Subcommand)]
+enum KeygenCmd {
+    /// Generate a new Ed25519 signing keypair. The PRIVATE key file is
+    /// secret material: generate it offline, never commit it.
+    Generate {
+        /// Path the private key seed is written to (base64, 32 bytes)
+        #[arg(long)]
+        private_key: PathBuf,
+        /// Path the public trust root is written to (base64)
+        #[arg(long)]
+        public_key: PathBuf,
+    },
+    /// Print the stable key id (sha256 of the public key, 16 hex).
+    Id {
+        #[arg(long)]
+        public_key: PathBuf,
     },
 }
 
@@ -342,6 +384,34 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match &cli.command {
+        Commands::Keygen { cmd } => match cmd {
+            KeygenCmd::Generate {
+                private_key,
+                public_key,
+            } => {
+                if private_key.exists() || public_key.exists() {
+                    anyhow::bail!(
+                        "refusing to overwrite existing key files ({:?}, {:?})",
+                        private_key,
+                        public_key
+                    );
+                }
+                let kp = openairac_bundle::SigningKeyPair::generate();
+                std::fs::write(private_key, kp.to_seed_base64() + "\n")?;
+                std::fs::write(public_key, kp.public_key().to_base64() + "\n")?;
+                println!(
+                    "Generated keypair. Key id: {}",
+                    openairac_bundle::key_id(&kp.public_key())
+                );
+                println!("  private key (SECRET, offline only): {:?}", private_key);
+                println!("  public trust root (publish):       {:?}", public_key);
+            }
+            KeygenCmd::Id { public_key } => {
+                let encoded = std::fs::read_to_string(public_key)?;
+                let root = openairac_bundle::TrustRoot::from_base64(encoded.trim())?;
+                println!("{}", openairac_bundle::key_id(&root));
+            }
+        },
         Commands::Doctor { db } => {
             println!("OpenAIRAC System Doctor");
             println!("======================");
@@ -778,8 +848,20 @@ fn main() -> Result<()> {
                     );
                 }
             }
-            BundleCmd::Verify { bundle } => {
-                let report = openairac_bundle::verify_bundle(bundle)?;
+            BundleCmd::Verify { bundle, trust } => {
+                let roots: Vec<openairac_bundle::TrustRoot> = trust
+                    .iter()
+                    .map(|p| {
+                        let encoded = std::fs::read_to_string(p)
+                            .with_context(|| format!("reading trust root {:?}", p))?;
+                        openairac_bundle::TrustRoot::from_base64(encoded.trim())
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let report = if roots.is_empty() {
+                    openairac_bundle::verify_bundle(bundle)?
+                } else {
+                    openairac_bundle::verify_bundle_with_trust_any(bundle, &roots)?
+                };
                 println!(
                     "Bundle verified: {} ({} file(s), {})",
                     report.bundle_hash,
@@ -787,8 +869,37 @@ fn main() -> Result<()> {
                     report.authenticity.as_str()
                 );
             }
-            BundleCmd::Install { root, bundle } => {
-                let report = openairac_bundle::install_bundle(root, bundle, chrono::Utc::now())?;
+            BundleCmd::Sign {
+                bundle,
+                private_key,
+            } => {
+                let seed = std::fs::read_to_string(private_key)?;
+                let kp = openairac_bundle::SigningKeyPair::from_seed_base64(seed.trim())?;
+                openairac_bundle::sign_bundle(bundle, &kp)?;
+                println!(
+                    "Bundle signed (SignedTrusted), key id {}",
+                    openairac_bundle::key_id(&kp.public_key())
+                );
+            }
+            BundleCmd::Install {
+                root,
+                bundle,
+                trust,
+            } => {
+                let roots: Vec<openairac_bundle::TrustRoot> = trust
+                    .iter()
+                    .map(|p| {
+                        let encoded = std::fs::read_to_string(p)
+                            .with_context(|| format!("reading trust root {:?}", p))?;
+                        openairac_bundle::TrustRoot::from_base64(encoded.trim())
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let report = openairac_bundle::install_bundle_with_trust(
+                    root,
+                    bundle,
+                    chrono::Utc::now(),
+                    &roots,
+                )?;
                 if report.preloaded {
                     println!(
                         "Bundle preloaded as NEXT (effective {})",
