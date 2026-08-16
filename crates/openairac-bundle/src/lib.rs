@@ -515,6 +515,20 @@ pub fn install_bundle(root: &Path, bundle_dir: &Path, now: DateTime<Utc>) -> Res
     };
     if preloaded {
         state.next = Some(artifact);
+        // ReplacePreload hygiene: only the recorded next artifact's
+        // staged payload may remain; other staged candidates are not
+        // installed state and must not linger.
+        let staged_entries: Vec<_> = std::fs::read_dir(&staging_dir)
+            .map(|it| it.flatten().collect())
+            .unwrap_or_default();
+        for entry in staged_entries {
+            let path = entry.path();
+            if path.file_name().and_then(|n| n.to_str())
+                != Some(&format!("{}.sqlite", report.bundle_hash))
+            {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
     } else {
         state.current = Some(artifact);
         state.next = None;

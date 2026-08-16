@@ -483,11 +483,17 @@ impl WorldStore {
     pub fn backup_to(&self, dst: &std::path::Path) -> Result<()> {
         let mut dest = Connection::open(dst)
             .with_context(|| format!("opening backup destination {}", dst.display()))?;
-        let backup = rusqlite::backup::Backup::new(&self.conn, &mut dest)
-            .context("starting online backup")?;
-        backup
-            .run_to_completion(64, std::time::Duration::from_millis(20), None)
-            .context("running online backup")?;
+        {
+            let backup = rusqlite::backup::Backup::new(&self.conn, &mut dest)
+                .context("starting online backup")?;
+            backup
+                .run_to_completion(64, std::time::Duration::from_millis(20), None)
+                .context("running online backup")?;
+        }
+        // Rebuild the snapshot into canonical page order so bundle
+        // payloads are byte-deterministic for identical logical state.
+        dest.execute_batch("VACUUM;")
+            .context("vacuuming snapshot")?;
         Ok(())
     }
 
@@ -4055,34 +4061,39 @@ pub fn insert_reconciliation_conflict_conn(
         &conflict.category,
         conflict.field_name.as_deref(),
     );
-    let inserted = conn
-        .execute(
-            "INSERT OR IGNORE INTO reconciliation_conflicts
-                (entity_table, canonical_id, ref_a, ref_b, category,
-                 field_name, value_a, value_b, severity, evidence,
-                 detected_at, resolved, conflict_key)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-            params![
-                conflict.entity_table,
-                conflict.canonical_id.as_ref().map(|c| c.0.as_str()),
-                conflict.ref_a,
-                conflict.ref_b,
-                conflict.category,
-                conflict.field_name,
-                conflict.value_a,
-                conflict.value_b,
-                conflict.severity.as_str(),
-                serde_json::to_string(&conflict.evidence).unwrap_or_else(|_| "[]".to_string()),
-                rfc3339(conflict.detected_at),
-                conflict.resolved.as_deref(),
-                key,
-            ],
-        )
-        .context("inserting reconciliation conflict")?;
-    if inserted == 0 {
-        return Ok(0);
-    }
-    Ok(conn.last_insert_rowid())
+    // One semantic conflict = one row (dedup by conflict_key); values
+    // and detection time are refreshed so the row always reflects the
+    // LATEST observation, not the first.
+    conn.execute(
+        "INSERT INTO reconciliation_conflicts
+            (entity_table, canonical_id, ref_a, ref_b, category,
+             field_name, value_a, value_b, severity, evidence,
+             detected_at, resolved, conflict_key)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+         ON CONFLICT(conflict_key) DO UPDATE SET
+             value_a = excluded.value_a,
+             value_b = excluded.value_b,
+             severity = excluded.severity,
+             evidence = excluded.evidence,
+             detected_at = excluded.detected_at",
+        params![
+            conflict.entity_table,
+            conflict.canonical_id.as_ref().map(|c| c.0.as_str()),
+            conflict.ref_a,
+            conflict.ref_b,
+            conflict.category,
+            conflict.field_name,
+            conflict.value_a,
+            conflict.value_b,
+            conflict.severity.as_str(),
+            serde_json::to_string(&conflict.evidence).unwrap_or_else(|_| "[]".to_string()),
+            rfc3339(conflict.detected_at),
+            conflict.resolved.as_deref(),
+            key,
+        ],
+    )
+    .context("upserting reconciliation conflict")?;
+    Ok(0)
 }
 
 pub fn query_memberships_conn(conn: &Connection) -> Result<Vec<SourceMembership>> {

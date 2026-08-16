@@ -12,6 +12,7 @@ ALTER TABLE reconciliation_conflicts ADD COLUMN conflict_key TEXT;
 
 DROP INDEX IF EXISTS idx_reconciliation_conflicts_dedup;
 
+-- Regular (non-partial) unique index: SQLite upserts cannot target
+-- partial indexes, and conflict_key is always computed on insert.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_reconciliation_conflicts_key
-    ON reconciliation_conflicts(conflict_key)
-    WHERE conflict_key IS NOT NULL;
+    ON reconciliation_conflicts(conflict_key);
