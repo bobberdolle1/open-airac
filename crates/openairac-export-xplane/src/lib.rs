@@ -159,6 +159,11 @@ impl ExportedEntityIndex {
         }
     }
 
+    #[cfg(test)]
+    fn mark_fix(&mut self, ident: &str, region: &str) {
+        self.fixes.insert((ident.to_string(), region.to_string()));
+    }
+
     /// XPAWY1101 endpoint type: 11 = enroute fix, 2 = enroute NDB,
     /// 3 = VHF navaid (VOR/TACAN/DME). `None` = not in the exported layer.
     pub fn endpoint_type(&self, ident: &str, region: &str) -> Option<u8> {
@@ -327,17 +332,28 @@ impl XPlane12Exporter {
             maximum_altitude_ft: Option<u32>,
         }
 
-        let mut merged: BTreeMap<(String, String, String, String, char, char), Segment> =
-            BTreeMap::new();
+        // Merge key includes the altitude band: airways sharing a
+        // segment with DIFFERENT bands must stay separate rows
+        // (XPAWY1101: the band on a merged row is undefined when the
+        // airways disagree; a merged row with a synthesized band would
+        // corrupt at least one airway).
+        type MergeKey = (
+            String,
+            String,
+            String,
+            String,
+            char,
+            char,
+            Option<u32>,
+            Option<u32>,
+        );
+        let mut merged: BTreeMap<MergeKey, Segment> = BTreeMap::new();
         for leg in legs {
-            let Some(level) = leg.level else {
-                report.skip(
-                    "airway",
-                    &leg.route_ident,
-                    "missing published level (H/L)".to_string(),
-                );
-                continue;
-            };
+            // CIFP publishes no H/L marker for oceanic/other routes
+            // (route type O, e.g. A555/G1); convert424toxplane emits
+            // them as low (1). Verified against converter v12.4 output
+            // for cycle 2608.
+            let level = leg.level.unwrap_or('L');
             // Fail closed on altitudes: the XPAWY1101 base/top fields have
             // no "unknown" representation, so a segment without source
             // altitudes is skipped instead of written as 0/0.
@@ -396,6 +412,8 @@ impl XPlane12Exporter {
                 end_region.clone(),
                 leg.direction,
                 level,
+                Some(minimum_altitude_ft),
+                Some(maximum_altitude_ft),
             );
             merged
                 .entry(key)
@@ -1452,6 +1470,82 @@ mod tests {
     }
 
     use super::*;
+
+    fn airway_leg(route: &str, level: Option<char>, min: u32, max: u32) -> CanonicalAirwayLeg {
+        CanonicalAirwayLeg {
+            object_id: openairac_model::AirwayLegId(format!("faa:{route}:1")),
+            route_ident: route.to_string(),
+            route_type: "R".to_string(),
+            level,
+            sequence_number: 1,
+            start_fix: "AADCO".to_string(),
+            start_icao_code: "K2".to_string(),
+            end_fix: "VERNE".to_string(),
+            end_icao_code: "K2".to_string(),
+            direction: 'N',
+            minimum_altitude_ft: Some(min),
+            maximum_altitude_ft: Some(max),
+            temporal: TemporalValidity {
+                valid_from: chrono::Utc::now(),
+                valid_until: None,
+                source_snapshot_id: openairac_model::SourceSnapshotId("snap".to_string()),
+            },
+        }
+    }
+
+    #[test]
+    fn test_awy_merge_keeps_bands_separate() {
+        let legs = vec![
+            airway_leg("T356", Some('L'), 5100, 17500),
+            airway_leg("V44", Some('L'), 13500, 17500),
+        ];
+        let mut index = ExportedEntityIndex::default();
+        index.mark_fix("AADCO", "K2");
+        index.mark_fix("VERNE", "K2");
+        let mut report = ExportReport::default();
+        let mut out = Vec::new();
+        XPlane12Exporter::export_earth_awy(
+            &legs,
+            &index,
+            "2608",
+            "20260806",
+            &mut out,
+            &mut report,
+        )
+        .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        // Two rows: one per distinct altitude band.
+        assert!(
+            text.contains(" 51 175 T356") || text.contains(" 51 175 T356"),
+            "{}",
+            text
+        );
+        assert!(text.contains(" 135 175 V44"), "{}", text);
+        assert_eq!(report.airway_rows_written, 2);
+    }
+
+    #[test]
+    fn test_awy_level_none_emits_low() {
+        let legs = vec![airway_leg("A555", None, 3000, 60000)];
+        let mut index = ExportedEntityIndex::default();
+        index.mark_fix("AADCO", "K2");
+        index.mark_fix("VERNE", "K2");
+        let mut report = ExportReport::default();
+        let mut out = Vec::new();
+        XPlane12Exporter::export_earth_awy(
+            &legs,
+            &index,
+            "2608",
+            "20260806",
+            &mut out,
+            &mut report,
+        )
+        .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        // Level 1 (low), per convert424toxplane convention for
+        // CIFP records without a published H/L marker.
+        assert!(text.contains("N 1  30 600 A555"), "{}", text);
+    }
 
     fn temporal() -> TemporalValidity {
         TemporalValidity {

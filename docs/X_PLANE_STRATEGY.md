@@ -95,6 +95,52 @@ For every record class the project decodes:
 No field is ever guessed: unsupported or unidentified columns are
 preserved verbatim in `raw` and reported as unsupported.
 
+
+## Golden compatibility harness (v0.7)
+
+`crates/openairac-export-xplane/examples/golden_compat.rs` runs
+convert424toxplane v12.4 on a CIFP master file and diffs its
+earth_fix/earth_nav/earth_awy output against the OpenAIRAC exporter
+fed from the SAME CIFP through the canonical store. Manual tool;
+requires the converter binary (never runs in CI).
+
+Cycle 2608 run results (2026-08-16):
+
+- **earth_fix.dat**: every one of our 32,431 rows is value-identical
+  to the converter (whitespace-normalized). Zero fabricated rows;
+  the 37,630 converter-only rows are records we deliberately skip
+  because required fields are missing (fail-closed; the converter
+  defaults them).
+- **earth_nav.dat**: 2,694 shared component rows; 2,604 differ only
+  in name cosmetics (the converter strips redundant `NAR` prefixes
+  and defaults unknown fields; ours writes source values verbatim).
+  Residual class diffs: 8 standalone-DME facilities with `U`
+  (undetermined) class where the converter picks 150/125 with no
+  published discriminator — ours uses a documented deterministic 125.
+- **earth_awy.dat**: 13,106 shared first-segment pairs, 12,332
+  value-identical; the rest are converter chain-row consolidations
+  and converter defaulting unknown MEAs to 0 (we skip or use real
+  values).
+
+### Real-data fixes the harness found
+
+1. **Airway MEA off-by-one** (fixed): the MEA published on a fix
+   record applies to the segment FOLLOWING that fix. The decoder
+   attached it to the segment ending at the fix. Verified: V257
+   AADCO->VERNE now carries FL115, matching the converter.
+2. **D-record elevation/magvar columns** (fixed): elevation is cols
+   80-84 in whole feet (was 81-85 read as tenths — DBL's 11,800 ft
+   decoded as 1,800); magnetic variation is cols 75-79 (was 75-80 —
+   12.0E read as 12.01E). Verified against DBL/CDO/ISFO records.
+3. **XPAWY merge semantics** (fixed): airways sharing a segment with
+   DIFFERENT altitude bands now emit separate rows (the band on a
+   merged row is undefined per XPAWY1101); CIFP records without an
+   H/L marker (oceanic/other routes) emit as low, matching the
+   converter.
+4. **DME service class** (fixed): VOR-family `U`-class records map to
+   150, standalone DME `U`-class to 125 — verified against converter
+   output for CDO/ADK/EEA.
+
 ## Related
 
 * `crates/openairac-ingest/src/faa_cifp.rs` — layered CIFP decoder

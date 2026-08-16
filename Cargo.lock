@@ -1240,6 +1240,7 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "openairac-ingest",
  "openairac-model",
  "openairac-store",
  "serde",

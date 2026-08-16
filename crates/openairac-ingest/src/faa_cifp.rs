@@ -408,10 +408,13 @@ pub fn decode_line(line: &str) -> Result<CifpRecord> {
                     .or(dme_pos)
                     .ok_or_else(|| anyhow!("D record '{ident}' without position"))?
             };
-            let elevation_ft = match cifp.field(81, 85).trim().parse::<f64>() {
-                Ok(tenths) => Some((tenths / 10.0).round() as i32),
-                Err(_) => None,
-            };
+            // Elevation: cols 80-84, whole feet. Verified against
+            // cycle 2608 records and convert424toxplane v12.4 output:
+            // DBL (Red Table VOR) '11800' -> 11,800 ft, CDO '00069'
+            // -> 69 ft, ISFO '00020' -> 20 ft. Magnetic variation is
+            // cols 75-79 ('E0120' -> 12.0E); col 85 onward is a
+            // separate field.
+            let elevation_ft = cifp.field(80, 84).trim().parse::<i32>().ok();
 
             Ok(CifpRecord::VhfNavaid {
                 record_type,
@@ -424,7 +427,7 @@ pub fn decode_line(line: &str) -> Result<CifpRecord> {
                 longitude_deg,
                 dme_latitude_deg: dme_pos.map(|p| p.0),
                 dme_longitude_deg: dme_pos.map(|p| p.1),
-                magnetic_variation_deg: parse_mag_variation(cifp.field(75, 80)),
+                magnetic_variation_deg: parse_mag_variation(cifp.field(75, 79)),
                 elevation_ft,
                 name: cifp.field(91, 120).trim().to_string(),
                 raw: line.to_string(),
@@ -805,7 +808,15 @@ fn service_volume_from_cifp_class(kind: NavaidKind, class: &str) -> Option<u16> 
                 Some(b'H') => Some(130),
                 Some(b'L') => Some(40),
                 Some(b'T') => Some(25),
-                Some(b'U') => Some(if kind == NavaidKind::Dme { 125 } else { 150 }),
+                // U = undetermined. VOR-family records map to 150;
+                // standalone DME records (' DUx' class) map to 125.
+                // Verified against converter v12.4 for cycle 2608:
+                // CDO ('VDU' -> 150), ADK/EEA (' DU' -> 125).
+                Some(b'U') => Some(if kind == NavaidKind::Dme && !class.starts_with('V') {
+                    125
+                } else {
+                    150
+                }),
                 _ => None,
             }
         }
@@ -1229,10 +1240,19 @@ impl FaaCifpAdapter {
         let mut report = CifpScanReport::default();
 
         // Per-route previous record for ER chaining.
+        //
+        // ARINC 424 semantics: the MEA/MAA on a fix record applies to
+        // the segment FOLLOWING that fix (verified against
+        // convert424toxplane v12.4 on cycle 2608: AADCO's record MEA
+        // 11500 -> leg AADCO->VERNE base FL115). The segment emitted
+        // when the next record arrives therefore carries the PREVIOUS
+        // record's altitudes, not the current one's.
         #[derive(Clone)]
         struct Prev {
             fix_ident: String,
             fix_icao_code: String,
+            minimum_altitude_ft: Option<u32>,
+            maximum_altitude_ft: Option<u32>,
         }
         let mut prev_by_route: std::collections::HashMap<String, Prev> = Default::default();
 
@@ -1270,8 +1290,8 @@ impl FaaCifpAdapter {
                             end_fix: fix_ident.clone(),
                             end_icao_code: fix_icao_code.clone(),
                             direction: 'N', // CIFP carries no directional restrictions
-                            minimum_altitude_ft,
-                            maximum_altitude_ft,
+                            minimum_altitude_ft: prev.minimum_altitude_ft,
+                            maximum_altitude_ft: prev.maximum_altitude_ft,
                             temporal: TemporalValidity {
                                 valid_from,
                                 valid_until: None,
@@ -1286,6 +1306,8 @@ impl FaaCifpAdapter {
                         Prev {
                             fix_ident,
                             fix_icao_code,
+                            minimum_altitude_ft,
+                            maximum_altitude_ft,
                         },
                     );
                 }
@@ -2376,9 +2398,12 @@ mod tests {
         assert_eq!(legs.len(), 2);
         assert_eq!(legs[0].start_fix, "ZBV");
         assert_eq!(legs[0].end_fix, "SWIMM");
-        assert_eq!(legs[0].minimum_altitude_ft, Some(8000));
+        // MEA belongs to the segment FOLLOWING the fix record it is
+        // published on: the ZBV record's 5000 applies to ZBV->SWIMM.
+        assert_eq!(legs[0].minimum_altitude_ft, Some(5000));
         assert_eq!(legs[1].start_fix, "SWIMM");
         assert_eq!(legs[1].end_fix, "TINKY");
+        assert_eq!(legs[1].minimum_altitude_ft, Some(8000));
         assert_eq!(report.airway_legs_decoded, 2);
     }
 
