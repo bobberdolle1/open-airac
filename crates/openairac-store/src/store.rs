@@ -323,7 +323,7 @@ pub fn query_runways_conn(
                         .context("computed_magnetic_designator")?,
                     true_heading_deg: row.get(5).context("true_heading_deg")?,
                     length_ft: row.get(6).context("length_ft")?,
-                    width_ft: row.get(7).context("width_ft")?,
+                    width_ft: row.get::<_, Option<u32>>(7).context("width_ft")?,
                     surface: row.get(8).context("surface")?,
                     le_ident: row.get(9).context("le_ident")?,
                     le_lat: row.get(10).context("le_lat")?,

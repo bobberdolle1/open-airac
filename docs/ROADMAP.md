@@ -49,7 +49,7 @@ distributable as verified artifacts.
 
 Complete the terminal-procedure domain before growing the map.
 
-- [ ] FAA PA/PG terminal airports and runways properly decoded (currently explicit Unsupported records)
+- [x] FAA PA/PG terminal airports and runways decoded (13,316 airports, 8,149 runway pairs from cycle 2608; verified DMS coordinates, tens-of-feet lengths, reciprocal-end pairing)
 - [ ] ILS localizer/glideslope/runway associations from PF records
 - [ ] RF arc geometry and hold geometry (rendering layer over the semantic model)
 - [ ] Remaining verified ARINC path-terminator semantics (vertical angles, course-C DF legs, MSA sectors)

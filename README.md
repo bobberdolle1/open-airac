@@ -71,8 +71,8 @@ provenance, so the engine can:
   (`openairac_ingest::faa_cifp::ingest_cifp`); CLI wiring:
   `openairac cycle discover` + `openairac sync --provider faa_cifp
   --cycle <id>` (cycle must be catalogued and its effective date
-  confirmed). PA/PG terminal airports/runways are still explicit
-  Unsupported records (v0.5 scope).
+  confirmed). Terminal airports (PA) and runway pairs (PG) are decoded
+  since v0.5 (width not published — never fabricated).
 
 ### Simulator output that works today
 
@@ -93,7 +93,7 @@ provenance, so the engine can:
 
 ### What is planned
 
-* FAA PA/PG terminal airports/runways decoding, ILS associations,
+* ILS localizer/glideslope/runway associations from PF records,
   procedure geometry (RF arcs, holds) and remaining ARINC semantics
   (v0.5).
 * Worldwide provider architecture and regional coverage (v0.6).
