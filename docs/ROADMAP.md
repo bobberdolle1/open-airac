@@ -75,13 +75,21 @@ distributable as verified artifacts.
   legally; none implemented yet — needs per-country license review)
 - [ ] Provider failover (designed: never mix worlds; not yet exercised)
 
-## Milestone v0.7 — Simulator Output & Distribution Maturity
+## Milestone v0.7 — Simulator Output & Distribution Maturity (Shipped)
 
-- [ ] Complete X-Plane production pipeline (earth_424.dat via verified conversion; earth_awy.dat native)
-- [ ] Transactional simulator installation (backup, controlled swap, rollback — designed in v0.2, not yet shipped)
-- [ ] MSFS 2024 navdata support (BGL/navdata packager)
-- [ ] Simulator compatibility validation harness (golden fixtures per simulator)
-- [ ] Signed release channel (trust root + ed25519 artifacts replacing UnsignedDevelopment)
+- [x] X-Plane production pipeline: golden compatibility harness vs
+  convert424toxplane v12.4 (32,431/32,431 fixes value-identical;
+  4,128/4,221 nav rows data-equivalent; documented divergences only)
+- [x] Transactional simulator installation: journaled install_layer
+  with backup/swap/post-validation/rollback, crash recovery,
+  failpoint tests; CLI `export xplane --install-to`
+- [x] Sim-world resolver: `resolve_sim_world` + `compare_nav_sim`
+  (layer identity file, world fingerprint cross-check); CLI
+  `--verify-sim`
+- [x] Signed release channel: Ed25519 sign/verify with fail-closed
+  trust-root handling (production keys remain a provisioning step)
+- [ ] MSFS 2024 navdata support (BGL/navdata packager — future)
+- [ ] Production trust root provisioning (outside the repository)
 
 ## "OpenAIRAC 1.0 ready" — definition
 
@@ -95,6 +103,9 @@ simulator with current AIRAC data:
 - data quality gates block releases on unresolved errors (warnings allowed);
 - FAA terminal airports/runways, ILS associations, and procedure
   geometry are complete (v0.5 + v0.6 scope).
+
+Audit state: see docs/1.0_READINESS.md (engine satisfies this
+definition except production signing trust-root provisioning).
 
 ## Future (separate product/application)
 
