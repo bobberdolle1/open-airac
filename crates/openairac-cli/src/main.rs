@@ -364,6 +364,7 @@ fn sync_fixture(store: &mut WorldStore) -> Result<()> {
             valid_from: None,
             publication_id: None,
             raw_content: content.to_string(),
+            raw_bytes: Vec::new(),
         };
         let report =
             openairac_ingest::ourairports::OurAirportsImporter::ingest_dataset(&dataset, store)?;

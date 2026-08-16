@@ -39,6 +39,8 @@ fn main() -> Result<()> {
     let cifp = PathBuf::from(&args[1]);
     let converter = PathBuf::from(&args[2]);
     let workdir = PathBuf::from(&args[3]);
+    // Optional effective instant: [effective RFC3339] [airports...]
+    // lets the harness validate any cycle (default: 2608).
     let effective: DateTime<Utc> = args
         .get(4)
         .map(|s| DateTime::parse_from_rfc3339(s).map(|d| d.with_timezone(&Utc)))
@@ -70,6 +72,8 @@ fn main() -> Result<()> {
         bail!("convert424toxplane exited with {status}");
     }
 
+    let cycle = openairac_export_xplane::airac_cycle(effective);
+
     // 2. Same CIFP through the OpenAIRAC pipeline.
     let mut store = WorldStore::open_in_memory()?;
     let snapshot_id = SourceSnapshotId("faa_cifp:golden".to_string());
@@ -77,8 +81,8 @@ fn main() -> Result<()> {
         id: snapshot_id.clone(),
         provider: "FAA_CIFP".to_string(),
         dataset: "FAACIFP18".to_string(),
-        provider_revision: Some("2608".to_string()),
-        airac_cycle: Some("2608".to_string()),
+        provider_revision: Some(cycle.clone()),
+        airac_cycle: Some(cycle.clone()),
         effective_from: Some(effective),
         effective_until: None,
         retrieved_at: Utc::now(),
@@ -89,7 +93,7 @@ fn main() -> Result<()> {
         parser_version: env!("CARGO_PKG_VERSION").to_string(),
     })?;
     store.insert_cycle(&AiracCycle {
-        id: CycleId("2608".to_string()),
+        id: CycleId(cycle.clone()),
         effective_from: Some(effective),
         effective_until: None,
         status: CycleStatus::Active,

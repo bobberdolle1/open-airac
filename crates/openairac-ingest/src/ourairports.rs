@@ -691,6 +691,7 @@ id,filename,ident,name,type,frequency_khz,latitude_deg,longitude_deg,elevation_f
             valid_from: None,
             publication_id: None,
             raw_content: content.to_string(),
+            raw_bytes: Vec::new(),
         }
     }
 

@@ -48,18 +48,26 @@ fn main() -> Result<()> {
     let cifp = PathBuf::from(&args[1]);
     let converter = PathBuf::from(&args[2]);
     let workdir = PathBuf::from(&args[3]);
-    let airports: Vec<String> = if args.len() > 4 {
-        args[4..].to_vec()
+    let airports: Vec<String> = if args.len() > 5 {
+        args[5..].to_vec()
     } else {
         ["KSFO", "KDEN", "KJFK", "KLAX", "KORD"]
             .iter()
             .map(|s| s.to_string())
             .collect()
     };
-    let effective: DateTime<Utc> = Utc
-        .with_ymd_and_hms(2026, 8, 6, 9, 0, 0)
-        .single()
-        .expect("valid date");
+    // Optional effective instant: args[4] RFC3339 (default 2608).
+    let effective: DateTime<Utc> = args
+        .get(4)
+        .map(|s| DateTime::parse_from_rfc3339(s).map(|d| d.with_timezone(&Utc)))
+        .transpose()?
+        .unwrap_or_else(|| {
+            Utc.with_ymd_and_hms(2026, 8, 6, 9, 0, 0)
+                .single()
+                .expect("valid date")
+        });
+
+    let cycle = openairac_export_xplane::airac_cycle(effective);
 
     // 1. Converter run.
     std::fs::create_dir_all(&workdir)?;
@@ -89,8 +97,8 @@ fn main() -> Result<()> {
         id: snapshot_id.clone(),
         provider: "FAA_CIFP".to_string(),
         dataset: "FAACIFP18".to_string(),
-        provider_revision: Some("2608".to_string()),
-        airac_cycle: Some("2608".to_string()),
+        provider_revision: Some(cycle.clone()),
+        airac_cycle: Some(cycle.clone()),
         effective_from: Some(effective),
         effective_until: None,
         retrieved_at: Utc::now(),
@@ -101,7 +109,7 @@ fn main() -> Result<()> {
         parser_version: env!("CARGO_PKG_VERSION").to_string(),
     })?;
     store.insert_cycle(&AiracCycle {
-        id: CycleId("2608".to_string()),
+        id: CycleId(cycle.clone()),
         effective_from: Some(effective),
         effective_until: None,
         status: CycleStatus::Active,

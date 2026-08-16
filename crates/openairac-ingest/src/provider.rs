@@ -40,6 +40,11 @@ pub struct FetchedDataset {
     pub source_uri: String,
     pub content_sha256: String,
     pub retrieved_at: DateTime<Utc>,
+    /// Raw fetched bytes, encoded as a byte-preserving latin-1 string
+    /// (byte i <-> char i). Fixed-width decoders (CIFP) rely on
+    /// 1-byte-per-char column math. Hash/parse must use this, not a
+    /// UTF-8 re-decode.
+    pub raw_bytes: Vec<u8>,
     pub provider_revision: Option<String>,
     /// AIRAC cycle this publication belongs to (None for cycle-less
     /// providers like OurAirports).
@@ -219,22 +224,32 @@ pub fn fetch_url(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
     let body = response
-        .text()
+        .bytes()
         .with_context(|| format!("reading body of {url}"))?;
-    let checksum = sha256_hex(body.as_bytes());
+    let checksum = sha256_hex(&body);
+    let raw_content = match String::from_utf8(body.to_vec()) {
+        Ok(text) => text,
+        Err(_) => {
+            // Binary payload (e.g. a zip): byte-preserving latin-1
+            // decode; providers that need the archive must extract it
+            // themselves from raw_bytes.
+            body.iter().map(|&b| b as char).collect::<String>()
+        }
+    };
     Ok(FetchedDataset {
         provider_name: provider.to_string(),
         dataset_name: dataset.to_string(),
         source_uri: url.to_string(),
         content_sha256: checksum,
         retrieved_at,
+        raw_bytes: body.to_vec(),
         provider_revision,
         airac_cycle: None,
         revision_kind: RevisionKind::Baseline,
         coverage: Coverage::FullSnapshot,
         valid_from: None,
         publication_id: None,
-        raw_content: body,
+        raw_content,
     })
 }
 

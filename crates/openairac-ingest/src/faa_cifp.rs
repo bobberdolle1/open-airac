@@ -2078,6 +2078,24 @@ impl crate::provider::DataProvider for CifpProvider {
         let mut ds = crate::provider::fetch_url("FAA_CIFP", dataset, &url, Utc::now())?;
         ds.airac_cycle = Some(selector.cycle_ident.clone());
         ds.valid_from = Some(effective_from);
+        // The FAA distributes CIFP as a zip containing the plain-text
+        // FAACIFP18 master file. Extract it; the checksum/provenance
+        // must describe the CONTENT we ingest (the extracted member),
+        // not the transport archive.
+        if ds.raw_bytes.starts_with(b"PK") {
+            let reader = std::io::Cursor::new(ds.raw_bytes.clone());
+            let mut archive = zip::ZipArchive::new(reader)
+                .map_err(|e| anyhow::anyhow!("opening FAA CIFP zip archive: {e}"))?;
+            let mut member = archive
+                .by_name("FAACIFP18")
+                .map_err(|e| anyhow::anyhow!("FAACIFP18 member not found in CIFP archive: {e}"))?;
+            let mut bytes = Vec::with_capacity(member.size() as usize);
+            std::io::Read::read_to_end(&mut member, &mut bytes)
+                .map_err(|e| anyhow::anyhow!("extracting FAACIFP18 from CIFP archive: {e}"))?;
+            ds.raw_bytes = bytes.clone();
+            ds.raw_content = bytes.iter().map(|&b| b as char).collect();
+            ds.content_sha256 = crate::provider::sha256_hex(&bytes);
+        }
         Ok(ds)
     }
 
@@ -2965,6 +2983,7 @@ mod tests {
             valid_from: None, // <- must be rejected, never inferred
             publication_id: None,
             raw_content: content,
+            raw_bytes: Vec::new(),
         };
         let provider = CifpProvider;
         let err = crate::provider::DataProvider::parse_and_ingest(&provider, &dataset, &mut store)
@@ -3022,6 +3041,7 @@ mod tests {
             valid_from: Some(vf),
             publication_id: None,
             raw_content: content.clone(),
+            raw_bytes: Vec::new(),
         };
         let mut provider_store = WorldStore::open_in_memory().unwrap();
         provider_store.migrate().unwrap();
@@ -3134,6 +3154,7 @@ mod tests {
             valid_from: Some(vf),
             publication_id: None,
             raw_content: content.to_string(),
+            raw_bytes: Vec::new(),
         }
     }
 

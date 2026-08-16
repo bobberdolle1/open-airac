@@ -62,6 +62,7 @@ fn fixture_dataset(name: &str, content: &str, retrieved_at: DateTime<Utc>) -> Fe
         valid_from: None,
         publication_id: None,
         raw_content: content.to_string(),
+        raw_bytes: Vec::new(),
     }
 }
 
