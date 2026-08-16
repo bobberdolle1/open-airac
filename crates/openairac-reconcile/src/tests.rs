@@ -828,3 +828,264 @@ fn test_paired_dme_component_not_a_candidate() {
     assert_eq!(stats.exact_matches, 1);
     assert_eq!(store.query_memberships().unwrap().len(), 2);
 }
+
+#[test]
+fn test_regionless_fallback_distinct_canonical_identities() {
+    // P0 regression: NDB "CO" exists in K2 and K6. Region-less
+    // OurAirports twins must map to TWO canonical identities — the
+    // candidate key (kind+ident) must never define identity.
+    let (store, _t0) = seeded_store();
+    let now = Utc::now();
+    // FAA K2:CO + OA twin (Colorado Springs area).
+    store
+        .insert_navaid(&navaid(
+            "faa:COK2",
+            "CO",
+            NavaidKind::Ndb,
+            400,
+            38.6944,
+            -104.7163,
+            "snap-faa",
+            now,
+        ))
+        .unwrap();
+    let mut oa_k2 = navaid(
+        "ourairports:COK2",
+        "CO",
+        NavaidKind::Ndb,
+        400,
+        38.6943,
+        -104.7160,
+        "snap-oa",
+        now,
+    );
+    oa_k2.region_code = None; // region-less provider
+    store.insert_navaid(&oa_k2).unwrap();
+    // FAA K6:CO + OA twin (New Hampshire).
+    let mut faa_k6 = navaid(
+        "faa:COK6",
+        "CO",
+        NavaidKind::Ndb,
+        400,
+        43.1188,
+        -71.4524,
+        "snap-faa",
+        now,
+    );
+    faa_k6.region_code = Some("K6".to_string());
+    store.insert_navaid(&faa_k6).unwrap();
+    let mut oa_k6 = navaid(
+        "ourairports:COK6",
+        "CO",
+        NavaidKind::Ndb,
+        400,
+        43.1188,
+        -71.4524,
+        "snap-oa",
+        now,
+    );
+    oa_k6.region_code = None;
+    store.insert_navaid(&oa_k6).unwrap();
+
+    let stats = Reconciler::new(&store).reconcile(now).unwrap();
+    assert_eq!(stats.exact_matches, 2);
+
+    // TWO canonical identities, each with exactly its two members.
+    let memberships = store.query_memberships().unwrap();
+    assert_eq!(memberships.len(), 4);
+    let mut by_canonical: std::collections::HashMap<
+        openairac_model::CanonicalEntityId,
+        Vec<&SourceMembership>,
+    > = std::collections::HashMap::new();
+    for m in &memberships {
+        by_canonical
+            .entry(m.canonical_id.clone())
+            .or_default()
+            .push(m);
+    }
+    assert_eq!(by_canonical.len(), 2, "{by_canonical:?}");
+    for (canonical, members) in &by_canonical {
+        assert_eq!(members.len(), 2, "{canonical:?}");
+        // One K2 pair or one K6 pair — never crossed.
+        let idents: Vec<&str> = members
+            .iter()
+            .map(|m| m.source.entity_id.as_str())
+            .collect();
+        assert!(
+            (idents.contains(&"faa:COK2") && idents.contains(&"ourairports:COK2"))
+                || (idents.contains(&"faa:COK6") && idents.contains(&"ourairports:COK6")),
+            "{idents:?}"
+        );
+    }
+    // No cross-membership.
+    assert!(!memberships.iter().any(|m| {
+        m.canonical_id != by_canonical.keys().next().unwrap().clone()
+            && m.source.entity_id == "faa:COK2"
+            && m.source.entity_id == "ourairports:COK6"
+    }));
+
+    // Replay: exactly the same canonical ids, no duplicates.
+    let ids_before: Vec<_> = store.query_canonical_identities().unwrap();
+    let stats2 = Reconciler::new(&store).reconcile(now).unwrap();
+    assert_eq!(stats, stats2);
+    let ids_after: Vec<_> = store.query_canonical_identities().unwrap();
+    assert_eq!(ids_before, ids_after);
+    assert_eq!(store.query_memberships().unwrap().len(), 4);
+}
+
+#[test]
+fn test_membership_intervals_follow_source_revisions() {
+    let (store, _t0) = seeded_store();
+    let t0 = Utc::now();
+    let t1 = t0 + Duration::seconds(3600);
+    // Revision A valid [t0, t1): FAA, then a correction closes it.
+    let mut rev_a = navaid(
+        "faa:ABC",
+        "ABC",
+        NavaidKind::Vor,
+        112_000,
+        30.0,
+        -80.0,
+        "snap-faa",
+        t0,
+    );
+    rev_a.temporal.valid_until = Some(t1);
+    store.insert_navaid(&rev_a).unwrap();
+    store
+        .insert_navaid(&navaid(
+            "ourairports:ABC",
+            "ABC",
+            NavaidKind::Vor,
+            112_000,
+            30.0,
+            -80.0,
+            "snap-oa",
+            t0,
+        ))
+        .unwrap();
+    // Revision B valid [t1, ...): frequency change, same identity.
+    store
+        .insert_navaid(&navaid(
+            "faa:ABC",
+            "ABC",
+            NavaidKind::Vor,
+            113_000,
+            30.0,
+            -80.0,
+            "snap-faa",
+            t1,
+        ))
+        .unwrap();
+
+    Reconciler::new(&store).reconcile(t0).unwrap();
+    Reconciler::new(&store).reconcile(t1).unwrap();
+
+    let memberships = store.query_memberships().unwrap();
+    let faa_a = memberships
+        .iter()
+        .find(|m| m.source.entity_id == "faa:ABC" && m.valid_from == t0)
+        .expect("revision A membership");
+    let faa_b = memberships
+        .iter()
+        .find(|m| m.source.entity_id == "faa:ABC" && m.valid_from == t1)
+        .expect("revision B membership");
+    // Interval copied exactly.
+    assert_eq!(faa_a.valid_until, Some(t1));
+    assert_eq!(faa_b.valid_until, None);
+
+    // canonical_entity at t0 uses A; at t1 A is not current.
+    let canonical = memberships[0].canonical_id.clone();
+    let at_t0 = crate::resolve::resolved_entity(&store, &canonical, t0)
+        .unwrap()
+        .unwrap();
+    assert_eq!(at_t0.members.len(), 2);
+    let at_t1 = crate::resolve::resolved_entity(&store, &canonical, t1)
+        .unwrap()
+        .unwrap();
+    assert_eq!(at_t1.members.len(), 2); // FAA B + OA
+    // The frequency field at t1 resolves to B's 113000 (FAA authority).
+    let freq = at_t1
+        .fields
+        .iter()
+        .find(|f| f.field == "frequency_khz")
+        .unwrap();
+    assert_eq!(freq.value, "113000");
+    // Historical world_at unchanged: store still has A for [t0,t1).
+    let world_t0 = store.query_navaids_at(t0).unwrap();
+    assert_eq!(
+        world_t0
+            .iter()
+            .find(|n| n.object_id.0 == "faa:ABC")
+            .unwrap()
+            .frequency
+            .0,
+        112_000
+    );
+    assert!(store.validate().unwrap().is_empty());
+}
+
+#[test]
+fn test_conflict_dedup_across_ten_reruns() {
+    let (store, _t0) = seeded_store();
+    let now = Utc::now();
+    // Ambiguous fixture: one FAA VOR, two OurAirports candidates in
+    // the probable band -> ambiguity conflicts with canonical NULL.
+    store
+        .insert_navaid(&navaid(
+            "faa:ABC",
+            "ABC",
+            NavaidKind::Vor,
+            112_000,
+            30.0,
+            -80.0,
+            "snap-faa",
+            now,
+        ))
+        .unwrap();
+    store
+        .insert_navaid(&navaid(
+            "ourairports:A1",
+            "ABC",
+            NavaidKind::Vor,
+            112_000,
+            30.02,
+            -80.0,
+            "snap-oa",
+            now,
+        ))
+        .unwrap();
+    store
+        .insert_navaid(&navaid(
+            "ourairports:A2",
+            "ABC",
+            NavaidKind::Vor,
+            112_000,
+            30.04,
+            -80.0,
+            "snap-oa",
+            now,
+        ))
+        .unwrap();
+
+    let mut stats = None;
+    for _ in 0..10 {
+        let s = Reconciler::new(&store).reconcile(now).unwrap();
+        match &stats {
+            None => stats = Some(s),
+            Some(prev) => assert_eq!(*prev, s),
+        }
+    }
+    let conflicts = store.query_reconciliation_conflicts().unwrap();
+    assert_eq!(conflicts.len(), 2); // exactly the two semantic ambiguity conflicts
+    // Both carry dedup keys (backfilled/inserted).
+    let nokey: i64 = store
+        .raw_conn()
+        .query_row(
+            "SELECT COUNT(*) FROM reconciliation_conflicts WHERE conflict_key IS NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(nokey, 0);
+    assert!(store.validate().unwrap().is_empty());
+}

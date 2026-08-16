@@ -17,8 +17,8 @@ mod resolve;
 
 pub use matchers::{
     EXACT_NM, IDENT_CHANGE_NM, MatchOutcome, PROBABLE_NM, RUNWAY_ENDPOINT_NM, airport_identity_key,
-    canonical_id_for, is_icao_ident, navaid_fallback_key, navaid_identity_key, runway_geometry_key,
-    waypoint_identity_key,
+    canonical_id_for, is_icao_ident, navaid_canonical_key, navaid_fallback_key,
+    navaid_identity_key, runway_geometry_key, waypoint_identity_key,
 };
 pub use resolve::{FIELD_SELECTORS, resolved_entity};
 
@@ -138,8 +138,8 @@ impl<'a> Reconciler<'a> {
                     &outcome,
                     &canonical,
                     "airports",
-                    (&ref_a, airports[a].temporal.valid_from),
-                    (&ref_b, airports[b].temporal.valid_from),
+                    (&ref_a, &airports[a].temporal),
+                    (&ref_b, &airports[b].temporal),
                     &mut stats,
                 )?;
             }
@@ -188,8 +188,8 @@ impl<'a> Reconciler<'a> {
                         &outcome,
                         &canonical,
                         "navaids",
-                        (&ref_a, navaids[a].temporal.valid_from),
-                        (&ref_b, navaids[b].temporal.valid_from),
+                        (&ref_a, &navaids[a].temporal),
+                        (&ref_b, &navaids[b].temporal),
                         &mut stats,
                     )?;
                     // Same-instant frequency disagreement is a field
@@ -271,7 +271,10 @@ impl<'a> Reconciler<'a> {
                         continue; // already decided by the strict bucket
                     }
                     stats.candidate_pairs += 1;
-                    let key = navaid_fallback_key(&navaids[a]);
+                    // Candidate discovery key != identity key: the
+                    // canonical identity derives from the strongest
+                    // natural identity (region-bearing side wins).
+                    let key = navaid_canonical_key(&navaids[a], &navaids[b]);
                     let canonical = canonical_id_for("nav", &key);
                     let ref_a = SourceEntityRef {
                         provider: provider_of(&navaids[a].temporal.source_snapshot_id),
@@ -304,8 +307,8 @@ impl<'a> Reconciler<'a> {
                         &outcome,
                         &canonical,
                         "navaids",
-                        (&ref_a, navaids[a].temporal.valid_from),
-                        (&ref_b, navaids[b].temporal.valid_from),
+                        (&ref_a, &navaids[a].temporal),
+                        (&ref_b, &navaids[b].temporal),
                         &mut stats,
                     )?;
                 }
@@ -362,8 +365,8 @@ impl<'a> Reconciler<'a> {
                         &outcome,
                         &canonical,
                         "waypoints",
-                        (&ref_a, waypoints[a].temporal.valid_from),
-                        (&ref_b, waypoints[b].temporal.valid_from),
+                        (&ref_a, &waypoints[a].temporal),
+                        (&ref_b, &waypoints[b].temporal),
                         &mut stats,
                     )?;
                 }
@@ -413,8 +416,8 @@ impl<'a> Reconciler<'a> {
                             &outcome,
                             &canonical,
                             "runways",
-                            (&ref_a, a.temporal.valid_from),
-                            (&ref_b, b.temporal.valid_from),
+                            (&ref_a, &a.temporal),
+                            (&ref_b, &b.temporal),
                             &mut stats,
                         )?;
                         if a.official_designator != b.official_designator {
@@ -540,12 +543,12 @@ impl<'a> Reconciler<'a> {
         outcome: &MatchOutcome,
         canonical: &CanonicalEntityId,
         entity_table: &str,
-        member_a: (&SourceEntityRef, DateTime<Utc>),
-        member_b: (&SourceEntityRef, DateTime<Utc>),
+        member_a: (&SourceEntityRef, &TemporalValidity),
+        member_b: (&SourceEntityRef, &TemporalValidity),
         stats: &mut RunStats,
     ) -> Result<()> {
-        let (ref_a, vf_a) = member_a;
-        let (ref_b, vf_b) = member_b;
+        let (ref_a, temporal_a) = member_a;
+        let (ref_b, temporal_b) = member_b;
         match outcome {
             MatchOutcome::Exact(evidence) | MatchOutcome::Probable(evidence) => {
                 let confidence = if matches!(outcome, MatchOutcome::Exact(_)) {
@@ -565,14 +568,17 @@ impl<'a> Reconciler<'a> {
                     None,
                     Utc::now(),
                 )?;
-                for (source_ref, vf) in [(&ref_a, vf_a), (&ref_b, vf_b)] {
+                for (source_ref, temporal) in [(&ref_a, temporal_a), (&ref_b, temporal_b)] {
                     upsert_membership_conn(
                         conn,
                         &SourceMembership {
                             canonical_id: canonical.clone(),
                             source: (*source_ref).clone(),
-                            valid_from: vf,
-                            valid_until: None,
+                            // The membership interval is the SOURCE
+                            // revision interval, copied exactly — never
+                            // approximated or left open-ended.
+                            valid_from: temporal.valid_from,
+                            valid_until: temporal.valid_until,
                             confidence,
                             match_method: method.to_string(),
                             evidence: evidence.clone(),

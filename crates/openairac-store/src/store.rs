@@ -161,7 +161,58 @@ impl WorldStore {
                 .execute_batch(include_str!("../migrations/v7_reconciliation.sql"))
                 .context("Failed to execute database migration v7_reconciliation.sql")?;
         }
-        self.conn.pragma_update(None, "user_version", 7)?;
+        if version < 8 {
+            self.conn
+                .execute_batch(include_str!("../migrations/v8_conflict_dedup.sql"))
+                .context("Failed to execute database migration v8_conflict_dedup.sql")?;
+            // Backfill legacy conflict keys deterministically.
+            type LegacyConflictRow = (
+                i64,
+                String,
+                Option<String>,
+                String,
+                String,
+                String,
+                Option<String>,
+            );
+            let legacy: Vec<LegacyConflictRow> = {
+                let mut stmt = self.conn.prepare(
+                    "SELECT id, entity_table, canonical_id, ref_a, ref_b, category, field_name
+                         FROM reconciliation_conflicts WHERE conflict_key IS NULL",
+                )?;
+                let rows = stmt.query_map([], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, String>(4)?,
+                        r.get::<_, String>(5)?,
+                        r.get::<_, Option<String>>(6)?,
+                    ))
+                })?;
+                let mut out = Vec::new();
+                for row in rows {
+                    out.push(row?);
+                }
+                out
+            };
+            for (id, table, canonical, ref_a, ref_b, category, field) in legacy {
+                let key = reconciliation_conflict_key(
+                    &table,
+                    canonical.as_deref(),
+                    &ref_a,
+                    &ref_b,
+                    &category,
+                    field.as_deref(),
+                );
+                self.conn.execute(
+                    "UPDATE reconciliation_conflicts SET conflict_key = ?1 WHERE id = ?2",
+                    params![key, id],
+                )?;
+            }
+        }
+        self.conn.pragma_update(None, "user_version", 8)?;
         Ok(())
     }
 
@@ -736,12 +787,25 @@ impl WorldStore {
             for row in rows {
                 let (id, desc, a1, a2) = row?;
                 let desc = desc.unwrap_or_default();
-                if !desc.is_empty() && desc != "+" && desc != "-" && desc != "B" {
+                // ARINC 424 field 5.128 altitude description codes.
+                // Only the blank/+/−/B semantics are interpreted today;
+                // every other PUBLISHED code is valid data, so it is a
+                // warning (not an error), and truly unknown characters
+                // are errors.
+                const ARINC_5128: &str = "+-B ACDEFGHIJKLMNOPQRSTUVWXYZ";
+                if !desc.is_empty() && !ARINC_5128.contains(&desc) {
                     push(
                         "error",
                         "procedure_legs",
                         id.clone(),
                         format!("unknown altitude descriptor '{desc}'"),
+                    );
+                } else if !desc.is_empty() && desc != "+" && desc != "-" && desc != "B" {
+                    push(
+                        "warning",
+                        "procedure_legs",
+                        id.clone(),
+                        format!("altitude descriptor '{desc}' not yet interpreted"),
                     );
                 }
                 if desc == "B" && (a1.is_none() || a2.is_none()) {
@@ -1414,6 +1478,168 @@ impl WorldStore {
                         format!("unknown entity_table '{table}'"),
                     );
                 }
+            }
+        }
+
+        // 28. Canonical navaid/waypoint identities must not span
+        // incompatible non-empty ICAO regions, and members must be
+        // geographically plausible (<= 500 nm apart).
+        {
+            for (table, region_col, lat_col, lon_col, ident_col) in [
+                (
+                    "navaids",
+                    "t.region",
+                    "latitude_deg",
+                    "longitude_deg",
+                    "ident",
+                ),
+                (
+                    "waypoints",
+                    "t.region",
+                    "latitude_deg",
+                    "longitude_deg",
+                    "ident",
+                ),
+                (
+                    "airports",
+                    "CAST(NULL AS TEXT)",
+                    "latitude_deg",
+                    "longitude_deg",
+                    "ident",
+                ),
+            ] {
+                let sql = format!(
+                    "SELECT m.canonical_id, m.entity_id,
+                            {region_col} AS region, t.{lat_col} AS lat,
+                            t.{lon_col} AS lon, t.{ident_col} AS ident
+                     FROM source_memberships m
+                     JOIN {table} t ON t.id = m.entity_id
+                     WHERE m.entity_table = '{table}' AND t.valid_until IS NULL
+                     ORDER BY m.canonical_id"
+                );
+                let mut stmt = self.conn.prepare(&sql)?;
+                let rows = stmt.query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                        r.get::<_, f64>(3)?,
+                        r.get::<_, f64>(4)?,
+                        r.get::<_, String>(5)?,
+                    ))
+                })?;
+                type CanonicalMembers = Vec<(String, Option<String>, f64, f64)>;
+                let mut by_canonical: std::collections::HashMap<String, CanonicalMembers> =
+                    std::collections::HashMap::new();
+                for row in rows {
+                    let (cid, entity, region, lat, lon, _ident) = row?;
+                    by_canonical
+                        .entry(cid)
+                        .or_default()
+                        .push((entity, region, lat, lon));
+                }
+                for (cid, members) in by_canonical {
+                    let regions: std::collections::BTreeSet<String> = members
+                        .iter()
+                        .filter_map(|(_, r, _, _)| {
+                            r.as_deref()
+                                .map(str::trim)
+                                .filter(|s| !s.is_empty())
+                                .map(|s| s.to_uppercase())
+                        })
+                        .collect();
+                    if regions.len() > 1 {
+                        push(
+                            "error",
+                            "source_memberships",
+                            cid.clone(),
+                            format!(
+                                "canonical {table} identity spans incompatible ICAO regions: {}",
+                                regions.iter().cloned().collect::<Vec<_>>().join(", ")
+                            ),
+                        );
+                    }
+                    for i in 0..members.len() {
+                        for j in (i + 1)..members.len() {
+                            let (ea, _, la_a, lo_a) = &members[i];
+                            let (eb, _, la_b, lo_b) = &members[j];
+                            let d = great_circle_nm(*la_a, *lo_a, *la_b, *lo_b);
+                            if d > 500.0 {
+                                push(
+                                    "error",
+                                    "source_memberships",
+                                    cid.clone(),
+                                    format!(
+                                        "geographically impossible members '{ea}' and '{eb}' are {d:.0} nm apart"
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 29. Membership intervals must equal their source revision
+        // intervals exactly (never approximated).
+        {
+            for table in [
+                "airports",
+                "runways",
+                "navaids",
+                "waypoints",
+                "airway_legs",
+                "procedure_legs",
+            ] {
+                let sql = format!(
+                    "SELECT m.entity_id, m.valid_from, m.valid_until
+                     FROM source_memberships m
+                     WHERE m.entity_table = '{table}'
+                       AND NOT EXISTS (
+                           SELECT 1 FROM {table} t
+                           WHERE t.id = m.entity_id
+                             AND t.valid_from = m.valid_from
+                             AND ((t.valid_until IS NULL AND m.valid_until IS NULL)
+                                  OR t.valid_until = m.valid_until)
+                       )
+                     ORDER BY m.entity_id LIMIT 20"
+                );
+                let mut stmt = self.conn.prepare(&sql)?;
+                let rows = stmt.query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                    ))
+                })?;
+                for row in rows {
+                    let (entity_id, vf, vu) = row?;
+                    push(
+                        "error",
+                        "source_memberships",
+                        entity_id,
+                        format!(
+                            "membership interval [{vf}, {vu:?}) does not match any source revision"
+                        ),
+                    );
+                }
+            }
+        }
+
+        // 30. Conflict dedup keys must be present (backfilled in v8).
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT id FROM reconciliation_conflicts WHERE conflict_key IS NULL ORDER BY id LIMIT 20",
+            )?;
+            let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
+            for row in rows {
+                let id = row?;
+                push(
+                    "warning",
+                    "reconciliation_conflicts",
+                    id.to_string(),
+                    "conflict has no dedup key".into(),
+                );
             }
         }
 
@@ -2807,6 +3033,18 @@ pub fn latest_dataset_version_conn(
     Ok(None)
 }
 
+/// Great-circle distance, nautical miles (validation geometry checks).
+fn great_circle_nm(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
+    let r = 3440.065;
+    let to_rad = std::f64::consts::PI / 180.0;
+    let (p1, l1) = (lat1 * to_rad, lon1 * to_rad);
+    let (p2, l2) = (lat2 * to_rad, lon2 * to_rad);
+    let dp = p2 - p1;
+    let dl = l2 - l1;
+    let a = (dp / 2.0).sin().powi(2) + p1.cos() * p2.cos() * (dl / 2.0).sin().powi(2);
+    2.0 * r * a.sqrt().atan2((1.0 - a).sqrt())
+}
+
 /// Entity tables eligible for full-snapshot close semantics. This is the
 /// closed set of names `close_absent_at`/`close_entity_at` accept — an
 /// arbitrary string can never reach SQL.
@@ -3649,17 +3887,53 @@ pub fn insert_identity_continuity_conn(
 /// Insert a conflict (deduplicated by the unique index; idempotent
 /// across reconciliation runs). Returns the row id, or 0 when the
 /// conflict was already recorded.
+/// Stable, normalized dedup key for one semantic conflict: entity
+/// table + canonical-or-empty + ORDERED source refs (A<->B and B<->A
+/// collapse) + category + field-or-empty. NULL fields participate
+/// deterministically via the empty string.
+pub fn reconciliation_conflict_key(
+    entity_table: &str,
+    canonical_id: Option<&str>,
+    ref_a: &str,
+    ref_b: &str,
+    category: &str,
+    field_name: Option<&str>,
+) -> String {
+    let (a, b) = if ref_a <= ref_b {
+        (ref_a, ref_b)
+    } else {
+        (ref_b, ref_a)
+    };
+    let material = format!(
+        "{entity_table}|{}|{a}|{b}|{category}|{}",
+        canonical_id.unwrap_or(""),
+        field_name.unwrap_or("")
+    );
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(material.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
 pub fn insert_reconciliation_conflict_conn(
     conn: &Connection,
     conflict: &ReconciliationConflict,
 ) -> Result<i64> {
+    let key = reconciliation_conflict_key(
+        &conflict.entity_table,
+        conflict.canonical_id.as_ref().map(|c| c.0.as_str()),
+        &conflict.ref_a,
+        &conflict.ref_b,
+        &conflict.category,
+        conflict.field_name.as_deref(),
+    );
     let inserted = conn
         .execute(
             "INSERT OR IGNORE INTO reconciliation_conflicts
                 (entity_table, canonical_id, ref_a, ref_b, category,
                  field_name, value_a, value_b, severity, evidence,
-                 detected_at, resolved)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                 detected_at, resolved, conflict_key)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 conflict.entity_table,
                 conflict.canonical_id.as_ref().map(|c| c.0.as_str()),
@@ -3673,6 +3947,7 @@ pub fn insert_reconciliation_conflict_conn(
                 serde_json::to_string(&conflict.evidence).unwrap_or_else(|_| "[]".to_string()),
                 rfc3339(conflict.detected_at),
                 conflict.resolved.as_deref(),
+                key,
             ],
         )
         .context("inserting reconciliation conflict")?;
@@ -4459,7 +4734,7 @@ mod tests {
         let store = WorldStore::open_in_memory().unwrap();
         let status = store.status().unwrap();
         assert!(status.integrity_ok);
-        assert_eq!(status.migration_version, 7);
+        assert_eq!(status.migration_version, 8);
         assert_eq!(status.total_airports, 0);
 
         let snap = snapshot("snap-001");
@@ -4897,7 +5172,7 @@ mod tests {
 
         // Opening with the current code must migrate v1 -> v3 in place.
         let store = WorldStore::open(&path).unwrap();
-        assert_eq!(store.migration_version().unwrap(), 7);
+        assert_eq!(store.migration_version().unwrap(), 8);
         let at = store.query_airports_at(Utc::now()).unwrap();
         assert_eq!(at.len(), 1);
         assert_eq!(at[0].ident, "KSFO");

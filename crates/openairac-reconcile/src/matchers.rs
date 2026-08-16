@@ -96,13 +96,42 @@ pub fn navaid_identity_key(n: &CanonicalNavaid) -> String {
 }
 
 /// Navaid fallback key for providers without ICAO region codes:
-/// (kind class, ident). Pairs are coordinate-gated in the matcher.
+/// (kind class, ident). This is a CANDIDATE DISCOVERY key only — it is
+/// NOT globally unique and MUST NEVER define canonical identity (NDB
+/// "CO" exists many times worldwide).
 pub fn navaid_fallback_key(n: &CanonicalNavaid) -> String {
     format!(
         "{}:{}",
         navaid_kind_class(&n.kind),
         n.ident.trim().to_uppercase()
     )
+}
+
+/// Canonical identity key for a region-less fallback pair.
+///
+/// The strongest natural identity wins: when either side carries an
+/// ICAO region, the canonical identity derives from
+/// (kind class, ident, region) — so FAA K2:CO and K6:CO produce TWO
+/// distinct canonical identities even though the region-less
+/// OurAirports twins share the same fallback candidate key.
+///
+/// When NEITHER side has a region, the identity is seeded spatially
+/// (kind class, ident, 0.01-degree coordinate cell ≈ 1 km): stable
+/// under ordinary coordinate drift, deterministic, never silently
+/// kind+ident-global.
+pub fn navaid_canonical_key(a: &CanonicalNavaid, b: &CanonicalNavaid) -> String {
+    let kind = navaid_kind_class(&a.kind);
+    let ident = a.ident.trim().to_uppercase();
+    let region = a
+        .region_code
+        .as_deref()
+        .filter(|r| !r.trim().is_empty())
+        .or_else(|| b.region_code.as_deref().filter(|r| !r.trim().is_empty()))
+        .map(|r| r.trim().to_uppercase());
+    match region {
+        Some(r) => format!("{kind}:{ident}:{r}"),
+        None => format!("{kind}:{ident}:cell:{:.2},{:.2}", a.latitude, a.longitude),
+    }
 }
 
 /// Waypoint identity key: ident + ICAO region. Same name in different
