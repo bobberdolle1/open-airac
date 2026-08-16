@@ -732,7 +732,7 @@ impl XPlane12Exporter {
             nav.longitude,
             elevation,
             freq,
-            25,
+            18,
             bearing_field,
             nav.ident,
             airport,
@@ -777,7 +777,7 @@ impl XPlane12Exporter {
             nav.longitude,
             elevation,
             freq,
-            25,
+            18,
             angle_field,
             nav.ident,
             airport,
@@ -878,6 +878,13 @@ fn row_code_for(nav: &CanonicalNavaid) -> u8 {
 }
 
 /// Fields every ILS component row needs; error names the first missing one.
+///
+/// The true bearing is derived (magnetic course + station declination)
+/// rather than required verbatim: CIFP publishes the magnetic front
+/// course (PF final leg) and the station declination (PI/D record) but
+/// no explicit true bearing. Derived values match convert424toxplane
+/// within the source's course precision (verified for ISFO/IABE on
+/// cycle 2608).
 fn ils_required(nav: &CanonicalNavaid) -> Result<(&str, &str, &str, f64, f64), String> {
     let Some(airport) = nav.associated_airport.as_deref().filter(|a| !a.is_empty()) else {
         return Err("missing associated airport".to_string());
@@ -891,10 +898,19 @@ fn ils_required(nav: &CanonicalNavaid) -> Result<(&str, &str, &str, f64, f64), S
     let Some(bearing_mag) = nav.localizer_bearing_mag_deg else {
         return Err("missing localizer magnetic bearing".to_string());
     };
-    let Some(bearing_true) = nav.localizer_bearing_true_deg else {
-        return Err("missing localizer true bearing".to_string());
+    let Some(declination) = nav.magnetic_variation_deg else {
+        return Err("missing station declination".to_string());
     };
-    Ok((airport, region, runway, bearing_mag, bearing_true))
+    // Normalize: a due-north course is published as 360.0 and must
+    // not produce a 360.0 true bearing (IAGY: 347 + 13 = 360 -> 0.0,
+    // verified against converter output 124920.114).
+    Ok((
+        airport,
+        region,
+        runway,
+        bearing_mag,
+        (bearing_mag + declination).rem_euclid(360.0),
+    ))
 }
 
 fn ensure_name_suffix(name: &str, kind: NavaidKind) -> String {

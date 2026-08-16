@@ -231,6 +231,25 @@ pub enum CifpRecord {
         name: String,
         raw: String,
     },
+    IlsLocalizerRecord {
+        record_type: String,
+        airport_ident: String,
+        icao_code: String,
+        ident: String,
+        frequency_khz: u32,
+        /// Runway end designator (e.g. `06`).
+        runway: String,
+        latitude_deg: f64,
+        longitude_deg: f64,
+        /// Station declination (cols 91-95), e.g. `W0120` -> -12.0.
+        magnetic_variation_deg: Option<f64>,
+        /// Station elevation in feet (cols 98-102).
+        elevation_ft: Option<i32>,
+        /// Glideslope antenna position (cols 56-74).
+        glideslope_latitude_deg: Option<f64>,
+        glideslope_longitude_deg: Option<f64>,
+        raw: String,
+    },
     NdbNavaid {
         record_type: String,
         airport_ident: String,
@@ -611,6 +630,58 @@ pub fn decode_line(line: &str) -> Result<CifpRecord> {
                     route_qualifiers: cifp.field(119, 120).to_string(),
                     raw: line.to_string(),
                 })
+            } else if kind_char == 'I' {
+                // PI airport/heliport localizer. Verified against real
+                // cycle 2608 records + convert424toxplane v12.4
+                // output (IABE at KABE: position 40.661766667 /
+                // -75.426430556, 110.70 MHz, RW06):
+                // ident 14-17 (continuation at 18: '2' = second PI
+                // record for the facility), frequency 22-27,
+                // runway designator 30-32 ('RW' at 28-29),
+                // position 33-51. The localizer bearing
+                // columns are NOT decoded (not yet verified); the
+                // bearing is enriched later from the PF-derived ILS
+                // association, which is published and verified data.
+                let airport_ident = cifp.field(7, 10).trim().to_string();
+                let icao_code = cifp.field(11, 12).trim().to_string();
+                let ident = cifp.field(14, 17).trim().to_string();
+                if airport_ident.is_empty() || ident.is_empty() {
+                    return unsupported("localizer record without ident/airport");
+                }
+                let frequency_khz: u32 = match cifp.field(22, 27).trim().parse::<u32>() {
+                    Ok(v) if v > 0 => v * 10, // "011070" -> 110.70 MHz
+                    _ => return unsupported("localizer record without frequency"),
+                };
+                let runway = cifp.field(30, 32).trim().to_string();
+                let (latitude_deg, longitude_deg) =
+                    parse_coord_pair(cifp.field(33, 41), cifp.field(42, 51))?
+                        .ok_or_else(|| anyhow!("PI record '{ident}' without coordinates"))?;
+                // Glideslope antenna position (cols 56-74), decoded
+                // like the D record's DME position pair. Absent for
+                // localizer-only facilities: the record then yields
+                // only the localizer (fail-closed, no fabrication).
+                let glideslope_position = parse_coord_pair(cifp.field(56, 64), cifp.field(65, 74))?;
+                // Verified against real records + converter output:
+                // IABE declination W0120 -> -12.0, elevation 00385 ->
+                // 385 ft; IBZY E0110 -> +11.0, elevation 05304 ->
+                // 5,304 ft.
+                let magnetic_variation_deg = parse_mag_variation(cifp.field(91, 95));
+                let elevation_ft = cifp.field(98, 102).trim().parse::<i32>().ok();
+                Ok(CifpRecord::IlsLocalizerRecord {
+                    record_type,
+                    airport_ident,
+                    icao_code,
+                    ident,
+                    frequency_khz,
+                    runway,
+                    latitude_deg,
+                    longitude_deg,
+                    magnetic_variation_deg,
+                    elevation_ft,
+                    glideslope_latitude_deg: glideslope_position.map(|p| p.0),
+                    glideslope_longitude_deg: glideslope_position.map(|p| p.1),
+                    raw: line.to_string(),
+                })
             } else if kind_char == 'A' {
                 // PA terminal airport. Layout verified against real
                 // cycle 2608 records for KSFO/KDEN/KJFK/KSEA:
@@ -903,6 +974,75 @@ pub fn interpret(
                 temporal,
             })]
         }
+        CifpRecord::IlsLocalizerRecord {
+            record_type,
+            airport_ident,
+            icao_code,
+            ident,
+            frequency_khz,
+            runway,
+            latitude_deg,
+            longitude_deg,
+            magnetic_variation_deg,
+            elevation_ft,
+            glideslope_latitude_deg,
+            glideslope_longitude_deg,
+            ..
+        } => {
+            let temporal = temporal.clone();
+            let localizer = CanonicalNavaid {
+                object_id: NavaidId(format!("faa:{record_type}:{icao_code}:{ident}")),
+                ident: ident.clone(),
+                name: ident.clone(),
+                kind: NavaidKind::IlsLocalizer,
+                frequency: FrequencyKhz(*frequency_khz),
+                latitude: *latitude_deg,
+                longitude: *longitude_deg,
+                elevation_ft: *elevation_ft,
+                region_code: Some(icao_code.clone()),
+                associated_airport: Some(airport_ident.clone()),
+                associated_runway: (!runway.is_empty()).then(|| runway.clone()),
+                magnetic_variation_deg: *magnetic_variation_deg,
+                localizer_bearing_true_deg: None,
+                localizer_bearing_mag_deg: None,
+                glideslope_angle_deg: None,
+                slaved_variation_deg: None,
+                service_volume_nm: Some(18),
+                dme_paired: false,
+                temporal,
+            };
+            if let (Some(glideslope_latitude_deg), Some(glideslope_longitude_deg)) =
+                (*glideslope_latitude_deg, *glideslope_longitude_deg)
+            {
+                let glideslope = CanonicalNavaid {
+                    object_id: NavaidId(format!("faa:{record_type}:{icao_code}:{ident}:gs")),
+                    ident: ident.clone(),
+                    name: ident.clone(),
+                    kind: NavaidKind::IlsGlidepath,
+                    frequency: FrequencyKhz(*frequency_khz),
+                    latitude: glideslope_latitude_deg,
+                    longitude: glideslope_longitude_deg,
+                    elevation_ft: *elevation_ft,
+                    region_code: Some(icao_code.clone()),
+                    associated_airport: Some(airport_ident.clone()),
+                    associated_runway: (!runway.is_empty()).then(|| runway.clone()),
+                    magnetic_variation_deg: *magnetic_variation_deg,
+                    localizer_bearing_true_deg: None,
+                    localizer_bearing_mag_deg: None,
+                    glideslope_angle_deg: None,
+                    slaved_variation_deg: None,
+                    service_volume_nm: Some(18),
+                    dme_paired: false,
+                    temporal: localizer.temporal.clone(),
+                };
+                vec![
+                    CifpInterpretation::Navaid(localizer),
+                    CifpInterpretation::Navaid(glideslope),
+                ]
+            } else {
+                vec![CifpInterpretation::Navaid(localizer)]
+            }
+        }
         CifpRecord::VhfNavaid {
             record_type,
             airport_ident,
@@ -1167,6 +1307,7 @@ fn record_to_raw(record: &CifpRecord) -> String {
     match record {
         CifpRecord::Waypoint { raw, .. }
         | CifpRecord::VhfNavaid { raw, .. }
+        | CifpRecord::IlsLocalizerRecord { raw, .. }
         | CifpRecord::NdbNavaid { raw, .. }
         | CifpRecord::Airway { raw, .. }
         | CifpRecord::ProcedureLeg { raw, .. }
@@ -1592,7 +1733,7 @@ impl FaaCifpAdapter {
             // bearing/glideslope (closes the v0.3 D-record gap).
             let mut navs = navaids.clone();
             for n in navs.iter_mut() {
-                if n.kind == NavaidKind::IlsLocalizer
+                if matches!(n.kind, NavaidKind::IlsLocalizer | NavaidKind::IlsGlidepath)
                     && let Some(assoc) = ils_associations.iter().find(|a| {
                         a.localizer_ident == n.ident
                             && a.airport_ident == n.associated_airport.clone().unwrap_or_default()
@@ -2235,6 +2376,58 @@ mod tests {
                 assert_eq!(elevation_ft, Some(20));
             }
             other => panic!("expected ILS localizer, got {other:?}"),
+        }
+    }
+
+    // Real PI localizer record from FAA CIFP cycle 2608 (public
+    // domain US Government work); decoded values cross-checked against
+    // convert424toxplane v12.4 output for KABE (IABE localizer:
+    // 40.661766667 / -75.426430556, 110.70 MHz, RW06).
+    const PI_IABE: &str = "SUSAP KABEK6IIABE2   011070RW06 N40394236W0752535150633N40385895W0752652331010 12200466300W01205700385                     129732403";
+
+    #[test]
+    fn test_decode_pi_localizer() {
+        match decode_line(PI_IABE).unwrap() {
+            CifpRecord::IlsLocalizerRecord {
+                airport_ident,
+                icao_code,
+                ident,
+                frequency_khz,
+                runway,
+                latitude_deg,
+                longitude_deg,
+                magnetic_variation_deg,
+                elevation_ft,
+                ..
+            } => {
+                assert_eq!(airport_ident, "KABE");
+                assert_eq!(icao_code, "K6");
+                assert_eq!(ident, "IABE");
+                assert_eq!(frequency_khz, 110_700);
+                assert_eq!(runway, "06");
+                assert!((latitude_deg - 40.661766667).abs() < 5e-9);
+                assert!((longitude_deg - (-75.426430556)).abs() < 5e-9);
+                assert!((magnetic_variation_deg.unwrap() - (-12.0)).abs() < 1e-6);
+                assert_eq!(elevation_ft, Some(385));
+            }
+            other => panic!("expected PI localizer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_interpret_pi_localizer() {
+        let snapshot_id = SourceSnapshotId("snap-pi".to_string());
+        match &interpret(&decode_line(PI_IABE).unwrap(), &snapshot_id, Utc::now())[0] {
+            CifpInterpretation::Navaid(nav) => {
+                assert_eq!(nav.kind, NavaidKind::IlsLocalizer);
+                assert_eq!(nav.object_id.0, "faa:SUSA:K6:IABE");
+                assert_eq!(nav.associated_airport.as_deref(), Some("KABE"));
+                assert_eq!(nav.associated_runway.as_deref(), Some("06"));
+                assert_eq!(nav.frequency.0, 110_700);
+                assert_eq!(nav.elevation_ft, Some(385));
+                assert!((nav.magnetic_variation_deg.unwrap() - (-12.0)).abs() < 1e-6);
+            }
+            other => panic!("expected navaid, got {other:?}"),
         }
     }
 

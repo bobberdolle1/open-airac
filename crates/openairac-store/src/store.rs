@@ -1846,7 +1846,7 @@ impl WorldStore {
                     .query_row(
                         "SELECT 1 FROM navaids
                          WHERE ident = ?1 AND associated_airport = ?2
-                           AND navaid_type = 'IlsLocalizer'
+                           AND navaid_type = 'ILS-LOC'
                          LIMIT 1",
                         params![loc, airport],
                         |_| Ok(()),

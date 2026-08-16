@@ -218,10 +218,44 @@ fn diff_nav(converter: &Path, ours: &Path) -> Result<()> {
                     Err(_) => v.to_string(),
                 }
             };
+            // The bearing field (token 6) packs a magnetic course and
+            // a true bearing. Ours derives true from published values
+            // (course 0.1 deg + declination 0.1 deg); the converter
+            // computes it from geometry to 0.001 deg. The published
+            // values round to whole/0.1 degrees, so compare with
+            // 1.0 deg tolerance: the FAA publishes whole-degree
+            // courses/declinations in some records, while the
+            // converter uses WMM geometry (IAAQ 93.0 vs 92.683; ICFN
+            // 262.0 vs 262.98).
             let data_eq = nc[1..8]
                 .iter()
                 .zip(no[1..8].iter())
-                .all(|(a, b)| norm(a) == norm(b));
+                .enumerate()
+                .all(|(idx, (a, b))| {
+                    if idx == 5 {
+                        // Compare the true-bearing part modulo 360
+                        // (the packings differ in how a due-north
+                        // course is represented: ours normalizes
+                        // 360.0 -> 0.0, the converter keeps 359.762).
+                        match (a.parse::<f64>(), b.parse::<f64>()) {
+                            (Ok(x), Ok(y)) => {
+                                // Published-precision bound: the FAA
+                                // publishes whole-degree courses and
+                                // declinations in some records, so the
+                                // derived true bearing can be up to
+                                // ~1.0 deg from the WMM geometry
+                                // (ICFN: 262.0 published vs 262.98
+                                // computed).
+                                let d =
+                                    (x.rem_euclid(360.0) - y.rem_euclid(360.0)).rem_euclid(360.0);
+                                d <= 1.0 || d >= 359.0
+                            }
+                            _ => a == b,
+                        }
+                    } else {
+                        norm(a) == norm(b)
+                    }
+                });
             if data_eq && nc[0] != no[0] {
                 row_code_only += 1;
             } else if data_eq {
@@ -263,7 +297,9 @@ fn diff_nav(converter: &Path, ours: &Path) -> Result<()> {
         "  (remaining data diffs: class for standalone DME facilities with \
          'U' = undetermined class — converter writes 150 for some, 125 for \
          others with no published discriminator; ours is a documented \
-         deterministic default of 125)"
+         deterministic default of 125. IBWY: the source publishes \
+         declination 0 and course 228.0; the converter uses its own WMM \
+         declination — ours stays source-faithful)"
     );
     Ok(())
 }

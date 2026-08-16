@@ -287,6 +287,25 @@ pub fn build_bundle(
     let status = store.status()?;
     let schema_version = status.migration_version;
 
+    // Quality gate: a bundle must not ship a store with unresolved
+    // validation errors (warnings are allowed — they are reported in
+    // the manifest, not silently dropped).
+    let validation = store.validate()?;
+    let errors: Vec<&openairac_store::StoreIssue> = validation
+        .iter()
+        .filter(|i| i.severity == "error")
+        .collect();
+    if !errors.is_empty() {
+        bail!(
+            "refusing to build bundle: store has {} unresolved validation error(s); \
+             first: {}:{}: {}",
+            errors.len(),
+            errors[0].table,
+            errors[0].id,
+            errors[0].message
+        );
+    }
+
     // Publications: every recorded dataset version.
     let publications: Vec<PublicationRef> = store
         .query_dataset_versions()?
@@ -917,6 +936,41 @@ mod tests {
             })
             .unwrap();
         (store, dir)
+    }
+
+    #[test]
+    fn test_build_refuses_store_with_validation_errors() {
+        let (store, dir) = fixture_store();
+        // Impossible temporal range (valid_until <= valid_from),
+        // injected at the SQL level: the typed insert path rejects
+        // such rows, so the gate exercises data that could only
+        // arrive through corruption or a buggy writer.
+        let t = Utc::now();
+        store
+            .raw_conn()
+            .execute(
+                "INSERT INTO airports (id, ident, name, airport_type, latitude_deg,
+                longitude_deg, elevation_ft, iso_country, municipality,
+                source_snapshot_id, valid_from, valid_until)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, NULL, ?8, ?9, ?10)",
+                rusqlite::params![
+                    "ourairports:2",
+                    "KJFK",
+                    "Impossible range",
+                    "large_airport",
+                    40.64,
+                    -73.78,
+                    "US",
+                    "snap-1",
+                    t.to_rfc3339(),
+                    (t - chrono::TimeDelta::seconds(1)).to_rfc3339(),
+                ],
+            )
+            .unwrap();
+        let out = dir.join("bundles");
+        let err = build_bundle(&store, &out, Utc::now()).unwrap_err();
+        assert!(err.to_string().contains("validation error"), "{err}");
+        assert!(!out.exists() || std::fs::read_dir(&out).unwrap().count() == 0);
     }
 
     #[test]
