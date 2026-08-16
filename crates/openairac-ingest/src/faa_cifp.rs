@@ -602,7 +602,7 @@ pub fn decode_line(line: &str) -> Result<CifpRecord> {
                         .trim()
                         .parse::<f64>()
                         .ok()
-                        .filter(|v| *v > 0.0)
+                        .filter(|v| *v != 0.0)
                         .map(|v| v / 100.0),
                     msa_center_fix: msa_center,
                     route_qualifiers: cifp.field(119, 120).to_string(),
@@ -1217,6 +1217,7 @@ impl FaaCifpAdapter {
         Vec<CanonicalProcedureLeg>,
         Vec<CanonicalAirport>,
         Vec<CanonicalRunway>,
+        Vec<IlsAssociation>,
         CifpScanReport,
     ) {
         let mut waypoints = Vec::new();
@@ -1510,15 +1511,88 @@ impl FaaCifpAdapter {
             &mut report.unsupported_reasons,
         );
 
-        (
-            waypoints,
-            navaids,
-            airway_legs,
-            procedure_legs,
-            airports,
-            runways,
-            report,
-        )
+        // Verified ILS associations: for each F-kind approach whose
+        // ident starts with 'I', the final RW-fix CF/TF leg's
+        // recommended navaid IS the localizer; its course is the
+        // bearing and its vertical angle the glideslope.
+        let mut ils_associations = Vec::new();
+        {
+            let mut groups: std::collections::HashMap<
+                (String, String),
+                Vec<&CanonicalProcedureLeg>,
+            > = std::collections::HashMap::new();
+            for leg in &procedure_legs {
+                if leg.procedure_kind == 'F' && leg.procedure_ident.starts_with('I') {
+                    groups
+                        .entry((leg.airport_ident.clone(), leg.procedure_ident.clone()))
+                        .or_default()
+                        .push(leg);
+                }
+            }
+            for ((airport, ident), legs) in groups {
+                let Some(final_leg) = legs.iter().find(|l| {
+                    l.fix_ident.starts_with("RW")
+                        && matches!(l.path_terminator.as_str(), "CF" | "TF")
+                        && l.recommended_navaid.is_some()
+                }) else {
+                    continue;
+                };
+                let Some(bearing) = final_leg.course_b_deg else {
+                    continue;
+                };
+                let Some(angle) = final_leg.vertical_angle_deg else {
+                    continue;
+                };
+                let nav = final_leg.recommended_navaid.as_deref().unwrap_or("");
+                let mut parts = nav.split(':');
+                let loc_ident = parts.next().unwrap_or("").trim().to_string();
+                let loc_region = parts.next().unwrap_or("").trim().to_string();
+                if loc_ident.is_empty() {
+                    continue;
+                }
+                let runway_end = ident
+                    .strip_prefix('I')
+                    .unwrap_or(ident.as_str())
+                    .to_string();
+                ils_associations.push(IlsAssociation {
+                    airport_ident: airport.clone(),
+                    icao_code: final_leg.icao_code.clone(),
+                    approach_ident: ident.clone(),
+                    runway_end,
+                    localizer_ident: loc_ident,
+                    localizer_region: loc_region,
+                    localizer_bearing_mag_deg: bearing,
+                    glideslope_angle_deg: angle.abs(),
+                    source_snapshot_id: snapshot_id.clone(),
+                });
+            }
+            // Enrich the canonical localizer navaids with the verified
+            // bearing/glideslope (closes the v0.3 D-record gap).
+            let mut navs = navaids.clone();
+            for n in navs.iter_mut() {
+                if n.kind == NavaidKind::IlsLocalizer
+                    && let Some(assoc) = ils_associations.iter().find(|a| {
+                        a.localizer_ident == n.ident
+                            && a.airport_ident == n.associated_airport.clone().unwrap_or_default()
+                    })
+                {
+                    n.localizer_bearing_mag_deg = Some(assoc.localizer_bearing_mag_deg);
+                    n.glideslope_angle_deg = Some(assoc.glideslope_angle_deg);
+                }
+            }
+            let navaids = navs;
+
+            (
+                waypoints,
+                navaids,
+                airway_legs,
+                procedure_legs,
+                airports,
+                runways,
+                ils_associations,
+                report,
+            )
+        }
     }
 
     /// Parse CIFP content and ingest the canonical entities into the store
@@ -1529,8 +1603,16 @@ impl FaaCifpAdapter {
         valid_from: DateTime<Utc>,
         store: &mut WorldStore,
     ) -> Result<CifpScanReport> {
-        let (waypoints, navaids, airway_legs, procedure_legs, airports, runways, report) =
-            Self::parse_cifp_content(content, snapshot_id, valid_from);
+        let (
+            waypoints,
+            navaids,
+            airway_legs,
+            procedure_legs,
+            airports,
+            runways,
+            ils_associations,
+            report,
+        ) = Self::parse_cifp_content(content, snapshot_id, valid_from);
 
         store.transact(|conn| {
             insert_cifp_entities_conn(conn, &waypoints, &navaids, &airway_legs, &procedure_legs)?;
@@ -1539,6 +1621,9 @@ impl FaaCifpAdapter {
             }
             for runway in &runways {
                 openairac_store::insert_runway_conn(conn, runway)?;
+            }
+            for assoc in &ils_associations {
+                openairac_store::insert_ils_association_conn(conn, assoc)?;
             }
             Ok(())
         })?;
@@ -1796,8 +1881,16 @@ impl crate::provider::DataProvider for CifpProvider {
             }
         }
 
-        let (waypoints, navaids, airway_legs, procedure_legs, airports, runways, scan) =
-            FaaCifpAdapter::parse_cifp_content(&dataset.raw_content, &snapshot_id, valid_from);
+        let (
+            waypoints,
+            navaids,
+            airway_legs,
+            procedure_legs,
+            airports,
+            runways,
+            ils_associations,
+            scan,
+        ) = FaaCifpAdapter::parse_cifp_content(&dataset.raw_content, &snapshot_id, valid_from);
 
         // Full-snapshot removal semantics: build the per-table seen sets
         // from EVERY identified record (decoded entities). Unsupported
@@ -1869,6 +1962,7 @@ impl crate::provider::DataProvider for CifpProvider {
                 procedure_legs: procedure_legs.clone(),
             },
             tombstones: Vec::new(),
+            ils_associations: ils_associations.clone(),
             masked_tables: masked.clone(),
             publication_id: publication_id.clone(),
         };
@@ -2275,7 +2369,7 @@ mod tests {
     fn test_parse_cifp_content_chains_airway_legs() {
         let content = format!("{ER_A315_1}\n{ER_A315_2}\n{ER_A315_3}\n{EA_AAARG}\n");
         let snapshot_id = SourceSnapshotId("snap-faa".to_string());
-        let (waypoints, _navaids, legs, _procedures, _airports, _runways, report) =
+        let (waypoints, _navaids, legs, _procedures, _airports, _runways, _ils, report) =
             FaaCifpAdapter::parse_cifp_content(&content, &snapshot_id, Utc::now());
 
         assert_eq!(waypoints.len(), 1);
@@ -2910,7 +3004,7 @@ mod tests {
         ]
         .join("\n");
         let snapshot = SourceSnapshotId("snap-t".to_string());
-        let (_wp, _nav, _legs, _proc, _airports, runways, report) =
+        let (_wp, _nav, _legs, _proc, _airports, runways, _ils, report) =
             FaaCifpAdapter::parse_cifp_content(&content, &snapshot, Utc::now());
         assert_eq!(report.runway_ends_decoded, 2);
         assert_eq!(report.runways_decoded, 1);
@@ -2937,7 +3031,7 @@ mod tests {
         ]
         .join("\n");
         let snapshot = SourceSnapshotId("snap-t".to_string());
-        let (_wp, _nav, _legs, _proc, _airports, runways, report) =
+        let (_wp, _nav, _legs, _proc, _airports, runways, _ils, report) =
             FaaCifpAdapter::parse_cifp_content(&content, &snapshot, Utc::now());
         assert_eq!(report.runways_decoded, 1);
         assert_eq!(report.unpaired_runway_ends, 0);
@@ -2950,10 +3044,39 @@ mod tests {
         // Only one end of 10L/28R: fail closed, no half-runway.
         let content = "SUSAP KSFOK2GRW10L   0118701040 N37374346W122233621         -0030900006000055200R                                          146341707\n";
         let snapshot = SourceSnapshotId("snap-t".to_string());
-        let (_wp, _nav, _legs, _proc, _airports, runways, report) =
+        let (_wp, _nav, _legs, _proc, _airports, runways, _ils, report) =
             FaaCifpAdapter::parse_cifp_content(content, &snapshot, Utc::now());
         assert_eq!(report.runways_decoded, 0);
         assert_eq!(report.unpaired_runway_ends, 1);
         assert!(runways.is_empty());
+    }
+
+    #[test]
+    fn test_ils_association_ksfo_i28l() {
+        // Real cycle 2608 KSFO I28L main body: final RW28L CF leg with
+        // localizer ISFO, bearing 284.0, glideslope 2.85.
+        let content = [
+            "SUSAP KSFOK2FI28L  I      010HEMANK2PC0E  I    IF ISFOK2      10380120        PI  J 031000180018000                 0 DS   144721310",
+            "SUSAP KSFOK2FI28L  I      020DUYETK2PC0E  F    CF ISFOK2      1038007728400043PI  H 0180001800            SFO   K2D 0 DS   144732107",
+            "SUSAP KSFOK2FI28L  I      030RW28LK2PG0GY M    CF ISFOK2      1038001928400057PI    00065             -285          0 DS   144741503",
+        ]
+        .join("\n");
+        let snapshot = SourceSnapshotId("snap-t".to_string());
+        let (_wp, navaids, _legs, proc_legs, _ap, _rwy, assocs, report) =
+            FaaCifpAdapter::parse_cifp_content(&content, &snapshot, Utc::now());
+        assert_eq!(report.procedure_legs_decoded, 3);
+        assert_eq!(assocs.len(), 1);
+        let a = &assocs[0];
+        assert_eq!(a.airport_ident, "KSFO");
+        assert_eq!(a.approach_ident, "I28L");
+        assert_eq!(a.runway_end, "28L");
+        assert_eq!(a.localizer_ident, "ISFO");
+        assert_eq!(a.localizer_region, "K2");
+        assert!((a.localizer_bearing_mag_deg - 284.0).abs() < 0.05);
+        assert!((a.glideslope_angle_deg - 2.85).abs() < 0.01);
+        // The canonical localizer navaid is enriched: the fixture has
+        // no D-record, so nothing to check beyond the association.
+        let _ = navaids;
+        let _ = proc_legs;
     }
 }

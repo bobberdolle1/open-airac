@@ -217,7 +217,12 @@ impl WorldStore {
                 .execute_batch(include_str!("../migrations/v9_runway_width.sql"))
                 .context("Failed to execute database migration v9_runway_width.sql")?;
         }
-        self.conn.pragma_update(None, "user_version", 9)?;
+        if version < 10 {
+            self.conn
+                .execute_batch(include_str!("../migrations/v10_ils_associations.sql"))
+                .context("Failed to execute database migration v10_ils_associations.sql")?;
+        }
+        self.conn.pragma_update(None, "user_version", 10)?;
         Ok(())
     }
 
@@ -1779,6 +1784,92 @@ impl WorldStore {
                     id.to_string(),
                     "conflict has no dedup key".into(),
                 );
+            }
+        }
+
+        // 31. ILS associations: localizer references, geometry ranges,
+        // runway-end existence.
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT airport_ident, approach_ident, localizer_ident,
+                        localizer_region, localizer_bearing_mag_deg,
+                        glideslope_angle_deg, runway_end
+                 FROM ils_associations ORDER BY airport_ident, approach_ident",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, f64>(4)?,
+                    r.get::<_, f64>(5)?,
+                    r.get::<_, String>(6)?,
+                ))
+            })?;
+            for row in rows {
+                let (airport, approach, loc, region, bearing, gs, runway_end) = row?;
+                let id = format!("{airport}/{approach}");
+                if !(0.0..=360.0).contains(&bearing) {
+                    push(
+                        "error",
+                        "ils_associations",
+                        id.clone(),
+                        format!("localizer bearing {bearing} out of range"),
+                    );
+                }
+                if !(1.0..=10.0).contains(&gs) {
+                    push(
+                        "error",
+                        "ils_associations",
+                        id.clone(),
+                        format!("glideslope angle {gs} out of range"),
+                    );
+                }
+                // The localizer navaid must exist.
+                let exists: bool = self
+                    .conn
+                    .query_row(
+                        "SELECT 1 FROM navaids
+                         WHERE ident = ?1 AND associated_airport = ?2
+                           AND navaid_type = 'IlsLocalizer'
+                         LIMIT 1",
+                        params![loc, airport],
+                        |_| Ok(()),
+                    )
+                    .optional()?
+                    .is_some();
+                if !exists {
+                    push(
+                        "error",
+                        "ils_associations",
+                        id.clone(),
+                        format!("localizer {loc} ({region}) has no navaid row at {airport}"),
+                    );
+                }
+                // The runway end must exist (PG-derived runway at the
+                // airport with that end designator).
+                let runway_exists: bool = self
+                    .conn
+                    .query_row(
+                        "SELECT 1 FROM runways
+                         WHERE airport_ident = ?1
+                           AND (le_ident = ?2 OR he_ident = ?2)
+                           AND valid_until IS NULL
+                         LIMIT 1",
+                        params![airport, runway_end],
+                        |_| Ok(()),
+                    )
+                    .optional()?
+                    .is_some();
+                if !runway_exists {
+                    push(
+                        "warning",
+                        "ils_associations",
+                        id.clone(),
+                        format!("runway end {runway_end} not found at {airport}"),
+                    );
+                }
             }
         }
 
@@ -3524,6 +3615,8 @@ pub struct PublicationPlan {
     pub valid_from: DateTime<Utc>,
     pub payloads: EntityPayloads,
     pub tombstones: Vec<Tombstone>,
+    /// Verified ILS associations carried by the publication.
+    pub ils_associations: Vec<IlsAssociation>,
     /// Tables whose full-snapshot close must be skipped (masking).
     pub masked_tables: std::collections::BTreeSet<EntityTable>,
     pub publication_id: String,
@@ -3703,6 +3796,10 @@ fn apply_publication_payloads_conn(
         report
             .tombstone_outcomes
             .push(apply_tombstone_conn(conn, tomb)?);
+    }
+
+    for assoc in &plan.ils_associations {
+        insert_ils_association_conn(conn, assoc)?;
     }
 
     if plan.kind.closes_absent() {
@@ -4221,6 +4318,77 @@ pub fn query_canonical_identities_conn(conn: &Connection) -> Result<Vec<Canonica
         ids.push((CanonicalEntityId(cid), table, key, hint));
     }
     Ok(ids)
+}
+
+// ---------------------------------------------------------------------------
+// ILS associations (v0.5)
+// ---------------------------------------------------------------------------
+
+pub fn insert_ils_association_conn(conn: &Connection, assoc: &IlsAssociation) -> Result<()> {
+    conn.execute(
+        "INSERT INTO ils_associations
+            (airport_ident, icao_code, approach_ident, runway_end,
+             localizer_ident, localizer_region, localizer_bearing_mag_deg,
+             glideslope_angle_deg, source_snapshot_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+         ON CONFLICT(airport_ident, approach_ident) DO UPDATE SET
+             localizer_ident = excluded.localizer_ident,
+             localizer_region = excluded.localizer_region,
+             localizer_bearing_mag_deg = excluded.localizer_bearing_mag_deg,
+             glideslope_angle_deg = excluded.glideslope_angle_deg,
+             source_snapshot_id = excluded.source_snapshot_id",
+        params![
+            assoc.airport_ident,
+            assoc.icao_code,
+            assoc.approach_ident,
+            assoc.runway_end,
+            assoc.localizer_ident,
+            assoc.localizer_region,
+            assoc.localizer_bearing_mag_deg,
+            assoc.glideslope_angle_deg,
+            assoc.source_snapshot_id.0,
+        ],
+    )
+    .context("inserting ILS association")?;
+    Ok(())
+}
+
+pub fn query_ils_associations_conn(conn: &Connection) -> Result<Vec<IlsAssociation>> {
+    let mut stmt = conn.prepare(
+        "SELECT airport_ident, icao_code, approach_ident, runway_end,
+                localizer_ident, localizer_region, localizer_bearing_mag_deg,
+                glideslope_angle_deg, source_snapshot_id
+         FROM ils_associations ORDER BY airport_ident, approach_ident",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
+            r.get::<_, String>(4)?,
+            r.get::<_, String>(5)?,
+            r.get::<_, f64>(6)?,
+            r.get::<_, f64>(7)?,
+            r.get::<_, String>(8)?,
+        ))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (apt, icao, ident, rwy, loc, region, bearing, gs, snap) = row?;
+        out.push(IlsAssociation {
+            airport_ident: apt,
+            icao_code: icao,
+            approach_ident: ident,
+            runway_end: rwy,
+            localizer_ident: loc,
+            localizer_region: region,
+            localizer_bearing_mag_deg: bearing,
+            glideslope_angle_deg: gs,
+            source_snapshot_id: SourceSnapshotId(snap),
+        });
+    }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -4878,7 +5046,7 @@ mod tests {
         let store = WorldStore::open_in_memory().unwrap();
         let status = store.status().unwrap();
         assert!(status.integrity_ok);
-        assert_eq!(status.migration_version, 9);
+        assert_eq!(status.migration_version, 10);
         assert_eq!(status.total_airports, 0);
 
         let snap = snapshot("snap-001");
@@ -5316,7 +5484,7 @@ mod tests {
 
         // Opening with the current code must migrate v1 -> v3 in place.
         let store = WorldStore::open(&path).unwrap();
-        assert_eq!(store.migration_version().unwrap(), 9);
+        assert_eq!(store.migration_version().unwrap(), 10);
         let at = store.query_airports_at(Utc::now()).unwrap();
         assert_eq!(at.len(), 1);
         assert_eq!(at[0].ident, "KSFO");
@@ -5929,6 +6097,7 @@ mod tests {
         let plan = PublicationPlan {
             namespace: "faa".to_string(),
             kind: UpdateKind::FullSnapshot,
+            ils_associations: vec![],
             valid_from: t0,
             payloads: EntityPayloads {
                 waypoints: vec![
@@ -5959,6 +6128,7 @@ mod tests {
         let plan = PublicationPlan {
             namespace: "faa".to_string(),
             kind: UpdateKind::Differential,
+            ils_associations: vec![],
             valid_from: t1,
             payloads: EntityPayloads {
                 waypoints: vec![
@@ -6019,6 +6189,7 @@ mod tests {
             .apply_publication(&PublicationPlan {
                 namespace: "faa".to_string(),
                 kind: UpdateKind::FullSnapshot,
+                ils_associations: vec![],
                 valid_from: t0,
                 payloads: EntityPayloads {
                     waypoints: vec![s7_wp("faa:X", 1.0, t0, "snap-base")],
@@ -6111,6 +6282,7 @@ mod tests {
             .apply_publication(&PublicationPlan {
                 namespace: "faa".to_string(),
                 kind: UpdateKind::FullSnapshot,
+                ils_associations: vec![],
                 valid_from: eff,
                 payloads: EntityPayloads {
                     waypoints: vec![
@@ -6129,6 +6301,7 @@ mod tests {
             .apply_publication(&PublicationPlan {
                 namespace: "faa".to_string(),
                 kind: UpdateKind::FullSnapshot,
+                ils_associations: vec![],
                 valid_from: eff,
                 payloads: EntityPayloads {
                     waypoints: vec![s7_wp("faa:F3", 3.0, eff, "snap-base")],
@@ -6157,6 +6330,7 @@ mod tests {
                 kind: UpdateKind::Correction {
                     coverage: Coverage::FullSnapshot,
                 },
+                ils_associations: vec![],
                 valid_from: eff,
                 payloads: EntityPayloads {
                     waypoints: vec![corrected],
@@ -6223,6 +6397,7 @@ mod tests {
             .apply_publication(&PublicationPlan {
                 namespace: "faa".to_string(),
                 kind: UpdateKind::FullSnapshot,
+                ils_associations: vec![],
                 valid_from: eff,
                 payloads: EntityPayloads {
                     waypoints: vec![s7_wp("faa:B1", 1.0, eff, "snap-base")],
@@ -6240,6 +6415,7 @@ mod tests {
                 kind: UpdateKind::Correction {
                     coverage: Coverage::FullSnapshot,
                 },
+                ils_associations: vec![],
                 valid_from: eff,
                 payloads: EntityPayloads {
                     waypoints: vec![corrected.clone()],
@@ -6261,6 +6437,7 @@ mod tests {
                 kind: UpdateKind::Correction {
                     coverage: Coverage::FullSnapshot,
                 },
+                ils_associations: vec![],
                 valid_from: later,
                 payloads: EntityPayloads {
                     waypoints: vec![corrected],
@@ -6388,6 +6565,7 @@ mod tests {
             .apply_publication(&PublicationPlan {
                 namespace: "faa".to_string(),
                 kind: UpdateKind::FullSnapshot,
+                ils_associations: vec![],
                 valid_from: t1,
                 payloads: EntityPayloads {
                     waypoints: vec![
@@ -6406,6 +6584,7 @@ mod tests {
             .apply_publication(&PublicationPlan {
                 namespace: "faa".to_string(),
                 kind: UpdateKind::FullSnapshot,
+                ils_associations: vec![],
                 valid_from: t2,
                 payloads: EntityPayloads {
                     waypoints: vec![
@@ -6424,6 +6603,7 @@ mod tests {
             .apply_publication(&PublicationPlan {
                 namespace: "faa".to_string(),
                 kind: UpdateKind::Differential,
+                ils_associations: vec![],
                 valid_from: t2 + Duration::from_secs(60),
                 payloads: EntityPayloads {
                     waypoints: vec![
@@ -6479,6 +6659,7 @@ mod tests {
             .apply_publication(&PublicationPlan {
                 namespace: "faa".to_string(),
                 kind: UpdateKind::FullSnapshot,
+                ils_associations: vec![],
                 valid_from: t0,
                 payloads: EntityPayloads {
                     waypoints: vec![
@@ -6497,6 +6678,7 @@ mod tests {
             .apply_publication(&PublicationPlan {
                 namespace: "faa".to_string(),
                 kind: UpdateKind::Differential,
+                ils_associations: vec![],
                 valid_from: t1,
                 payloads: EntityPayloads {
                     waypoints: vec![s7_wp("faa:K1", 1.1, t1, "snap-base")],
@@ -6547,6 +6729,7 @@ mod tests {
                 .apply_publication(&PublicationPlan {
                     namespace: "faa".to_string(),
                     kind: UpdateKind::FullSnapshot,
+                    ils_associations: vec![],
                     valid_from: t0,
                     payloads: EntityPayloads {
                         waypoints: vec![s7_wp("faa:OLD", 1.0, t0, "snap-fp")],
@@ -6572,6 +6755,7 @@ mod tests {
             let plan = PublicationPlan {
                 namespace: "faa".to_string(),
                 kind: UpdateKind::FullSnapshot,
+                ils_associations: vec![],
                 valid_from: eff,
                 payloads: EntityPayloads {
                     waypoints: vec![s7_wp("faa:NEW", 2.0, eff, "snap-fp")],
@@ -6750,6 +6934,7 @@ mod tests {
         let plan = PublicationPlan {
             namespace: "faa".to_string(),
             kind: UpdateKind::FullSnapshot,
+            ils_associations: vec![],
             valid_from: t0,
             payloads: EntityPayloads {
                 waypoints: vec![s7_wp("faa:W1", 1.0, t0, "snap-c")],

@@ -618,6 +618,33 @@ pub fn tables_for_provider(provider: &str) -> Option<Vec<&'static str>> {
 }
 
 // ---------------------------------------------------------------------------
+// ILS associations (v0.5)
+// ---------------------------------------------------------------------------
+
+/// A verified ILS association derived from FAA CIFP PF approach records:
+/// the final-approach RW leg's recommended navaid is the localizer, its
+/// course is the localizer bearing, and its vertical angle is the
+/// glideslope angle. ILS category is NOT published in CIFP and stays
+/// out of this model (never fabricated).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IlsAssociation {
+    pub airport_ident: String,
+    pub icao_code: String,
+    /// Approach ident (e.g. `I28L`).
+    pub approach_ident: String,
+    /// Runway END this approach serves (e.g. `28L`).
+    pub runway_end: String,
+    pub localizer_ident: String,
+    /// ICAO region of the localizer.
+    pub localizer_region: String,
+    /// Localizer course, magnetic degrees.
+    pub localizer_bearing_mag_deg: f64,
+    /// Glideslope angle, degrees (absolute value).
+    pub glideslope_angle_deg: f64,
+    pub source_snapshot_id: SourceSnapshotId,
+}
+
+// ---------------------------------------------------------------------------
 // Publication semantics (v0.4 S7)
 // ---------------------------------------------------------------------------
 
