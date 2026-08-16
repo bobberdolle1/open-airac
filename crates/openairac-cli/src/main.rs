@@ -253,6 +253,10 @@ enum ExportTarget {
         /// simulator Custom Data directory only.
         #[arg(long)]
         install_to: Option<PathBuf>,
+        /// After exporting, resolve the simulator layer in this
+        /// directory (nav_world/sim_world consistency check).
+        #[arg(long)]
+        verify_sim: Option<PathBuf>,
     },
 }
 
@@ -961,6 +965,7 @@ fn main() -> Result<()> {
                 date,
                 allow_empty,
                 install_to,
+                verify_sim,
             } => {
                 let export_date = parse_export_date(date)?;
                 println!("Exporting X-Plane 12 Navigation Data...");
@@ -995,6 +1000,21 @@ fn main() -> Result<()> {
                     println!("Installed layer cycle {} into {:?}", install.cycle, target);
                     for name in &install.installed {
                         println!("  installed {name}");
+                    }
+                }
+                if let Some(target) = verify_sim {
+                    let sim = openairac_export_xplane::resolve_sim_world(target)?;
+                    match &sim.verdict {
+                        openairac_export_xplane::SimWorldVerdict::Consistent => {
+                            println!(
+                                "Simulator layer consistent: cycle {}, generator {}",
+                                sim.cycle.as_deref().unwrap_or("?"),
+                                sim.generator.as_deref().unwrap_or("?")
+                            );
+                        }
+                        other => {
+                            println!("Simulator layer NOT consistent: {other:?}");
+                        }
                     }
                 }
                 if report.diagnostics.len() > 20 {

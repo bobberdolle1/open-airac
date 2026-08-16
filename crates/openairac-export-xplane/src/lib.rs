@@ -553,6 +553,12 @@ impl XPlane12Exporter {
         }
 
         // Manifest records exactly what was staged.
+        let world_fingerprint = world_fingerprint(
+            report.fixes_written,
+            report.navaids_written,
+            report.airway_rows_written,
+            &cycle,
+        );
         let manifest = NavdataLayerManifest {
             generator: format!("openairac {}", env!("CARGO_PKG_VERSION")),
             cycle: cycle.clone(),
@@ -564,6 +570,7 @@ impl XPlane12Exporter {
                 manifest_file_entry(&staged_awy, report.airway_rows_written)?,
             ],
             allow_empty,
+            world_fingerprint: Some(world_fingerprint),
         };
         let manifest_json = serde_json::to_string_pretty(&manifest)?;
         std::fs::write(&staged_manifest, manifest_json)?;
@@ -945,6 +952,11 @@ pub struct NavdataLayerManifest {
     pub generated_at: String,
     pub files: Vec<ManifestFileEntry>,
     pub allow_empty: bool,
+    /// Deterministic fingerprint of the managed world this layer was
+    /// exported from (entity counts + cycle). `None` for manifests
+    /// written before v0.7.
+    #[serde(default)]
+    pub world_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -978,6 +990,179 @@ pub struct InstallPlan {
     pub target_dir: PathBuf,
     pub files: Vec<String>,
     pub backup_dir: PathBuf,
+}
+
+// ---------------------------------------------------------------------------
+// Managed world <-> simulator world cross-checking
+// ---------------------------------------------------------------------------
+
+/// Identity file installed alongside the dat files by
+/// `install_layer`; the resolver reads it to answer "which managed
+/// world does this simulator layer come from, and is it intact?".
+pub const LAYER_IDENTITY_FILE: &str = "openairac_layer.json";
+
+/// Deterministic fingerprint of a managed world's exportable content.
+pub fn world_fingerprint(fixes: usize, navaids: usize, airways: usize, cycle: &str) -> String {
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(format!(
+        "fix:{fixes};nav:{navaids};awy:{airways};cycle:{cycle}"
+    ));
+    format!("{:x}", hasher.finalize())
+}
+
+/// Verdict of `resolve_sim_world`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SimWorldVerdict {
+    /// No OpenAIRAC identity file in the target directory.
+    Missing,
+    /// Identity file present but unreadable/unparsable.
+    Unreadable(String),
+    /// A layer file is missing or its content does not match the
+    /// manifest checksums.
+    Inconsistent(String),
+    Consistent,
+}
+
+/// Resolution of an installed simulator layer.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SimWorldReport {
+    pub verdict: SimWorldVerdict,
+    pub cycle: Option<String>,
+    pub generator: Option<String>,
+    pub world_fingerprint: Option<String>,
+}
+
+/// Resolve the simulator world in `target_dir` against its installed
+/// layer identity: presence, checksums, generator and cycle.
+pub fn resolve_sim_world(target_dir: &Path) -> Result<SimWorldReport> {
+    let identity = target_dir.join(LAYER_IDENTITY_FILE);
+    if !identity.exists() {
+        return Ok(SimWorldReport {
+            verdict: SimWorldVerdict::Missing,
+            cycle: None,
+            generator: None,
+            world_fingerprint: None,
+        });
+    }
+    let json = std::fs::read_to_string(&identity)
+        .with_context(|| format!("reading {}", identity.display()))?;
+    let manifest: NavdataLayerManifest = match serde_json::from_str(&json) {
+        Ok(m) => m,
+        Err(e) => {
+            return Ok(SimWorldReport {
+                verdict: SimWorldVerdict::Unreadable(e.to_string()),
+                cycle: None,
+                generator: None,
+                world_fingerprint: None,
+            });
+        }
+    };
+    for entry in &manifest.files {
+        let path = target_dir.join(&entry.name);
+        let content = match std::fs::read(&path) {
+            Ok(c) => c,
+            Err(_) => {
+                return Ok(SimWorldReport {
+                    verdict: SimWorldVerdict::Inconsistent(format!(
+                        "missing layer file {}",
+                        entry.name
+                    )),
+                    cycle: Some(manifest.cycle.clone()),
+                    generator: Some(manifest.generator.clone()),
+                    world_fingerprint: manifest.world_fingerprint.clone(),
+                });
+            }
+        };
+        use sha2::Digest;
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(&content);
+        let actual = format!("{:x}", hasher.finalize());
+        if actual != entry.sha256 {
+            return Ok(SimWorldReport {
+                verdict: SimWorldVerdict::Inconsistent(format!(
+                    "layer file {} checksum mismatch",
+                    entry.name
+                )),
+                cycle: Some(manifest.cycle.clone()),
+                generator: Some(manifest.generator.clone()),
+                world_fingerprint: manifest.world_fingerprint.clone(),
+            });
+        }
+    }
+    Ok(SimWorldReport {
+        verdict: SimWorldVerdict::Consistent,
+        cycle: Some(manifest.cycle.clone()),
+        generator: Some(manifest.generator.clone()),
+        world_fingerprint: manifest.world_fingerprint.clone(),
+    })
+}
+
+/// Comparison between the managed nav world (the store) and an
+/// installed simulator layer.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NavSimComparison {
+    pub sim: SimWorldReport,
+    /// Fingerprint of the store's exportable content at `as_of`.
+    pub store_fingerprint: String,
+    pub consistent: bool,
+}
+
+/// Compare the managed world in `store` at `as_of` with the simulator
+/// layer in `target_dir`. Consistent = layer intact AND exported from
+/// a world with the same content fingerprint.
+pub fn compare_nav_sim(
+    store: &openairac_store::WorldStore,
+    target_dir: &Path,
+    as_of: chrono::DateTime<chrono::Utc>,
+) -> Result<NavSimComparison> {
+    let sim = resolve_sim_world(target_dir)?;
+    // The store side is recomputed by exporting to a scratch dir: the
+    // fingerprint counts what the exporter actually writes (the raw
+    // store totals differ because referential-integrity skips drop
+    // rows).
+    let store_fingerprint = compute_store_fingerprint(store, as_of)?
+        .map(|(fp, _)| fp)
+        .unwrap_or_default();
+    let consistent = sim.verdict == SimWorldVerdict::Consistent
+        && sim.world_fingerprint.as_deref() == Some(store_fingerprint.as_str());
+    Ok(NavSimComparison {
+        sim,
+        store_fingerprint,
+        consistent,
+    })
+}
+
+/// Export to a scratch dir and return (fingerprint, rows written).
+fn compute_store_fingerprint(
+    store: &openairac_store::WorldStore,
+    as_of: chrono::DateTime<chrono::Utc>,
+) -> Result<Option<(String, usize)>> {
+    let Ok(parent) = std::env::temp_dir().canonicalize() else {
+        return Ok(None);
+    };
+    let dir = parent.join(format!(
+        "oa_fingerprint_{}_{}",
+        std::process::id(),
+        as_of.timestamp_millis()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    let report = match XPlane12Exporter::export_from_db(store, as_of, &dir, true) {
+        Ok(r) => r,
+        Err(_) => {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Ok(None);
+        }
+    };
+    let manifest_path = dir.join("manifest.json");
+    let manifest: Option<NavdataLayerManifest> = std::fs::read_to_string(&manifest_path)
+        .ok()
+        .and_then(|j| serde_json::from_str(&j).ok());
+    let rows = report.fixes_written + report.navaids_written + report.airway_rows_written;
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(manifest
+        .and_then(|m| m.world_fingerprint)
+        .map(|fp| (fp, rows)))
 }
 
 // ---------------------------------------------------------------------------
@@ -1172,12 +1357,16 @@ pub fn install_layer_with_failpoints(
     use std::io::Write;
     writeln!(lock, "{operation_id}")?;
 
-    // 3. Journal BEFORE any modification.
+    // 3. Journal BEFORE any modification. The identity file is
+    // journaled together with the dat files so a rollback restores
+    // (or removes) it atomically with the layer.
     let backup_dir = target_dir.join(format!(".openairac_backup_{operation_id}"));
+    let mut journal_files: Vec<String> = manifest.files.iter().map(|f| f.name.clone()).collect();
+    journal_files.push(LAYER_IDENTITY_FILE.to_string());
     let journal = InstallJournal {
         operation_id: operation_id.clone(),
         cycle: manifest.cycle.clone(),
-        files: manifest.files.iter().map(|f| f.name.clone()).collect(),
+        files: journal_files,
         backup_dir: backup_dir.clone(),
         phase: InstallPhase::Prepared,
     };
@@ -1205,10 +1394,14 @@ pub fn install_layer_with_failpoints(
         );
     }
 
-    // 5. Swap staged files into place.
+    // 5. Swap staged files into place; the identity file is a copy of
+    // the staged layer manifest.
+    let staged_identity = staging_dir.join(LAYER_IDENTITY_FILE);
+    std::fs::copy(staging_dir.join("manifest.json"), &staged_identity)?;
     for name in &journal.files {
         swap_file(&staging_dir.join(name), &target_dir.join(name))?;
     }
+    let _ = std::fs::remove_file(&staged_identity);
     let swapped = InstallJournal {
         phase: InstallPhase::Swapped,
         ..journal.clone()
@@ -1293,6 +1486,7 @@ mod tests {
             });
         }
         let manifest = NavdataLayerManifest {
+            world_fingerprint: None,
             generator: "test".to_string(),
             cycle: "2608".to_string(),
             build_date: "20260806".to_string(),
@@ -1305,6 +1499,73 @@ mod tests {
             serde_json::to_string_pretty(&manifest).unwrap(),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn test_resolve_and_compare_sim_world() {
+        let root = unique_dir("sim_resolve");
+        let _ = std::fs::remove_dir_all(&root);
+        let staging = root.join("staging");
+        let target = root.join("custom_data");
+        std::fs::create_dir_all(&staging).unwrap();
+        staged_layer(
+            &staging,
+            &[
+                ("earth_fix.dat", "I\n1100 Version - data cycle 2608\n"),
+                ("earth_nav.dat", "I\n1100 Version - data cycle 2608\n"),
+                ("earth_awy.dat", "A\n1100 Version - data cycle 2608\n"),
+            ],
+        );
+        // Missing before install.
+        assert_eq!(
+            resolve_sim_world(&target).unwrap().verdict,
+            SimWorldVerdict::Missing
+        );
+        install_layer(&staging, &target).unwrap();
+        // Consistent after install; identity file present.
+        let report = resolve_sim_world(&target).unwrap();
+        assert_eq!(report.verdict, SimWorldVerdict::Consistent);
+        assert_eq!(report.cycle.as_deref(), Some("2608"));
+        // Tamper -> inconsistent.
+        std::fs::write(target.join("earth_nav.dat"), "tampered\n").unwrap();
+        assert!(matches!(
+            resolve_sim_world(&target).unwrap().verdict,
+            SimWorldVerdict::Inconsistent(_)
+        ));
+    }
+
+    #[test]
+    fn test_install_rollback_restores_identity_file() {
+        let root = unique_dir("sim_rollback_identity");
+        let _ = std::fs::remove_dir_all(&root);
+        let target = root.join("custom_data");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("earth_fix.dat"), "OLD\n").unwrap();
+        std::fs::write(target.join(LAYER_IDENTITY_FILE), "OLD-IDENTITY\n").unwrap();
+
+        let staging = root.join("staging");
+        std::fs::create_dir_all(&staging).unwrap();
+        staged_layer(&staging, &[("earth_fix.dat", "NEW\n")]);
+        // staged_layer's manifest has 1 file; happy install would
+        // require the full set, but the installer validates only
+        // checksums + allow_empty. Use failpoint to roll back.
+        let result = install_layer_with_failpoints(
+            &staging,
+            &target,
+            &InstallFailpoints {
+                after_backup: true,
+                ..Default::default()
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(
+            std::fs::read_to_string(target.join(LAYER_IDENTITY_FILE)).unwrap(),
+            "OLD-IDENTITY\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(target.join("earth_fix.dat")).unwrap(),
+            "OLD\n"
+        );
     }
 
     #[test]
@@ -1323,8 +1584,9 @@ mod tests {
             ],
         );
         let report = install_layer(&staging, &target).unwrap();
-        assert_eq!(report.installed.len(), 3);
+        assert_eq!(report.installed.len(), 4); // 3 dat files + identity
         assert!(target.join("earth_fix.dat").exists());
+        assert!(target.join(LAYER_IDENTITY_FILE).exists());
         assert!(!target.join(INSTALL_JOURNAL).exists());
         assert!(!target.join(INSTALL_LOCK).exists());
         // Reinstall over the same layer: re-stage first (install moves
