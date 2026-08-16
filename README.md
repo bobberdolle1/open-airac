@@ -36,21 +36,27 @@ provenance, so the engine can:
 * never fabricate values: every missing field is skipped with a
   diagnostic, never guessed.
 
-## What actually works today (v0.3)
+## What actually works today (v0.4)
 
 | Feature | Status | Crate / Component |
 | :--- | :---: | :--- |
 | **NOAA WMM2025 Geomagnetic Field Solver** | **Implemented** | `openairac-magnetic` |
 | **Runway Magnetic Drift Analysis** | **Implemented** | `openairac-magnetic` |
 | **Canonical Domain Model & Provenance** | **Implemented** | `openairac-model` |
-| **Temporal SQLite Store (revisioned `world_at`, schema v4)** | **Implemented** | `openairac-store` |
+| **Temporal SQLite Store (revisioned `world_at`, schema v8)** | **Implemented** | `openairac-store` |
 | **Transactional, Fail-Closed Ingestion + Diagnostics** | **Implemented** | `openairac-ingest` |
 | **OurAirports Ingestion (live fetch: Airports/Runways/Navaids)** | **Implemented** | `openairac-ingest` |
 | **FAA CIFP ARINC 424 Adapter (EA/D/DB/PN/ER + PA/PG/PC/PD/PE/PF)** | **Implemented** | `openairac-ingest` |
 | **Canonical Airway Routing Graph (Dijkstra/A\*, MEA/cruise filters, exclusions)** | **Implemented** | `openairac-routing` |
 | **SID / STAR / Approach Semantic Layer (ARINC 424 path terminators)** | **Implemented** | `openairac-procedures` |
 | **Flight-Plan Integration (airport → SID → enroute → STAR → approach)** | **Implemented** | `openairac-integration` |
-| **WorldQuery Service API (world_at / search / nearby / airways / procedures / plan)** | **Implemented** | `openairac-service` |
+| **WorldQuery Service API (world_at / search / nearby / airways / procedures / plan / reconcile)** | **Implemented** | `openairac-service` |
+| **AIRAC Cycle Catalog & Discovery (confirmed effective dates, fail-closed)** | **Implemented** | `openairac-store` / `openairac-ingest` |
+| **Preload / Observe / Atomic Publication Application** | **Implemented** | `openairac-store` |
+| **Differential Publications, Corrections & Tombstones** | **Implemented** | `openairac-store` / `openairac-ingest` |
+| **Cycle Rollback (re-publication, immutable history)** | **Implemented** | `openairac-store` |
+| **Multi-Source Entity Reconciliation (canonical identities, conflicts, resolved view)** | **Implemented** | `openairac-reconcile` |
+| **Deterministic Data Bundles + Local Update Channel** | **Implemented** | `openairac-bundle` |
 | **X-Plane 12 dat Exporter (`earth_fix`/`earth_nav`/`earth_awy`, staged & fail-closed)** | **Diagnostic** | `openairac-export-xplane` |
 
 ### Data sources that work today
@@ -62,8 +68,11 @@ provenance, so the engine can:
   airways (`ER`), terminal airports/runways/waypoints
   (`PA`/`PG`/`PC`), and SID/STAR/approach legs (`PD`/`PE`/`PF`).
   Decoding is implemented and golden-tested at the library level
-  (`openairac_ingest::faa_cifp::ingest_cifp`); CLI wiring for CIFP
-  ingestion is not yet exposed.
+  (`openairac_ingest::faa_cifp::ingest_cifp`); CLI wiring:
+  `openairac cycle discover` + `openairac sync --provider faa_cifp
+  --cycle <id>` (cycle must be catalogued and its effective date
+  confirmed). PA/PG terminal airports/runways are still explicit
+  Unsupported records (v0.5 scope).
 
 ### Simulator output that works today
 
@@ -84,10 +93,9 @@ provenance, so the engine can:
 
 ### What is planned
 
-* Automatic AIRAC cycle detection, next-cycle preload/activation,
-  differential updates, and update distribution (v0.4).
-* Procedure geometry rendering (RF arcs etc.) and remaining ARINC
-  semantics (v0.5).
+* FAA PA/PG terminal airports/runways decoding, ILS associations,
+  procedure geometry (RF arcs, holds) and remaining ARINC semantics
+  (v0.5).
 * Worldwide provider architecture and regional coverage (v0.6).
 * MSFS 2024 navdata packager (v0.7).
 
@@ -98,7 +106,8 @@ provenance, so the engine can:
   yet.
 * **No worldwide coverage** — CIFP covers the US; OurAirports has no
   procedure data.
-* **No automatic updates** — AIRAC lifecycle automation is v0.4.
+* **No signed production bundles** — bundles are UnsignedDevelopment
+  until a release trust root exists (signature interface designed).
 * Flight Deck / EFB is a **separate future product**, after the engine
   is mature (see roadmap).
 
