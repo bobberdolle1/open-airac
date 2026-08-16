@@ -248,6 +248,12 @@ pub enum CifpRecord {
         /// Glideslope antenna position (cols 56-74).
         glideslope_latitude_deg: Option<f64>,
         glideslope_longitude_deg: Option<f64>,
+        /// Localizer front course, magnetic, degrees (cols 52-55,
+        /// tenths). The authoritative front course: PF-derived
+        /// association courses can disagree between procedure
+        /// variants (IIPJ: I23-Y 233.0 vs I23-Z 223.0; the PI record
+        /// publishes 233.2, matching convert424toxplane).
+        front_course_mag_deg: Option<f64>,
         raw: String,
     },
     NdbNavaid {
@@ -664,9 +670,17 @@ pub fn decode_line(line: &str) -> Result<CifpRecord> {
                 // Verified against real records + converter output:
                 // IABE declination W0120 -> -12.0, elevation 00385 ->
                 // 385 ft; IBZY E0110 -> +11.0, elevation 05304 ->
-                // 5,304 ft.
+                // 5,304 ft. Front course 52-55 in tenths (IIPJ
+                // '2332' -> 233.2, IAAD '2822' -> 282.2).
                 let magnetic_variation_deg = parse_mag_variation(cifp.field(91, 95));
                 let elevation_ft = cifp.field(98, 102).trim().parse::<i32>().ok();
+                let front_course_mag_deg = cifp
+                    .field(52, 55)
+                    .trim()
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|v| *v > 0.0)
+                    .map(|v| v / 10.0);
                 Ok(CifpRecord::IlsLocalizerRecord {
                     record_type,
                     airport_ident,
@@ -680,6 +694,7 @@ pub fn decode_line(line: &str) -> Result<CifpRecord> {
                     elevation_ft,
                     glideslope_latitude_deg: glideslope_position.map(|p| p.0),
                     glideslope_longitude_deg: glideslope_position.map(|p| p.1),
+                    front_course_mag_deg,
                     raw: line.to_string(),
                 })
             } else if kind_char == 'A' {
@@ -987,6 +1002,7 @@ pub fn interpret(
             elevation_ft,
             glideslope_latitude_deg,
             glideslope_longitude_deg,
+            front_course_mag_deg,
             ..
         } => {
             let temporal = temporal.clone();
@@ -1004,7 +1020,7 @@ pub fn interpret(
                 associated_runway: (!runway.is_empty()).then(|| runway.clone()),
                 magnetic_variation_deg: *magnetic_variation_deg,
                 localizer_bearing_true_deg: None,
-                localizer_bearing_mag_deg: None,
+                localizer_bearing_mag_deg: *front_course_mag_deg,
                 glideslope_angle_deg: None,
                 slaved_variation_deg: None,
                 service_volume_nm: Some(18),
@@ -1028,7 +1044,7 @@ pub fn interpret(
                     associated_runway: (!runway.is_empty()).then(|| runway.clone()),
                     magnetic_variation_deg: *magnetic_variation_deg,
                     localizer_bearing_true_deg: None,
-                    localizer_bearing_mag_deg: None,
+                    localizer_bearing_mag_deg: *front_course_mag_deg,
                     glideslope_angle_deg: None,
                     slaved_variation_deg: None,
                     service_volume_nm: Some(18),
@@ -1515,6 +1531,88 @@ impl FaaCifpAdapter {
             }
         }
 
+        // The D record (class 'I') and the PI record describe the same
+        // localizer; the PI record carries the authoritative localizer
+        // position, elevation, declination and runway (verified on
+        // cycle 2608: IAAD PI position 43.571389/-116.240364 matches
+        // convert424toxplane row 4 exactly; the D record's DME columns
+        // differ by ~50 m and 23 ft elevation). Merge before dedupe:
+        // PI fields win on the shared entity; the PI localizer itself
+        // is dropped (its glideslope component remains).
+        let navaids = {
+            // PI-derived localizers carry a runway (the D record does
+            // not); that is the discriminator between the two
+            // otherwise identically-named localizer entities. PI-only
+            // localizers (no D counterpart) must survive the merge.
+            let d_loc_keys: std::collections::HashSet<(String, String)> = navaids
+                .iter()
+                .filter(|n| n.kind == NavaidKind::IlsLocalizer && n.associated_runway.is_none())
+                .map(|n| {
+                    (
+                        n.ident.clone(),
+                        n.associated_airport.clone().unwrap_or_default(),
+                    )
+                })
+                .collect();
+            let pi_loc: std::collections::HashMap<
+                (String, String),
+                (
+                    f64,
+                    f64,
+                    Option<i32>,
+                    Option<f64>,
+                    Option<String>,
+                    Option<f64>,
+                ),
+            > = navaids
+                .iter()
+                .filter(|n| n.kind == NavaidKind::IlsLocalizer && n.associated_runway.is_some())
+                .map(|n| {
+                    (
+                        (
+                            n.ident.clone(),
+                            n.associated_airport.clone().unwrap_or_default(),
+                        ),
+                        (
+                            n.latitude,
+                            n.longitude,
+                            n.elevation_ft,
+                            n.magnetic_variation_deg,
+                            n.associated_runway.clone(),
+                            n.localizer_bearing_mag_deg,
+                        ),
+                    )
+                })
+                .collect();
+            navaids
+                .into_iter()
+                .filter(|n| {
+                    !(n.kind == NavaidKind::IlsLocalizer
+                        && n.associated_runway.is_some()
+                        && d_loc_keys.contains(&(
+                            n.ident.clone(),
+                            n.associated_airport.clone().unwrap_or_default(),
+                        )))
+                })
+                .map(|mut n| {
+                    if n.kind == NavaidKind::IlsLocalizer
+                        && let Some((lat, lon, elev, decl, runway, course)) = pi_loc.get(&(
+                            n.ident.clone(),
+                            n.associated_airport.clone().unwrap_or_default(),
+                        ))
+                    {
+                        n.latitude = *lat;
+                        n.longitude = *lon;
+                        n.elevation_ft = *elev;
+                        n.magnetic_variation_deg = *decl;
+                        n.associated_runway = runway.clone();
+                        n.localizer_bearing_mag_deg = *course;
+                    }
+                    n
+                })
+                .collect::<Vec<_>>()
+        };
+
         // Real-world cycle 2608 contains duplicate object ids with
         // CONFLICTING payloads (terminal waypoints shared across
         // procedures). Fail-closed: the first occurrence is kept,
@@ -1733,14 +1831,26 @@ impl FaaCifpAdapter {
             // bearing/glideslope (closes the v0.3 D-record gap).
             let mut navs = navaids.clone();
             for n in navs.iter_mut() {
-                if matches!(n.kind, NavaidKind::IlsLocalizer | NavaidKind::IlsGlidepath)
-                    && let Some(assoc) = ils_associations.iter().find(|a| {
-                        a.localizer_ident == n.ident
-                            && a.airport_ident == n.associated_airport.clone().unwrap_or_default()
-                    })
-                {
-                    n.localizer_bearing_mag_deg = Some(assoc.localizer_bearing_mag_deg);
+                if matches!(
+                    n.kind,
+                    NavaidKind::IlsLocalizer | NavaidKind::IlsGlidepath | NavaidKind::Dme
+                ) && let Some(assoc) = ils_associations.iter().find(|a| {
+                    a.localizer_ident == n.ident
+                        && a.airport_ident == n.associated_airport.clone().unwrap_or_default()
+                }) {
+                    // The PI front course (when present) is authoritative;
+                    // the association value fills the D-only case and must
+                    // not overwrite it (IIPJ: PI 233.2 vs I23-Z 223.0).
+                    if n.localizer_bearing_mag_deg.is_none() {
+                        n.localizer_bearing_mag_deg = Some(assoc.localizer_bearing_mag_deg);
+                    }
                     n.glideslope_angle_deg = Some(assoc.glideslope_angle_deg);
+                    // The D record does not publish the runway; the
+                    // PF-derived association does. Without it, D-record
+                    // localizers can never emit an X-Plane row 4/5.
+                    if n.associated_runway.is_none() {
+                        n.associated_runway = Some(assoc.runway_end.clone());
+                    }
                 }
             }
             let navaids = navs;
@@ -2398,6 +2508,7 @@ mod tests {
                 longitude_deg,
                 magnetic_variation_deg,
                 elevation_ft,
+                front_course_mag_deg,
                 ..
             } => {
                 assert_eq!(airport_ident, "KABE");
@@ -2409,6 +2520,8 @@ mod tests {
                 assert!((longitude_deg - (-75.426430556)).abs() < 5e-9);
                 assert!((magnetic_variation_deg.unwrap() - (-12.0)).abs() < 1e-6);
                 assert_eq!(elevation_ft, Some(385));
+                // Front course cols 52-55 in tenths: '0633' -> 63.3.
+                assert!((front_course_mag_deg.unwrap() - 63.3).abs() < 1e-6);
             }
             other => panic!("expected PI localizer, got {other:?}"),
         }
@@ -2426,6 +2539,7 @@ mod tests {
                 assert_eq!(nav.frequency.0, 110_700);
                 assert_eq!(nav.elevation_ft, Some(385));
                 assert!((nav.magnetic_variation_deg.unwrap() - (-12.0)).abs() < 1e-6);
+                assert!((nav.localizer_bearing_mag_deg.unwrap() - 63.3).abs() < 1e-6);
             }
             other => panic!("expected navaid, got {other:?}"),
         }
@@ -2598,6 +2712,59 @@ mod tests {
         assert_eq!(legs[1].end_fix, "TINKY");
         assert_eq!(legs[1].minimum_altitude_ft, Some(8000));
         assert_eq!(report.airway_legs_decoded, 2);
+    }
+
+    // Real PI + D record pair from FAA CIFP cycle 2608 (public
+    // domain US Government work). The PI record carries the
+    // authoritative localizer position/elevation/course/runway; the
+    // D record (class 'I') adds the DME component. The merge must
+    // prefer PI fields on the shared localizer entity.
+    const D_IAAD: &str = "SUSAD KBOIK1 IAAD  K1011015 ITW                    IAADN43341544W116142978E0130028380     NARBOISE AIR TRML/GOWEN FLD      260952014";
+    const PI_IAAD: &str = "SUSAP KBOIK1IIAAD1   011015RW28RN43341700W1161425312822N43333262W1161226141011 11570363300E01305502861                     384402412";
+
+    #[test]
+    fn test_pi_merges_over_d_localizer() {
+        let content = format!("{D_IAAD}\n{PI_IAAD}\n");
+        let snapshot_id = SourceSnapshotId("snap-pi-merge".to_string());
+        let (_wp, navaids, _legs, _proc, _ap, _rwy, _ils, _report) =
+            FaaCifpAdapter::parse_cifp_content(&content, &snapshot_id, Utc::now());
+        let loc: Vec<&CanonicalNavaid> = navaids
+            .iter()
+            .filter(|n| n.kind == NavaidKind::IlsLocalizer && n.ident == "IAAD")
+            .collect();
+        assert_eq!(loc.len(), 1, "exactly one localizer after merge");
+        let loc = loc[0];
+        // PI fields win.
+        assert!((loc.latitude - 43.571388889).abs() < 5e-9);
+        assert!((loc.longitude - (-116.240363889)).abs() < 5e-9);
+        assert_eq!(loc.elevation_ft, Some(2861));
+        assert!((loc.localizer_bearing_mag_deg.unwrap() - 282.2).abs() < 1e-6);
+        assert_eq!(loc.associated_runway.as_deref(), Some("28R"));
+        // The DME component from the D record remains.
+        assert!(
+            navaids
+                .iter()
+                .any(|n| n.kind == NavaidKind::Dme && n.ident == "IAAD")
+        );
+        // The glideslope component from the PI record remains.
+        assert!(
+            navaids
+                .iter()
+                .any(|n| n.kind == NavaidKind::IlsGlidepath && n.ident == "IAAD")
+        );
+    }
+
+    #[test]
+    fn test_pi_only_localizer_survives_merge() {
+        let content = PI_IAAD.to_string();
+        let snapshot_id = SourceSnapshotId("snap-pi-only".to_string());
+        let (_wp, navaids, _legs, _proc, _ap, _rwy, _ils, _report) =
+            FaaCifpAdapter::parse_cifp_content(&content, &snapshot_id, Utc::now());
+        let loc: Vec<&CanonicalNavaid> = navaids
+            .iter()
+            .filter(|n| n.kind == NavaidKind::IlsLocalizer && n.ident == "IAAD")
+            .collect();
+        assert_eq!(loc.len(), 1, "PI-only localizer must not be dropped");
     }
 
     // Real KSFO procedure records from FAA CIFP cycle 2608

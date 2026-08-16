@@ -273,14 +273,42 @@ impl XPlane12Exporter {
     ) -> Result<()> {
         write_header(&mut writer, "1200", "NavXP1200.", cycle, build_date)?;
 
-        let mut sorted: Vec<(u8, &CanonicalNavaid)> =
-            navaids.iter().map(|nav| (row_code_for(nav), nav)).collect();
+        // Classification pass (see `row_code_for`; every branch
+        // verified against convert424toxplane v12.4 on cycle 2608):
+        // - localizer row 4 vs 5: glideslope presence;
+        // - paired DME row 12 vs 13: whether the sibling localizer is
+        //   exportable (VOR-family DMEs stay 12).
+        let gs_idents: std::collections::HashSet<String> = navaids
+            .iter()
+            .filter(|n| n.kind == NavaidKind::IlsGlidepath)
+            .map(|n| n.ident.clone())
+            .collect();
+        let loc_idents: std::collections::HashSet<String> = navaids
+            .iter()
+            .filter(|n| n.kind == NavaidKind::IlsLocalizer)
+            .map(|n| n.ident.clone())
+            .collect();
+        let exportable_loc_idents: std::collections::HashSet<String> = navaids
+            .iter()
+            .filter(|n| n.kind == NavaidKind::IlsLocalizer && ils_required(n).is_ok())
+            .map(|n| n.ident.clone())
+            .collect();
+        let mut sorted: Vec<(u8, &CanonicalNavaid)> = navaids
+            .iter()
+            .map(|nav| {
+                (
+                    row_code_for(nav, &gs_idents, &exportable_loc_idents, &loc_idents),
+                    nav,
+                )
+            })
+            .collect();
         sorted.sort_by_key(|(code, nav)| (*code, nav.ident.clone(), nav.name.clone()));
         for (code, nav) in sorted {
             match code {
                 2 => self.write_ndb(nav, &mut writer, report, index)?,
                 3 => self.write_vor(nav, &mut writer, report, index)?,
-                4 => self.write_localizer(nav, &mut writer, report)?,
+                4 => self.write_localizer(nav, &mut writer, report, "ILS-cat-I")?,
+                5 => self.write_localizer(nav, &mut writer, report, "LOC")?,
                 6 => self.write_glideslope(nav, &mut writer, report)?,
                 12 => self.write_paired_dme(nav, &mut writer, report, index)?,
                 13 => self.write_standalone_dme(nav, &mut writer, report, index)?,
@@ -706,6 +734,7 @@ impl XPlane12Exporter {
         nav: &CanonicalNavaid,
         writer: &mut W,
         report: &mut ExportReport,
+        name_suffix: &str,
     ) -> Result<()> {
         let required = ils_required(nav);
         if let Err(reason) = required {
@@ -726,8 +755,8 @@ impl XPlane12Exporter {
         let freq = nav.frequency.0 / 10;
         writeln!(
             writer,
-            "{:>2} {:.9} {:.9} {:5} {:5} {:3} {:10.3} {:4} {:5} {} {} ILS-cat-I",
-            4,
+            "{:>2} {:.9} {:.9} {:5} {:5} {:3} {:10.3} {:4} {:5} {} {} {}",
+            if name_suffix == "LOC" { 5 } else { 4 },
             nav.latitude,
             nav.longitude,
             elevation,
@@ -737,7 +766,8 @@ impl XPlane12Exporter {
             nav.ident,
             airport,
             region,
-            runway
+            runway,
+            name_suffix
         )?;
         report.navaids_written += 1;
         Ok(())
@@ -866,13 +896,34 @@ impl XPlane12Exporter {
     }
 }
 
-fn row_code_for(nav: &CanonicalNavaid) -> u8 {
+fn row_code_for(
+    nav: &CanonicalNavaid,
+    gs_idents: &std::collections::HashSet<String>,
+    exportable_loc_idents: &std::collections::HashSet<String>,
+    loc_idents: &std::collections::HashSet<String>,
+) -> u8 {
     match nav.kind {
         NavaidKind::Ndb => 2,
         NavaidKind::Vor | NavaidKind::Vordme | NavaidKind::Vortac | NavaidKind::Tacan => 3,
-        NavaidKind::IlsLocalizer => 4,
+        // Full ILS localizer: row 4; localizer-only approach
+        // (LOC/LDA/SDF, no glideslope): row 5. Converter-verified:
+        // IBET row 4, IDLG row 5.
+        NavaidKind::IlsLocalizer if gs_idents.contains(&nav.ident) => 4,
+        NavaidKind::IlsLocalizer => 5,
         NavaidKind::IlsGlidepath => 6,
-        NavaidKind::Dme if nav.dme_paired => 12,
+        // Paired DME of an exportable localizer or of a VOR-family
+        // facility: row 12 (paired-frequency display suppressed).
+        // Paired DME of a localizer we cannot emit (no bearing/runway
+        // association): row 13, matching convert424toxplane (ISFO
+        // row 12; IAEZ/IALI row 13 — the converter demotes DMEs whose
+        // localizer has no approach data).
+        NavaidKind::Dme
+            if nav.dme_paired
+                && (!loc_idents.contains(&nav.ident)
+                    || exportable_loc_idents.contains(&nav.ident)) =>
+        {
+            12
+        }
         NavaidKind::Dme => 13,
     }
 }
@@ -1833,6 +1884,101 @@ mod tests {
         );
         assert!(text.contains(" 135 175 V44"), "{}", text);
         assert_eq!(report.airway_rows_written, 2);
+    }
+
+    #[test]
+    fn test_ils_dme_row_code_follows_glideslope_presence() {
+        // Converter-verified classification: a paired DME of a full
+        // ILS (glideslope present) is row 12; the paired DME of a
+        // localizer WITHOUT a glideslope component is row 13 (ISFO
+        // vs IAEZ/IALI in cycle 2608).
+        let base = |ident: &str, kind: NavaidKind, paired: bool| CanonicalNavaid {
+            object_id: openairac_model::NavaidId(format!("faa:test:{ident}")),
+            ident: ident.to_string(),
+            name: ident.to_string(),
+            kind,
+            frequency: openairac_model::FrequencyKhz(110_700),
+            latitude: 40.0,
+            longitude: -75.0,
+            elevation_ft: Some(100),
+            region_code: Some("K6".to_string()),
+            associated_airport: Some("KABE".to_string()),
+            associated_runway: Some("06".to_string()),
+            magnetic_variation_deg: Some(-12.0),
+            localizer_bearing_true_deg: None,
+            localizer_bearing_mag_deg: Some(57.0),
+            glideslope_angle_deg: Some(3.0),
+            slaved_variation_deg: None,
+            service_volume_nm: Some(18),
+            dme_paired: paired,
+            temporal: TemporalValidity {
+                valid_from: chrono::Utc::now(),
+                valid_until: None,
+                source_snapshot_id: openairac_model::SourceSnapshotId("snap".to_string()),
+            },
+        };
+        let loc = base("IABE", NavaidKind::IlsLocalizer, false);
+        let dme = base("IABE", NavaidKind::Dme, true);
+        let gs = base("IABE", NavaidKind::IlsGlidepath, false);
+
+        // With GS: DME -> row 12.
+        let with_gs = [loc.clone(), dme.clone(), gs.clone()];
+        let mut report = ExportReport::default();
+        let mut out = Vec::new();
+        let mut index = ExportedEntityIndex::default();
+        XPlane12Exporter
+            .export_earth_nav(
+                &with_gs,
+                "2608",
+                "20260806",
+                &mut out,
+                &mut report,
+                &mut index,
+            )
+            .unwrap();
+        let text = String::from_utf8(out.clone()).unwrap();
+        assert!(text.contains("12 40.000000000 -75.000000000"), "{text}");
+
+        // Localizer-only (exportable, no GS): localizer row 5, DME
+        // stays row 12 (converter: IDLG row 5 + DME row 12).
+        let without_gs = [loc.clone(), dme.clone()];
+        let mut out2 = Vec::new();
+        let mut index2 = ExportedEntityIndex::default();
+        let mut report2 = ExportReport::default();
+        XPlane12Exporter
+            .export_earth_nav(
+                &without_gs,
+                "2608",
+                "20260806",
+                &mut out2,
+                &mut report2,
+                &mut index2,
+            )
+            .unwrap();
+        let text2 = String::from_utf8(out2).unwrap();
+        assert!(text2.contains("12 40.000000000 -75.000000000"), "{text2}");
+        assert!(text2.contains(" 5 40.000000000"), "{text2}");
+
+        // Localizer NOT exportable (no bearing association): DME
+        // demoted to row 13 (converter: IAEZ/IALI row 13).
+        let mut bare_loc = loc.clone();
+        bare_loc.localizer_bearing_mag_deg = None;
+        let bare_dme = dme.clone();
+        let mut out3 = Vec::new();
+        let mut index3 = ExportedEntityIndex::default();
+        let mut report3 = ExportReport::default();
+        XPlane12Exporter
+            .export_earth_nav(
+                &[bare_loc, bare_dme],
+                "2608",
+                "20260806",
+                &mut out3,
+                &mut report3,
+                &mut index3,
+            )
+            .unwrap();
+        let text3 = String::from_utf8(out3).unwrap();
+        assert!(text3.contains("13 40.000000000 -75.000000000"), "{text3}");
     }
 
     #[test]
