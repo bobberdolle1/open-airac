@@ -248,6 +248,11 @@ enum ExportTarget {
         /// simulator's navaids/fixes with an empty file)
         #[arg(long, default_value_t = false)]
         allow_empty: bool,
+        /// Install the exported layer transactionally into a target
+        /// directory (backup + journal + rollback). Use with an explicit
+        /// simulator Custom Data directory only.
+        #[arg(long)]
+        install_to: Option<PathBuf>,
     },
 }
 
@@ -955,6 +960,7 @@ fn main() -> Result<()> {
                 out,
                 date,
                 allow_empty,
+                install_to,
             } => {
                 let export_date = parse_export_date(date)?;
                 println!("Exporting X-Plane 12 Navigation Data...");
@@ -983,6 +989,13 @@ fn main() -> Result<()> {
                 );
                 for diagnostic in report.diagnostics.iter().take(20) {
                     println!("  diagnostic: {diagnostic}");
+                }
+                if let Some(target) = install_to {
+                    let install = openairac_export_xplane::install_layer(out, target)?;
+                    println!("Installed layer cycle {} into {:?}", install.cycle, target);
+                    for name in &install.installed {
+                        println!("  installed {name}");
+                    }
                 }
                 if report.diagnostics.len() > 20 {
                     println!("  ... {} more diagnostics", report.diagnostics.len() - 20);

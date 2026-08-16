@@ -19,7 +19,7 @@
 //!   installed artifact); publication rollback remains the temporal
 //!   `rollback_cycle` re-publication — two explicit, separate concepts.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Utc};
 use openairac_store::WorldStore;
 use serde::{Deserialize, Serialize};
@@ -134,6 +134,92 @@ pub struct VerifyReport {
     pub files: usize,
     pub authenticity: Authenticity,
     pub ok: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Signing (development/test only — production private keys are NEVER
+// provisioned from or committed to this repository)
+// ---------------------------------------------------------------------------
+
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+
+/// Signature file name inside a bundle directory.
+pub const SIGNATURE_FILE: &str = "manifest.sig";
+
+/// Ed25519 signing keypair. Test/development use only.
+pub struct SigningKeyPair {
+    signing: SigningKey,
+}
+
+impl SigningKeyPair {
+    pub fn generate() -> Self {
+        Self {
+            signing: SigningKey::generate(&mut rand::thread_rng()),
+        }
+    }
+
+    /// The trust root corresponding to this keypair.
+    pub fn public_key(&self) -> TrustRoot {
+        TrustRoot {
+            verifying: self.signing.verifying_key(),
+        }
+    }
+}
+
+/// Trust root: an Ed25519 public key accepted for SignedTrusted bundles.
+#[derive(Clone)]
+pub struct TrustRoot {
+    verifying: VerifyingKey,
+}
+
+impl TrustRoot {
+    pub fn from_base64(encoded: &str) -> Result<Self> {
+        use base64::Engine;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .context("decoding trust root")?;
+        let verifying = VerifyingKey::from_bytes(
+            bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| anyhow!("trust root must be 32 bytes"))?,
+        )
+        .map_err(|_| anyhow!("trust root is not a valid Ed25519 public key"))?;
+        Ok(Self { verifying })
+    }
+
+    pub fn to_base64(&self) -> String {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.encode(self.verifying.as_bytes())
+    }
+}
+
+/// Sign an unsigned bundle in place: flips authenticity to
+/// SignedTrusted, recomputes the content hash, and writes
+/// `manifest.sig` (Ed25519 over the exact manifest.json bytes).
+pub fn sign_bundle(bundle_dir: &Path, keypair: &SigningKeyPair) -> Result<()> {
+    let manifest_path = bundle_dir.join("manifest.json");
+    let manifest_json = std::fs::read_to_string(&manifest_path)
+        .with_context(|| format!("reading {}", manifest_path.display()))?;
+    let mut manifest: BundleManifest =
+        serde_json::from_str(&manifest_json).context("parsing bundle manifest")?;
+    if manifest.core.authenticity != "UnsignedDevelopment" {
+        bail!(
+            "cannot sign bundle with authenticity {}",
+            manifest.core.authenticity
+        );
+    }
+    manifest.core.authenticity = "SignedTrusted".to_string();
+    manifest.bundle_hash = manifest.compute_bundle_hash()?;
+    let canonical = serde_json::to_string_pretty(&manifest).context("serializing manifest")?;
+    std::fs::write(&manifest_path, &canonical)?;
+    let signature = keypair.signing.sign(canonical.as_bytes());
+    use base64::Engine;
+    std::fs::write(
+        bundle_dir.join(SIGNATURE_FILE),
+        base64::engine::general_purpose::STANDARD.encode(signature.to_bytes()),
+    )?;
+    Ok(())
 }
 
 /// Install outcome.
@@ -338,8 +424,13 @@ pub fn build_bundle(
 // ---------------------------------------------------------------------------
 
 /// Verify a bundle directory: manifest integrity, file hashes, missing
-/// and unexpected files. Fails closed on ANY mismatch.
-pub fn verify_bundle(bundle_dir: &Path) -> Result<VerifyReport> {
+/// and unexpected files, and (for SignedTrusted) an Ed25519 signature
+/// over the manifest against the supplied trust root. Fails closed on
+/// ANY mismatch.
+pub fn verify_bundle_with_trust(
+    bundle_dir: &Path,
+    trust: Option<&TrustRoot>,
+) -> Result<VerifyReport> {
     let manifest_path = bundle_dir.join("manifest.json");
     let manifest_json = std::fs::read_to_string(&manifest_path)
         .with_context(|| format!("reading {}", manifest_path.display()))?;
@@ -380,14 +471,18 @@ pub fn verify_bundle(bundle_dir: &Path) -> Result<VerifyReport> {
         }
     }
 
-    // Unexpected files (policy: only manifest + listed payloads).
-    let listed: BTreeSet<&str> = manifest
+    // Unexpected files (policy: manifest + listed payloads +
+    // signature file when authenticity is SignedTrusted).
+    let mut listed: BTreeSet<&str> = manifest
         .core
         .files
         .iter()
         .map(|f| f.path.as_str())
         .chain(std::iter::once("manifest.json"))
         .collect();
+    if manifest.core.authenticity == "SignedTrusted" {
+        listed.insert(SIGNATURE_FILE);
+    }
     for entry in std::fs::read_dir(bundle_dir)? {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().to_string();
@@ -401,11 +496,34 @@ pub fn verify_bundle(bundle_dir: &Path) -> Result<VerifyReport> {
         "SignedTrusted" => Authenticity::SignedTrusted,
         other => bail!("unknown authenticity marker '{other}'"),
     };
-    if authenticity == Authenticity::SignedTrusted {
-        // No production trust root exists: a bundle claiming to be
-        // signed and trusted cannot be verified and must be rejected
-        // (fail closed, never masquerade).
-        bail!("bundle claims SignedTrusted but no trust root is configured");
+    match authenticity {
+        Authenticity::UnsignedDevelopment => {
+            if bundle_dir.join(SIGNATURE_FILE).exists() {
+                bail!("UnsignedDevelopment bundle carries a signature file");
+            }
+        }
+        Authenticity::SignedTrusted => {
+            let trust = trust.ok_or_else(|| {
+                anyhow!("bundle claims SignedTrusted but no trust root is configured")
+            })?;
+            let sig_path = bundle_dir.join(SIGNATURE_FILE);
+            let sig_b64 = std::fs::read_to_string(&sig_path)
+                .with_context(|| format!("reading {}", sig_path.display()))?;
+            use base64::Engine;
+            let sig_bytes = base64::engine::general_purpose::STANDARD
+                .decode(sig_b64.trim())
+                .context("decoding bundle signature")?;
+            let sig_arr: [u8; 64] = sig_bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| anyhow!("bundle signature must be 64 bytes"))?;
+            let signature = Signature::from_slice(&sig_arr)
+                .map_err(|e| anyhow!("invalid bundle signature bytes: {e}"))?;
+            trust
+                .verifying
+                .verify(manifest_json.as_bytes(), &signature)
+                .context("bundle signature verification failed")?;
+        }
     }
 
     Ok(VerifyReport {
@@ -414,6 +532,11 @@ pub fn verify_bundle(bundle_dir: &Path) -> Result<VerifyReport> {
         authenticity,
         ok: true,
     })
+}
+
+/// Verify with no trust root (SignedTrusted bundles are rejected).
+pub fn verify_bundle(bundle_dir: &Path) -> Result<VerifyReport> {
+    verify_bundle_with_trust(bundle_dir, None)
 }
 
 /// Inspect a bundle: parse and return its manifest (no integrity check).
@@ -899,6 +1022,64 @@ mod tests {
             !root.join("staging").exists()
                 || std::fs::read_dir(root.join("staging")).unwrap().count() == 0
         );
+    }
+
+    #[test]
+    fn test_sign_verify_trusted_bundle() {
+        let (store, dir) = fixture_store();
+        let out = dir.join("bundles");
+        let (_, bundle_dir) = build_bundle(&store, &out, Utc::now()).unwrap();
+        let kp = SigningKeyPair::generate();
+        sign_bundle(&bundle_dir, &kp).unwrap();
+        // SignedTrusted with the right trust root verifies.
+        let report = verify_bundle_with_trust(&bundle_dir, Some(&kp.public_key())).unwrap();
+        assert_eq!(report.authenticity, Authenticity::SignedTrusted);
+        // Without a trust root: rejected (fail closed).
+        assert!(verify_bundle(&bundle_dir).is_err());
+        // Wrong key: rejected.
+        let other = SigningKeyPair::generate();
+        assert!(verify_bundle_with_trust(&bundle_dir, Some(&other.public_key())).is_err());
+    }
+
+    #[test]
+    fn test_signature_fails_closed_on_tamper() {
+        let (store, dir) = fixture_store();
+        let out = dir.join("bundles");
+        let (_, bundle_dir) = build_bundle(&store, &out, Utc::now()).unwrap();
+        let kp = SigningKeyPair::generate();
+        sign_bundle(&bundle_dir, &kp).unwrap();
+        // Tamper with the manifest after signing.
+        let manifest_path = bundle_dir.join("manifest.json");
+        let original = std::fs::read_to_string(&manifest_path).unwrap();
+        // generated_at is informational: the manifest still parses and
+        // hashes, but the signature no longer covers these bytes.
+        std::fs::write(
+            &manifest_path,
+            original.replacen("\"generated_at\": \"", "\"generated_at\": \"X", 1),
+        )
+        .unwrap();
+        assert!(verify_bundle_with_trust(&bundle_dir, Some(&kp.public_key())).is_err());
+        // Truncated signature.
+        let sig_path = bundle_dir.join(SIGNATURE_FILE);
+        std::fs::write(&sig_path, "AAAA").unwrap();
+        std::fs::write(&manifest_path, original).unwrap();
+        assert!(verify_bundle_with_trust(&bundle_dir, Some(&kp.public_key())).is_err());
+        // Unsigned bundle carrying a stray signature file is rejected.
+        let (store2, dir2) = fixture_store();
+        let out2 = dir2.join("bundles");
+        let (_, bundle2) = build_bundle(&store2, &out2, Utc::now()).unwrap();
+        std::fs::write(bundle2.join(SIGNATURE_FILE), "AAAA").unwrap();
+        assert!(verify_bundle(&bundle2).is_err());
+    }
+
+    #[test]
+    fn test_trust_root_roundtrip() {
+        let kp = SigningKeyPair::generate();
+        let encoded = kp.public_key().to_base64();
+        let decoded = TrustRoot::from_base64(&encoded).unwrap();
+        assert_eq!(decoded.to_base64(), encoded);
+        assert!(TrustRoot::from_base64("not base64!!").is_err());
+        assert!(TrustRoot::from_base64("QUJD").is_err()); // 3 bytes, wrong length
     }
 
     #[test]

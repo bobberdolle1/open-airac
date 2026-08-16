@@ -952,18 +952,9 @@ fn manifest_file_entry(path: &Path, rows: usize) -> Result<ManifestFileEntry> {
     })
 }
 
-/// Installation plan: the library-side design for a transactional simulator
-/// install. Not wired into the CLI: OpenAIRAC must not touch live simulator
-/// installations yet. Sequence for the future implementation:
-///
-/// ```text
-/// generate into staging directory      (done: export_from_db)
-///   → validate manifest checksums       (planned: validate_layer)
-///   → backup existing files             (planned: backup_existing)
-///   → controlled swap                   (planned: apply_plan)
-///   → post-install validation           (planned: re-read manifest)
-///   → rollback on failure               (planned: rollback)
-/// ```
+/// Installation plan: retained for interface compatibility; the
+/// transactional installer below supersedes it (the plan is derived
+/// from the staged layer manifest at install time).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InstallPlan {
     pub target_dir: PathBuf,
@@ -971,8 +962,495 @@ pub struct InstallPlan {
     pub backup_dir: PathBuf,
 }
 
+// ---------------------------------------------------------------------------
+// Transactional layer installation (journaled, crash-recoverable)
+// ---------------------------------------------------------------------------
+
+/// Lock file name inside the target directory.
+pub const INSTALL_LOCK: &str = ".openairac_install.lock";
+/// Journal file name inside the target directory.
+pub const INSTALL_JOURNAL: &str = ".openairac_install.journal.json";
+
+/// Install phases. The journal phase advances BEFORE each destructive
+/// step, so crash recovery always knows what must be rolled back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InstallPhase {
+    Prepared,
+    BackedUp,
+    Swapped,
+    Committed,
+    RolledBack,
+}
+
+/// Journal persisted in the target directory across the install.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InstallJournal {
+    pub operation_id: String,
+    pub cycle: String,
+    /// Layer file names in install order.
+    pub files: Vec<String>,
+    /// Backup directory (inside the target dir).
+    pub backup_dir: PathBuf,
+    pub phase: InstallPhase,
+}
+
+/// Outcome of a layer install (or rollback).
+#[derive(Debug, Clone, PartialEq)]
+pub struct LayerInstallReport {
+    pub operation_id: String,
+    pub cycle: String,
+    pub installed: Vec<String>,
+    /// Files restored from backup during a rollback.
+    pub restored: Vec<String>,
+    /// Files removed during rollback because no backup existed.
+    pub removed: Vec<String>,
+}
+
+/// Test-only failpoints; default = no failures.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct InstallFailpoints {
+    pub after_backup: bool,
+    pub during_swap: bool,
+    pub before_commit: bool,
+}
+
+fn write_journal(target_dir: &Path, journal: &InstallJournal) -> Result<()> {
+    let json = serde_json::to_string_pretty(journal)?;
+    std::fs::write(target_dir.join(INSTALL_JOURNAL), json)?;
+    Ok(())
+}
+
+fn read_journal(target_dir: &Path) -> Result<Option<InstallJournal>> {
+    let path = target_dir.join(INSTALL_JOURNAL);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let json = std::fs::read_to_string(&path)?;
+    Ok(Some(serde_json::from_str(&json)?))
+}
+
+/// Roll the target back to the pre-install state using the journal.
+/// Never fails silently: each step reports; the journal is marked
+/// RolledBack only after every file is handled.
+fn rollback_target(target_dir: &Path, journal: &InstallJournal) -> Result<LayerInstallReport> {
+    let mut restored = Vec::new();
+    let mut removed = Vec::new();
+    for name in &journal.files {
+        let target = target_dir.join(name);
+        let backup = journal.backup_dir.join(name);
+        if backup.exists() {
+            swap_file(&backup, &target)?;
+            restored.push(name.clone());
+        } else if target.exists() {
+            std::fs::remove_file(&target)?;
+            removed.push(name.clone());
+        }
+    }
+    let rolled_back = InstallJournal {
+        phase: InstallPhase::RolledBack,
+        ..journal.clone()
+    };
+    write_journal(target_dir, &rolled_back)?;
+    let _ = std::fs::remove_dir_all(&journal.backup_dir);
+    let _ = std::fs::remove_file(target_dir.join(INSTALL_LOCK));
+    let _ = std::fs::remove_file(target_dir.join(INSTALL_JOURNAL));
+    Ok(LayerInstallReport {
+        operation_id: journal.operation_id.clone(),
+        cycle: journal.cycle.clone(),
+        installed: Vec::new(),
+        restored,
+        removed,
+    })
+}
+
+/// Recover from an interrupted install: if a journal exists, roll the
+/// target back; a stale lock without journal is removed. Returns the
+/// rollback report when recovery happened.
+pub fn recover_interrupted(target_dir: &Path) -> Result<Option<LayerInstallReport>> {
+    let journal = read_journal(target_dir)?;
+    match journal {
+        Some(j) => Ok(Some(rollback_target(target_dir, &j)?)),
+        None => {
+            let lock = target_dir.join(INSTALL_LOCK);
+            if lock.exists() {
+                // Lock without journal: crashed before the journal
+                // write — nothing was modified yet.
+                std::fs::remove_file(&lock)?;
+            }
+            Ok(None)
+        }
+    }
+}
+
+fn validate_staged_layer(staging_dir: &Path) -> Result<NavdataLayerManifest> {
+    let manifest_path = staging_dir.join("manifest.json");
+    let manifest_json = std::fs::read_to_string(&manifest_path)
+        .with_context(|| format!("reading {}", manifest_path.display()))?;
+    let manifest: NavdataLayerManifest =
+        serde_json::from_str(&manifest_json).context("parsing layer manifest")?;
+    if !manifest.allow_empty && manifest.files.iter().any(|f| f.rows == 0) {
+        bail!(
+            "staged layer manifest records an empty file; refusing to install              (re-export without --allow-empty misuse)"
+        );
+    }
+    for entry in &manifest.files {
+        let path = staging_dir.join(&entry.name);
+        let content =
+            std::fs::read(&path).with_context(|| format!("reading staged {}", entry.name))?;
+        use sha2::Digest;
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(&content);
+        let actual = format!("{:x}", hasher.finalize());
+        if actual != entry.sha256 {
+            bail!("staged layer file {} checksum mismatch", entry.name);
+        }
+    }
+    Ok(manifest)
+}
+
+/// Transactionally install a staged X-Plane layer into a target
+/// directory (journal + backup + swap + post-validate + commit;
+/// rollback restores the previous layer on ANY failure).
+pub fn install_layer(staging_dir: &Path, target_dir: &Path) -> Result<LayerInstallReport> {
+    install_layer_with_failpoints(staging_dir, target_dir, &InstallFailpoints::default())
+}
+
+/// Install with test-only failpoints.
+pub fn install_layer_with_failpoints(
+    staging_dir: &Path,
+    target_dir: &Path,
+    failpoints: &InstallFailpoints,
+) -> Result<LayerInstallReport> {
+    std::fs::create_dir_all(target_dir)
+        .with_context(|| format!("creating target directory {:?}", target_dir))?;
+
+    // 0. Any interrupted previous install must be resolved first.
+    recover_interrupted(target_dir)?;
+
+    // 1. Validate the staged layer completely before touching the target.
+    let manifest = validate_staged_layer(staging_dir)?;
+
+    // 2. Exclusive lock.
+    let operation_id = format!(
+        "op-{}-{}",
+        std::process::id(),
+        chrono::Utc::now().timestamp_millis()
+    );
+    let lock_path = target_dir.join(INSTALL_LOCK);
+    let lock = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&lock_path);
+    let mut lock = match lock {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            bail!(
+                "another install or recovery is in progress (lock {:?} exists)",
+                lock_path
+            );
+        }
+        Err(e) => return Err(e.into()),
+    };
+    use std::io::Write;
+    writeln!(lock, "{operation_id}")?;
+
+    // 3. Journal BEFORE any modification.
+    let backup_dir = target_dir.join(format!(".openairac_backup_{operation_id}"));
+    let journal = InstallJournal {
+        operation_id: operation_id.clone(),
+        cycle: manifest.cycle.clone(),
+        files: manifest.files.iter().map(|f| f.name.clone()).collect(),
+        backup_dir: backup_dir.clone(),
+        phase: InstallPhase::Prepared,
+    };
+    write_journal(target_dir, &journal)?;
+
+    // 4. Backup existing files.
+    std::fs::create_dir_all(&backup_dir)?;
+    for name in &journal.files {
+        let target = target_dir.join(name);
+        if target.exists() {
+            std::fs::copy(&target, backup_dir.join(name))?;
+        }
+    }
+    let backed_up = InstallJournal {
+        phase: InstallPhase::BackedUp,
+        ..journal.clone()
+    };
+    write_journal(target_dir, &backed_up)?;
+
+    if failpoints.after_backup {
+        let report = rollback_target(target_dir, &backed_up)?;
+        bail!(
+            "failpoint after_backup triggered; previous layer restored              ({} files)",
+            report.restored.len() + report.removed.len()
+        );
+    }
+
+    // 5. Swap staged files into place.
+    for name in &journal.files {
+        swap_file(&staging_dir.join(name), &target_dir.join(name))?;
+    }
+    let swapped = InstallJournal {
+        phase: InstallPhase::Swapped,
+        ..journal.clone()
+    };
+    write_journal(target_dir, &swapped)?;
+
+    if failpoints.during_swap {
+        let report = rollback_target(target_dir, &swapped)?;
+        bail!(
+            "failpoint during_swap triggered; previous layer restored              ({} files)",
+            report.restored.len() + report.removed.len()
+        );
+    }
+
+    // 6. Post-install validation: the installed files must re-verify.
+    for entry in &manifest.files {
+        let path = target_dir.join(&entry.name);
+        let content =
+            std::fs::read(&path).with_context(|| format!("reading installed {}", entry.name))?;
+        use sha2::Digest;
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(&content);
+        let actual = format!("{:x}", hasher.finalize());
+        if actual != entry.sha256 {
+            let _ = rollback_target(target_dir, &swapped)?;
+            bail!(
+                "post-install validation failed for {}; previous layer restored",
+                entry.name
+            );
+        }
+    }
+
+    if failpoints.before_commit {
+        let report = rollback_target(target_dir, &swapped)?;
+        bail!(
+            "failpoint before_commit triggered; previous layer restored              ({} files)",
+            report.restored.len() + report.removed.len()
+        );
+    }
+
+    // 7. Commit: cleanup, then release the lock last.
+    let committed = InstallJournal {
+        phase: InstallPhase::Committed,
+        ..journal.clone()
+    };
+    write_journal(target_dir, &committed)?;
+    let _ = std::fs::remove_dir_all(&backup_dir);
+    let _ = std::fs::remove_file(target_dir.join(INSTALL_JOURNAL));
+    drop(lock);
+    let _ = std::fs::remove_file(&lock_path);
+
+    Ok(LayerInstallReport {
+        operation_id,
+        cycle: manifest.cycle,
+        installed: journal.files.clone(),
+        restored: Vec::new(),
+        removed: Vec::new(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
+    fn unique_dir(tag: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        std::env::temp_dir().join(format!("oa_xplane_test_{}_{}_{n}", std::process::id(), tag))
+    }
+
+    fn staged_layer(dir: &Path, contents: &[(&str, &str)]) {
+        // contents: (file name, body)
+        let mut entries = Vec::new();
+        for (name, body) in contents {
+            std::fs::write(dir.join(name), body).unwrap();
+            use sha2::Digest;
+            let mut hasher = sha2::Sha256::new();
+            hasher.update(body.as_bytes());
+            entries.push(ManifestFileEntry {
+                name: name.to_string(),
+                sha256: format!("{:x}", hasher.finalize()),
+                rows: 10,
+            });
+        }
+        let manifest = NavdataLayerManifest {
+            generator: "test".to_string(),
+            cycle: "2608".to_string(),
+            build_date: "20260806".to_string(),
+            generated_at: "2026-08-06T00:00:00Z".to_string(),
+            files: entries,
+            allow_empty: false,
+        };
+        std::fs::write(
+            dir.join("manifest.json"),
+            serde_json::to_string_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_install_layer_happy_path() {
+        let root = unique_dir("install_happy");
+        let _ = std::fs::remove_dir_all(&root);
+        let staging = root.join("staging");
+        let target = root.join("custom_data");
+        std::fs::create_dir_all(&staging).unwrap();
+        staged_layer(
+            &staging,
+            &[
+                ("earth_fix.dat", "I\n1100 Version - data cycle 2608\n"),
+                ("earth_nav.dat", "I\n1100 Version - data cycle 2608\n"),
+                ("earth_awy.dat", "A\n1100 Version - data cycle 2608\n"),
+            ],
+        );
+        let report = install_layer(&staging, &target).unwrap();
+        assert_eq!(report.installed.len(), 3);
+        assert!(target.join("earth_fix.dat").exists());
+        assert!(!target.join(INSTALL_JOURNAL).exists());
+        assert!(!target.join(INSTALL_LOCK).exists());
+        // Reinstall over the same layer: re-stage first (install moves
+        // files out of the staging directory).
+        let staging2 = root.join("staging2");
+        std::fs::create_dir_all(&staging2).unwrap();
+        staged_layer(
+            &staging2,
+            &[
+                ("earth_fix.dat", "I\n1100 Version - data cycle 2608\n"),
+                ("earth_nav.dat", "I\n1100 Version - data cycle 2608\n"),
+                ("earth_awy.dat", "A\n1100 Version - data cycle 2608\n"),
+            ],
+        );
+        install_layer(&staging2, &target).unwrap();
+    }
+
+    #[test]
+    fn test_install_rollback_restores_previous_layer() {
+        let root = unique_dir("install_rollback");
+        let _ = std::fs::remove_dir_all(&root);
+        let target = root.join("custom_data");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("earth_fix.dat"), "OLD FIX LAYER\n").unwrap();
+        std::fs::write(target.join("earth_nav.dat"), "OLD NAV LAYER\n").unwrap();
+        std::fs::write(target.join("earth_awy.dat"), "OLD AWY LAYER\n").unwrap();
+
+        let staging = root.join("staging");
+        std::fs::create_dir_all(&staging).unwrap();
+        staged_layer(
+            &staging,
+            &[
+                ("earth_fix.dat", "NEW FIX LAYER\n"),
+                ("earth_nav.dat", "NEW NAV LAYER\n"),
+                ("earth_awy.dat", "NEW AWY LAYER\n"),
+            ],
+        );
+        let result = install_layer_with_failpoints(
+            &staging,
+            &target,
+            &InstallFailpoints {
+                after_backup: true,
+                ..Default::default()
+            },
+        );
+        assert!(result.is_err());
+        // Previous layer restored byte-for-byte.
+        assert_eq!(
+            std::fs::read_to_string(target.join("earth_fix.dat")).unwrap(),
+            "OLD FIX LAYER\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(target.join("earth_nav.dat")).unwrap(),
+            "OLD NAV LAYER\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(target.join("earth_awy.dat")).unwrap(),
+            "OLD AWY LAYER\n"
+        );
+        // No journal/lock leftovers.
+        assert!(!target.join(INSTALL_JOURNAL).exists());
+        assert!(!target.join(INSTALL_LOCK).exists());
+        // A subsequent install works after the failed one.
+        install_layer(&staging, &target).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(target.join("earth_fix.dat")).unwrap(),
+            "NEW FIX LAYER\n"
+        );
+    }
+
+    #[test]
+    fn test_recover_interrupted_install() {
+        let root = unique_dir("install_recover");
+        let _ = std::fs::remove_dir_all(&root);
+        let target = root.join("custom_data");
+        std::fs::create_dir_all(&target).unwrap();
+        // Simulate a crash mid-swap: journal says Swapped, backup holds
+        // the previous files, target holds new files.
+        let backup = target.join(".openairac_backup_op-1");
+        std::fs::create_dir_all(&backup).unwrap();
+        std::fs::write(backup.join("earth_fix.dat"), "OLD FIX LAYER\n").unwrap();
+        std::fs::write(backup.join("earth_nav.dat"), "OLD NAV LAYER\n").unwrap();
+        std::fs::write(target.join("earth_fix.dat"), "NEW FIX LAYER\n").unwrap();
+        std::fs::write(target.join("earth_nav.dat"), "NEW NAV LAYER\n").unwrap();
+        std::fs::write(target.join(INSTALL_LOCK), "op-1\n").unwrap();
+        let journal = InstallJournal {
+            operation_id: "op-1".to_string(),
+            cycle: "2608".to_string(),
+            files: vec!["earth_fix.dat".to_string(), "earth_nav.dat".to_string()],
+            backup_dir: backup,
+            phase: InstallPhase::Swapped,
+        };
+        write_journal(&target, &journal).unwrap();
+
+        let report = recover_interrupted(&target).unwrap().unwrap();
+        assert_eq!(report.restored.len(), 2);
+        assert_eq!(
+            std::fs::read_to_string(target.join("earth_fix.dat")).unwrap(),
+            "OLD FIX LAYER\n"
+        );
+        assert!(!target.join(INSTALL_JOURNAL).exists());
+        assert!(!target.join(INSTALL_LOCK).exists());
+    }
+
+    #[test]
+    fn test_install_lock_and_validation() {
+        let root = unique_dir("install_lock");
+        let _ = std::fs::remove_dir_all(&root);
+        let staging = root.join("staging");
+        let target = root.join("custom_data");
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        staged_layer(
+            &staging,
+            &[
+                ("earth_fix.dat", "I\n1100 Version\n"),
+                ("earth_nav.dat", "I\n1100 Version\n"),
+                ("earth_awy.dat", "A\n1100 Version\n"),
+            ],
+        );
+        // Corrupt a staged payload -> validation fails, target untouched.
+        std::fs::write(staging.join("earth_nav.dat"), "tampered\n").unwrap();
+        let result = install_layer(&staging, &target);
+        assert!(result.is_err());
+        assert!(!target.join("earth_fix.dat").exists());
+        assert!(!target.join(INSTALL_LOCK).exists());
+        assert!(!target.join(INSTALL_JOURNAL).exists());
+        // Restore the payload, then: stale lock (no journal) — recovery
+        // removes it and the install proceeds; a crash between lock
+        // creation and journal write must never brick the directory.
+        staged_layer(
+            &staging,
+            &[
+                ("earth_fix.dat", "I\n1100 Version\n"),
+                ("earth_nav.dat", "I\n1100 Version\n"),
+                ("earth_awy.dat", "A\n1100 Version\n"),
+            ],
+        );
+        std::fs::write(target.join(INSTALL_LOCK), "op-other\n").unwrap();
+        let result = install_layer(&staging, &target);
+        assert!(result.is_ok());
+        assert!(!target.join(INSTALL_LOCK).exists());
+    }
+
     use super::*;
 
     fn temporal() -> TemporalValidity {
