@@ -63,6 +63,24 @@ Every ingested dataset is recorded in SQLite under `source_snapshots` with:
   - Terminal record support is decoding/verification level: procedure
     geometry rendering (RF arcs etc.) is not implemented.
 
+## Worldwide source research (v0.6)
+
+Evaluated candidates for legal, redistributable regional coverage.
+Conclusion: implement only sources with clear public/open licensing;
+quality over provider count.
+
+| Source | Region | License basis | Verdict |
+|---|---|---|---|
+| FAA CIFP / ARINC 424 | United States | US Government work, public domain | **In use** (nationwide AIRAC cycles) |
+| OurAirports | Worldwide | Public domain (CC0-style release) | **In use** (airports/runways/navaids) |
+| OSM-derived aviation data | Worldwide | ODbL — redistribution allowed with attribution + share-alike | Candidate; needs ODbL compliance review before bundle redistribution |
+| National AIP open data | Single countries | Varies per state; registration/attribution often required | Candidates; each needs a per-country license review — none implemented yet |
+| Navigraph / Jeppesen / proprietary ARINC sets | — | Proprietary | **Rejected**: no redistribution rights |
+
+OpenAIRAC bundles must remain legally distributable: any future
+provider must pass a license/redistribution review before its data can
+ship inside a bundle.
+
 ## Not yet ingested
 
 - ICAO AIP / worldwide procedure sources (regional coverage expansion,
