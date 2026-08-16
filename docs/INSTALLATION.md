@@ -2,7 +2,11 @@
 
 This guide explains how to install, configure, and use **OpenAIRAC**.
 
-> Status note: v0.3 (Routing & Procedures Foundation). The CLI, the
+> Status note: v0.4 (AIRAC Lifecycle, Reconciliation & Distribution). The
+> CLI, the canonical temporal store (schema v8), WMM2025, OurAirports and
+> FAA CIFP ingestion (incl. SID/STAR/approach legs), the AIRAC cycle
+> catalog, publications/corrections/tombstones, rollback, multi-source
+> reconciliation, and deterministic data bundles are functional. The CLI, the
 > canonical temporal store (schema v4), WMM2025, OurAirports ingestion,
 > the routing/procedures/integration layers, and the X-Plane 12
 > navaid/fix/airway exporter are functional. FAA CIFP ingestion

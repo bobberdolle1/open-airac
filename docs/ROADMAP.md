@@ -25,27 +25,35 @@
 - [x] X-Plane production-path strategy documented (convert424toxplane for earth_424.dat; native exporter = diagnostics)
 - [x] X-Plane 12 `earth_awy.dat` native exporter (XPAWY1101, endpoint typing 11/2/3, referential integrity)
 
-## Milestone v0.4 — AIRAC Lifecycle & Update Automation (Next Milestone)
+## Milestone v0.4 — AIRAC Lifecycle, Reconciliation & Distribution (Shipped)
 
-The engine exists but updates are still manual: the user fetches a
-dataset once. v0.4 makes the AIRAC/navigation-data product self-
-updating.
+The engine is now self-updating, provenance-complete, and
+distributable as verified artifacts.
 
-- [ ] Automatic AIRAC cycle change detection (source polling, cycle metadata)
-- [ ] Current/next cycle preload and timed activation (`valid_from` futures)
-- [ ] Differential updates: ingest only changed records, keep full provenance
-- [ ] Source reconciliation: cross-provider identity matching and conflict reporting
-- [ ] Release/update distribution: versioned data bundles with checksums
+- [x] AIRAC cycle catalog with a validated state machine (Discovered → Preloaded → Active → Superseded/Expired/RolledBack)
+- [x] Cycle discovery (FAA CIFP directory listing; effective dates UNCONFIRMED until confirmed — fail-closed)
+- [x] Explicit `CycleSelector` (cycle ident / source URI / confirmed effective date — never wall-clock-inferred)
+- [x] Preload with `Scheduled` events and atomic transactional `observe_cycles`
+- [x] Full-snapshot removal semantics (`close_absent_at` with namespace-scoped, masked, temp-seen-set application)
+- [x] Differential publications (absence means nothing) and first-class tombstones
+- [x] Corrections: future-revision replacement, withdrawal, post-effective new revisions; nanosecond boundary semantics
+- [x] Publication identity: replay idempotent, conflicting content fails loudly unless a Correction
+- [x] One atomic transaction per publication: snapshot + identity guard + payloads + tombstones + close + audit + lifecycle bookkeeping
+- [x] Rollback by re-publication (history immutable, provider-scoped diff, exact provenance)
+- [x] Multi-source entity reconciliation (canonical identities, memberships with exact source intervals, evidence, conflicts, authority policy, resolved view)
+- [x] Deterministic content-addressed data bundles (manifest + integrity + UnsignedDevelopment authenticity)
+- [x] Staged, validated bundle install; artifact-level rollback; local update channel with deterministic decisions
+- [x] Real-data validated: FAA CIFP 2608 (396,460 records) + live OurAirports (85,912 airports / 14,393 navaids) reconciled to 1,431 exact canonical matches
 
-## Milestone v0.5 — Procedure Fidelity & Geometry
+## Milestone v0.5 — Procedure Fidelity & Geometry (Next Milestone)
 
 Complete the terminal-procedure domain before growing the map.
 
-- [ ] RF arc geometry and other derived procedure-leg geometry (rendering layer)
-- [ ] Remaining ARINC 424 semantics: holds geometry, vertical-path (GP) angles, course-C DF legs, MSA sectors
-- [ ] ILS localizer/glideslope data joined from PF records into exportable form
-- [ ] Procedure/runway association validation and approach transition completeness
-- [ ] Data quality/confidence scoring (per-airport, per-source)
+- [ ] FAA PA/PG terminal airports and runways properly decoded (currently explicit Unsupported records)
+- [ ] ILS localizer/glideslope/runway associations from PF records
+- [ ] RF arc geometry and hold geometry (rendering layer over the semantic model)
+- [ ] Remaining verified ARINC path-terminator semantics (vertical angles, course-C DF legs, MSA sectors)
+- [ ] Procedure/runway association validation and procedure completeness diagnostics
 
 ## Milestone v0.6 — Worldwide Coverage & Providers
 
@@ -53,13 +61,26 @@ Complete the terminal-procedure domain before growing the map.
 - [ ] Regional coverage expansion beyond US CIFP (ICAO AIP sources, community providers)
 - [ ] Provider failover and per-region confidence reporting
 
-## Milestone v0.7 — Simulator Output & Distribution
+## Milestone v0.7 — Simulator Output & Distribution Maturity
 
 - [ ] Complete X-Plane production pipeline (earth_424.dat via verified conversion; earth_awy.dat native)
 - [ ] Transactional simulator installation (backup, controlled swap, rollback — designed in v0.2, not yet shipped)
 - [ ] MSFS 2024 navdata support (BGL/navdata packager)
 - [ ] Simulator compatibility validation harness (golden fixtures per simulator)
-- [ ] Update distribution: signed release channel for engine data products
+- [ ] Signed release channel (trust root + ed25519 artifacts replacing UnsignedDevelopment)
+
+## "OpenAIRAC 1.0 ready" — definition
+
+1.0 means an operator can run OpenAIRAC end-to-end for at least one
+simulator with current AIRAC data:
+
+- cycle discovery → preload → activation is automatic and verified;
+- reconciliation coverage includes every entity class OpenAIRAC decodes;
+- bundles are signed, reproducible, and installable into a simulator;
+- rollback works at publication, cycle, and artifact level;
+- data quality gates block releases on unresolved errors (warnings allowed);
+- FAA terminal airports/runways, ILS associations, and procedure
+  geometry are complete (v0.5 + v0.6 scope).
 
 ## Future (separate product/application)
 
