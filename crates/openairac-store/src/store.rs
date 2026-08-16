@@ -472,6 +472,134 @@ impl WorldStore {
         &self.conn
     }
 
+    /// The database file path.
+    pub fn database_path(&self) -> String {
+        self.path.to_string_lossy().to_string()
+    }
+
+    /// Create a consistent snapshot copy of this database at `dst`
+    /// using the SQLite online backup API (safe while the store is
+    /// open, unlike a raw file copy of a WAL-mode database).
+    pub fn backup_to(&self, dst: &std::path::Path) -> Result<()> {
+        let mut dest = Connection::open(dst)
+            .with_context(|| format!("opening backup destination {}", dst.display()))?;
+        let backup = rusqlite::backup::Backup::new(&self.conn, &mut dest)
+            .context("starting online backup")?;
+        backup
+            .run_to_completion(64, std::time::Duration::from_millis(20), None)
+            .context("running online backup")?;
+        Ok(())
+    }
+
+    /// Every recorded dataset publication (append-only list).
+    pub fn query_dataset_versions(&self) -> Result<Vec<DatasetVersion>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, provider, dataset, airac_cycle, content_sha256, retrieved_at,
+                    revision_kind, coverage, publication_id, valid_from, notes
+             FROM dataset_versions ORDER BY id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, String>(5)?,
+                r.get::<_, String>(6)?,
+                r.get::<_, String>(7)?,
+                r.get::<_, Option<String>>(8)?,
+                r.get::<_, Option<String>>(9)?,
+                r.get::<_, Option<String>>(10)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, prov, ds, cycle_s, sha, retrieved, kind, cov, pub_id, vf, notes) = row?;
+            out.push(DatasetVersion {
+                id,
+                provider: prov,
+                dataset: ds,
+                airac_cycle: cycle_s,
+                content_sha256: sha,
+                retrieved_at: parse_utc(&retrieved, "dataset_versions.retrieved_at")?,
+                revision_kind: RevisionKind::parse(&kind)
+                    .ok_or_else(|| anyhow::anyhow!("unknown revision_kind '{kind}'"))?,
+                coverage: Coverage::parse(&cov)
+                    .ok_or_else(|| anyhow::anyhow!("unknown coverage '{cov}'"))?,
+                publication_id: pub_id,
+                valid_from: vf
+                    .map(|v| parse_utc(&v, "dataset_versions.valid_from"))
+                    .transpose()?,
+                notes,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Every source snapshot.
+    pub fn query_source_snapshots(&self) -> Result<Vec<SourceSnapshot>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, provider, dataset, provider_revision, airac_cycle,
+                    effective_from, effective_until, retrieved_at, source_uri,
+                    content_sha256, license_id, license_notes, parser_version
+             FROM source_snapshots ORDER BY id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, Option<String>>(4)?,
+                r.get::<_, Option<String>>(5)?,
+                r.get::<_, Option<String>>(6)?,
+                r.get::<_, String>(7)?,
+                r.get::<_, String>(8)?,
+                r.get::<_, String>(9)?,
+                r.get::<_, Option<String>>(10)?,
+                r.get::<_, Option<String>>(11)?,
+                r.get::<_, String>(12)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (
+                id,
+                provider,
+                dataset,
+                rev,
+                cycle,
+                eff,
+                until,
+                retrieved,
+                uri,
+                sha,
+                lic,
+                licn,
+                parser,
+            ) = row?;
+            out.push(SourceSnapshot {
+                id: SourceSnapshotId(id),
+                provider,
+                dataset,
+                provider_revision: rev,
+                airac_cycle: cycle,
+                effective_from: eff.map(|v| parse_utc(&v, "effective_from")).transpose()?,
+                effective_until: until
+                    .map(|v| parse_utc(&v, "effective_until"))
+                    .transpose()?,
+                retrieved_at: parse_utc(&retrieved, "retrieved_at")?,
+                source_uri: uri,
+                content_sha256: sha,
+                license_id: lic,
+                license_notes: licn,
+                parser_version: parser,
+            });
+        }
+        Ok(out)
+    }
+
     /// Read all source memberships.
     pub fn query_memberships(&self) -> Result<Vec<SourceMembership>> {
         query_memberships_conn(&self.conn)

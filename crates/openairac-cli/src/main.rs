@@ -116,10 +116,78 @@ enum Commands {
         as_of: Option<String>,
     },
 
+    /// Versioned data bundles: build, inspect, verify, install
+    Bundle {
+        #[command(subcommand)]
+        cmd: BundleCmd,
+    },
+
+    /// Local update channel: check and apply
+    Update {
+        #[command(subcommand)]
+        cmd: UpdateCmd,
+    },
+
     /// Export canonical navigation data into simulator format
     Export {
         #[command(subcommand)]
         target: ExportTarget,
+    },
+}
+
+#[derive(Subcommand)]
+enum BundleCmd {
+    /// Build a deterministic bundle from the canonical store
+    Build {
+        #[arg(short, long, default_value = "./data/world.openairac.sqlite")]
+        db: PathBuf,
+        #[arg(short, long, default_value = "./bundles")]
+        out: PathBuf,
+    },
+    /// Inspect a bundle's manifest metadata
+    Inspect {
+        #[arg(short, long)]
+        bundle: PathBuf,
+    },
+    /// Verify a bundle's integrity (fail-closed)
+    Verify {
+        #[arg(short, long)]
+        bundle: PathBuf,
+    },
+    /// Install a bundle into a local root (staged, validated, swapped)
+    Install {
+        #[arg(short, long)]
+        root: PathBuf,
+        #[arg(short, long)]
+        bundle: PathBuf,
+    },
+    /// List installed bundle state (current / next)
+    List {
+        #[arg(short, long)]
+        root: PathBuf,
+    },
+    /// Roll back to the previous installed artifact
+    Rollback {
+        #[arg(short, long)]
+        root: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum UpdateCmd {
+    /// Compare installed state against a local channel
+    Check {
+        #[arg(short, long)]
+        root: PathBuf,
+        #[arg(short, long)]
+        channel: PathBuf,
+    },
+    /// Verify and install the channel's latest bundle
+    Apply {
+        #[arg(short, long)]
+        root: PathBuf,
+        #[arg(short, long)]
+        channel: PathBuf,
     },
 }
 
@@ -621,6 +689,116 @@ fn main() -> Result<()> {
             }
         }
 
+        Commands::Bundle { cmd } => match cmd {
+            BundleCmd::Build { db, out } => {
+                let store = WorldStore::open(db)?;
+                let (hash, dir) = openairac_bundle::build_bundle(&store, out, chrono::Utc::now())?;
+                println!("Bundle built: {}", dir.display());
+                println!("  bundle hash: {hash}");
+            }
+            BundleCmd::Inspect { bundle } => {
+                let manifest = openairac_bundle::inspect_bundle(bundle)?;
+                println!("Bundle: {}", manifest.bundle_hash);
+                println!("  format version: {}", manifest.core.format_version);
+                println!("  schema version: {}", manifest.core.schema_version);
+                println!("  generated at:   {}", manifest.generated_at);
+                println!("  effective from: {}", manifest.core.effective_from);
+                println!(
+                    "  AIRAC cycle:    {}",
+                    manifest.core.airac_cycle.as_deref().unwrap_or("-")
+                );
+                println!("  providers:      {}", manifest.core.providers.join(", "));
+                println!("  publications:   {}", manifest.core.publications.len());
+                println!(
+                    "  provenance:     {} snapshots",
+                    manifest.core.provenance.len()
+                );
+                println!(
+                    "  reconciliation: {} canonical, {} memberships, {} conflicts",
+                    manifest.core.reconciliation.canonical_entities,
+                    manifest.core.reconciliation.memberships,
+                    manifest.core.reconciliation.conflicts
+                );
+                println!("  authenticity:   {}", manifest.core.authenticity);
+                for file in &manifest.core.files {
+                    println!(
+                        "  file: {} ({} bytes, sha256 {})",
+                        file.path, file.size, file.sha256
+                    );
+                }
+            }
+            BundleCmd::Verify { bundle } => {
+                let report = openairac_bundle::verify_bundle(bundle)?;
+                println!(
+                    "Bundle verified: {} ({} file(s), {})",
+                    report.bundle_hash,
+                    report.files,
+                    report.authenticity.as_str()
+                );
+            }
+            BundleCmd::Install { root, bundle } => {
+                let report = openairac_bundle::install_bundle(root, bundle, chrono::Utc::now())?;
+                if report.preloaded {
+                    println!(
+                        "Bundle preloaded as NEXT (effective {})",
+                        report.effective_from
+                    );
+                } else {
+                    println!(
+                        "Bundle installed as CURRENT (effective {})",
+                        report.effective_from
+                    );
+                }
+                println!("  bundle hash: {}", report.bundle_hash);
+            }
+            BundleCmd::List { root } => match openairac_bundle::load_installed(root) {
+                Ok(state) => {
+                    println!("Installed bundles:");
+                    match &state.current {
+                        Some(c) => println!(
+                            "  current: {} (effective {})",
+                            c.bundle_hash, c.effective_from
+                        ),
+                        None => println!("  current: (none)"),
+                    }
+                    match &state.next {
+                        Some(n) => println!(
+                            "  next:    {} (effective {})",
+                            n.bundle_hash, n.effective_from
+                        ),
+                        None => println!("  next:    (none)"),
+                    }
+                }
+                Err(_) => println!("No installed state at {}.", root.display()),
+            },
+            BundleCmd::Rollback { root } => {
+                let hash = openairac_bundle::rollback_bundle(root, chrono::Utc::now())?;
+                println!("Rolled back to previous artifact: {hash}");
+            }
+        },
+        Commands::Update { cmd } => match cmd {
+            UpdateCmd::Check { root, channel } => {
+                let index = openairac_bundle::read_channel(channel)?;
+                let installed = openairac_bundle::load_installed(root).unwrap_or_default();
+                let schema = WorldStore::open_in_memory()?.migration_version()?;
+                let decision = openairac_bundle::decide_update(
+                    &installed,
+                    &index,
+                    channel,
+                    schema,
+                    chrono::Utc::now(),
+                );
+                println!("Update decision: {decision:?}");
+                println!(
+                    "  latest: {} (effective {})",
+                    index.latest.bundle_hash, index.latest.effective_from
+                );
+            }
+            UpdateCmd::Apply { root, channel } => {
+                let decision = openairac_bundle::update_apply(root, channel, chrono::Utc::now())?;
+                println!("Update applied: {decision:?}");
+            }
+        },
         Commands::Cycle { cmd } => match cmd {
             CycleCmd::Discover { db } => {
                 println!("Discovering FAA CIFP cycles...");
