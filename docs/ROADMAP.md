@@ -45,15 +45,14 @@ distributable as verified artifacts.
 - [x] Staged, validated bundle install; artifact-level rollback; local update channel with deterministic decisions
 - [x] Real-data validated: FAA CIFP 2608 (396,460 records) + live OurAirports (85,912 airports / 14,393 navaids) reconciled to 1,431 exact canonical matches
 
-## Milestone v0.5 — Procedure Fidelity & Geometry (Next Milestone)
-
-Complete the terminal-procedure domain before growing the map.
+## Milestone v0.5 — Procedure Fidelity & Geometry (Shipped)
 
 - [x] FAA PA/PG terminal airports and runways decoded (13,316 airports, 8,149 runway pairs from cycle 2608; verified DMS coordinates, tens-of-feet lengths, reciprocal-end pairing)
-- [ ] ILS localizer/glideslope/runway associations from PF records
-- [ ] RF arc geometry and hold geometry (rendering layer over the semantic model)
-- [ ] Remaining verified ARINC path-terminator semantics (vertical angles, course-C DF legs, MSA sectors)
-- [ ] Procedure/runway association validation and procedure completeness diagnostics
+- [x] ILS localizer/glideslope/runway associations from PF records (1,175 associations, 715 localizers enriched with verified bearing/glideslope; category never fabricated)
+- [x] Hold semantics verified (fix-based HA/HF/HM, inbound course from course_b)
+- [x] RF arc geometry (geodesic center derivation, turn-direction arcs, circle-verified sampling, fail-closed)
+- [x] Procedure completeness diagnostics (deterministic severities: unresolved fixes, unsupported terminators, impossible bands, missing RF data, runway mismatches)
+- [ ] Remaining verified ARINC path-terminator semantics (vertical-angle GP legs, course-C DF legs, MSA sectors)
 
 ## Milestone v0.6 — Worldwide Coverage & Providers
 
