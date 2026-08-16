@@ -915,7 +915,7 @@ mod tests {
             latest: ChannelArtifact {
                 bundle_hash: "b".repeat(64),
                 path: "bundle-b".to_string(),
-                schema_version: 8,
+                schema_version: 9,
                 effective_from: future,
                 airac_cycle: Some("2609".to_string()),
             },
@@ -926,7 +926,7 @@ mod tests {
             next: None,
         };
         assert_eq!(
-            decide_update(&installed, &index, &dir, 8, now),
+            decide_update(&installed, &index, &dir, 9, now),
             UpdateDecision::RejectInvalid
         );
         // Incompatible schema.

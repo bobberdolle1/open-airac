@@ -44,9 +44,8 @@ mod tests {
         assert!(tables.contains(&"airway_legs"));
         assert!(tables.contains(&"waypoints"));
         assert!(!tables.contains(&"source_snapshots"));
-        // The decoder emits no airports/runways yet.
-        assert!(!tables.contains(&"airports"));
-        assert!(!tables.contains(&"runways"));
+        assert!(tables.contains(&"airports"));
+        assert!(tables.contains(&"runways"));
     }
 
     #[test]

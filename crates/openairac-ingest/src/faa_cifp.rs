@@ -299,6 +299,25 @@ pub enum CifpRecord {
         route_qualifiers: String,
         raw: String,
     },
+    /// PA terminal airport (verified vs real cycle 2608 records).
+    Airport {
+        airport_ident: String,
+        icao_code: String,
+        name: String,
+        latitude_deg: f64,
+        longitude_deg: f64,
+        elevation_ft: Option<f64>,
+    },
+    /// PG terminal runway END (one threshold per record; ends are
+    /// paired into runways by reciprocal designator).
+    Runway {
+        airport_ident: String,
+        icao_code: String,
+        designator: String,
+        length_ft: u32,
+        le_lat: f64,
+        le_lon: f64,
+    },
     Unsupported {
         record_type: String,
         section: char,
@@ -589,6 +608,61 @@ pub fn decode_line(line: &str) -> Result<CifpRecord> {
                     route_qualifiers: cifp.field(119, 120).to_string(),
                     raw: line.to_string(),
                 })
+            } else if kind_char == 'A' {
+                // PA terminal airport. Layout verified against real
+                // cycle 2608 records for KSFO/KDEN/KJFK/KSEA:
+                // ident 7-10, ICAO 11-12, coordinates 33-41/42-51,
+                // magvar 52-57 (E/W at 52, value/10 at 53-57 — NOT
+                // stored: CanonicalAirport has no magvar field),
+                // elevation feet 58-62, name 91-120.
+                let ident = cifp.field(7, 10).trim().to_string();
+                if ident.is_empty() {
+                    return unsupported("airport record without identifier");
+                }
+                let (latitude_deg, longitude_deg) =
+                    parse_coord_pair(cifp.field(33, 41), cifp.field(42, 51))?
+                        .ok_or_else(|| anyhow!("PA record '{ident}' without coordinates"))?;
+                let elevation_ft = cifp.field(58, 62).trim().parse::<f64>().ok();
+                Ok(CifpRecord::Airport {
+                    airport_ident: ident,
+                    icao_code: cifp.field(11, 12).to_string(),
+                    name: cifp.field(91, 120).trim().to_string(),
+                    latitude_deg,
+                    longitude_deg,
+                    elevation_ft,
+                })
+            } else if kind_char == 'G' {
+                // PG terminal runway END. Layout verified against real
+                // cycle 2608 records: ident 7-10, ICAO 11-12,
+                // designator 16-18, length feet 22-26, threshold
+                // coordinates 33-41/42-51. Width is NOT published in a
+                // verified field -> None (never fabricated). Ends are
+                // paired into runways by reciprocal designator during
+                // interpretation.
+                let airport_ident = cifp.field(7, 10).trim().to_string();
+                let designator = cifp.field(16, 18).trim().to_string();
+                if airport_ident.is_empty() || designator.is_empty() {
+                    return unsupported("runway record without ident/designator");
+                }
+                // The published field is tens of feet: '01187' =
+                // 11,870 ft (verified: KSFO 10L/28R 11,870 ft,
+                // KDEN 16R/34L 16,000 ft, KSFO 01L/19R 7,650 ft).
+                let length_ft: u32 = cifp
+                    .field(22, 26)
+                    .trim()
+                    .parse::<u32>()
+                    .map_err(|_| anyhow!("PG record '{designator}': invalid length"))?
+                    * 10;
+                let (le_lat, le_lon) = parse_coord_pair(cifp.field(33, 41), cifp.field(42, 51))?
+                    .ok_or_else(|| anyhow!("PG record '{designator}' without coordinates"))?;
+                Ok(CifpRecord::Runway {
+                    airport_ident,
+                    icao_code: cifp.field(11, 12).to_string(),
+                    designator,
+                    length_ft,
+                    le_lat,
+                    le_lon,
+                })
             } else if cifp.field(22, 22) == "0" && !cifp.field(33, 41).trim().is_empty() {
                 // Terminal waypoint (PC): EA-style layout with the parent
                 // airport in columns 7-10.
@@ -617,7 +691,7 @@ pub fn decode_line(line: &str) -> Result<CifpRecord> {
                     raw: line.to_string(),
                 })
             } else {
-                unsupported("airport/runway record (PA/PG)")
+                unsupported("unrecognized P-blank record kind")
             }
         }
         ('H', ' ') => unsupported("heliport record"),
@@ -670,14 +744,28 @@ fn decode_ndb(cifp: &CifpLine<'_>, record_type: String, line: &str) -> Result<Ci
 // ---------------------------------------------------------------------------
 
 /// Result of interpreting one raw record into canonical form.
+/// One PG runway END before reciprocal pairing.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CifpRunwayEnd {
+    pub airport_ident: String,
+    pub icao_code: String,
+    pub designator: String,
+    pub length_ft: u32,
+    pub le_lat: f64,
+    pub le_lon: f64,
+}
+
 /// Transient decode artifact; the size spread is acceptable.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
+
 pub enum CifpInterpretation {
     Waypoint(CanonicalWaypoint),
     Navaid(CanonicalNavaid),
     AirwayLeg(CanonicalAirwayLeg),
     ProcedureLeg(CanonicalProcedureLeg),
+    Airport(CanonicalAirport),
+    RunwayEnd(CifpRunwayEnd),
     Unsupported {
         reason: String,
         raw: String,
@@ -730,6 +818,35 @@ fn service_volume_from_cifp_class(kind: NavaidKind, class: &str) -> Option<u16> 
         },
         _ => None,
     }
+}
+
+/// Reciprocal runway designator: 07 <-> 25, 16L <-> 34R, 08 <-> 26.
+/// Letters swap L<->R; C stays C.
+fn reciprocal_designator(designator: &str) -> Option<String> {
+    let (num_str, letters) = designator.split_at(
+        designator
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(designator.len()),
+    );
+    let num: u32 = num_str.parse().ok()?;
+    let recip = (num + 18) % 36;
+    let swapped = match letters {
+        "L" => "R",
+        "R" => "L",
+        "C" => "C",
+        "" => "",
+        _ => return None,
+    };
+    Some(format!("{recip:02}{swapped}"))
+}
+
+fn runway_number(designator: &str) -> u32 {
+    designator
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<String>()
+        .parse()
+        .unwrap_or(0)
 }
 
 /// Interpret a raw record into canonical entities. One record may produce
@@ -979,6 +1096,45 @@ pub fn interpret(
             raw: raw.clone(),
             temporal,
         })],
+        CifpRecord::Airport {
+            airport_ident,
+            icao_code,
+            name,
+            latitude_deg,
+            longitude_deg,
+            elevation_ft,
+        } => vec![CifpInterpretation::Airport(CanonicalAirport {
+            id: AirportId(format!("faa:{icao_code}:{airport_ident}")),
+            ident: airport_ident.clone(),
+            name: if name.is_empty() {
+                airport_ident.clone()
+            } else {
+                name.clone()
+            },
+            airport_type: "PA".to_string(),
+            latitude: *latitude_deg,
+            longitude: *longitude_deg,
+            elevation_ft: *elevation_ft,
+            iso_country: None,
+            municipality: None,
+            runways: Vec::new(),
+            temporal: temporal.clone(),
+        })],
+        CifpRecord::Runway {
+            airport_ident,
+            icao_code,
+            designator,
+            length_ft,
+            le_lat,
+            le_lon,
+        } => vec![CifpInterpretation::RunwayEnd(CifpRunwayEnd {
+            airport_ident: airport_ident.clone(),
+            icao_code: icao_code.clone(),
+            designator: designator.clone(),
+            length_ft: *length_ft,
+            le_lat: *le_lat,
+            le_lon: *le_lon,
+        })],
         CifpRecord::Unsupported {
             reason,
             raw,
@@ -1004,6 +1160,7 @@ fn record_to_raw(record: &CifpRecord) -> String {
         | CifpRecord::Airway { raw, .. }
         | CifpRecord::ProcedureLeg { raw, .. }
         | CifpRecord::Unsupported { raw, .. } => raw.clone(),
+        CifpRecord::Airport { .. } | CifpRecord::Runway { .. } => String::new(),
     }
 }
 
@@ -1019,6 +1176,13 @@ pub struct CifpScanReport {
     pub navaids_decoded: usize,
     pub airway_legs_decoded: usize,
     pub procedure_legs_decoded: usize,
+    pub airports_decoded: usize,
+    /// Runway ENDS decoded (paired into runways during scanning).
+    pub runway_ends_decoded: usize,
+    /// Runways produced by reciprocal pairing.
+    pub runways_decoded: usize,
+    /// Runway ends whose reciprocal was missing (skipped, fail-closed).
+    pub unpaired_runway_ends: usize,
     pub unsupported_records: usize,
     pub decode_errors: usize,
     /// Duplicate object ids whose payloads CONFLICT (first occurrence
@@ -1041,6 +1205,7 @@ impl FaaCifpAdapter {
     /// Returns the accepted canonical entities plus a deterministic scan
     /// report. ER airway records are chained into segments: each consecutive
     /// record of a route becomes a segment from the previous fix to this fix.
+    #[allow(clippy::type_complexity)]
     pub fn parse_cifp_content(
         content: &str,
         snapshot_id: &SourceSnapshotId,
@@ -1050,12 +1215,16 @@ impl FaaCifpAdapter {
         Vec<CanonicalNavaid>,
         Vec<CanonicalAirwayLeg>,
         Vec<CanonicalProcedureLeg>,
+        Vec<CanonicalAirport>,
+        Vec<CanonicalRunway>,
         CifpScanReport,
     ) {
         let mut waypoints = Vec::new();
         let mut navaids = Vec::new();
         let mut airway_legs = Vec::new();
         let mut procedure_legs = Vec::new();
+        let mut airports = Vec::new();
+        let mut runway_ends = Vec::new();
         let mut report = CifpScanReport::default();
 
         // Per-route previous record for ER chaining.
@@ -1142,6 +1311,16 @@ impl FaaCifpAdapter {
                                 report.procedure_legs_decoded += 1;
                                 procedure_legs.push(leg);
                             }
+                            CifpInterpretation::Airport(airport) => {
+                                report.records_decoded += 1;
+                                report.airports_decoded += 1;
+                                airports.push(airport);
+                            }
+                            CifpInterpretation::RunwayEnd(end) => {
+                                report.records_decoded += 1;
+                                report.runway_ends_decoded += 1;
+                                runway_ends.push(end);
+                            }
                             CifpInterpretation::Unsupported {
                                 reason,
                                 raw,
@@ -1202,7 +1381,144 @@ impl FaaCifpAdapter {
             &mut report.unsupported_reasons,
         );
 
-        (waypoints, navaids, airway_legs, procedure_legs, report)
+        // Pair PG runway ends into runways by reciprocal designator
+        // (10L <-> 28R, 16R <-> 34L). Unpaired ends are skipped with
+        // diagnostics — never fabricated into half-runways.
+        let mut runways = Vec::new();
+        {
+            let mut by_airport: std::collections::HashMap<
+                (String, String),
+                std::collections::HashMap<String, CifpRunwayEnd>,
+            > = std::collections::HashMap::new();
+            for end in &runway_ends {
+                by_airport
+                    .entry((end.icao_code.clone(), end.airport_ident.clone()))
+                    .or_default()
+                    .insert(end.designator.clone(), end.clone());
+            }
+            let mut paired: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for ((icao, airport), ends) in &by_airport {
+                for (designator, end) in ends {
+                    let key = format!("{icao}:{airport}:{designator}");
+                    if paired.contains(&key) {
+                        continue;
+                    }
+                    let Some(reciprocal) = reciprocal_designator(designator) else {
+                        report.unpaired_runway_ends += 1;
+                        report.unsupported_reasons.push(format!(
+                            "runway end '{designator}' at {airport}: no reciprocal designator"
+                        ));
+                        continue;
+                    };
+                    let Some(other) = ends.get(&reciprocal) else {
+                        report.unpaired_runway_ends += 1;
+                        if report.unsupported_reasons.len() < 1000 {
+                            report.unsupported_reasons.push(format!(
+                                "runway end '{designator}' at {airport}: reciprocal '{reciprocal}' missing"
+                            ));
+                        }
+                        continue;
+                    };
+                    paired.insert(format!("{icao}:{airport}:{reciprocal}"));
+                    let (le, he) = if runway_number(designator) <= runway_number(&reciprocal) {
+                        (end, other)
+                    } else {
+                        (other, end)
+                    };
+                    if le.length_ft != he.length_ft {
+                        report.unpaired_runway_ends += 1;
+                        if report.unsupported_reasons.len() < 1000 {
+                            report.unsupported_reasons.push(format!(
+                                "runway {designator}/{reciprocal} at {airport}: length mismatch ({} vs {})",
+                                le.length_ft, he.length_ft
+                            ));
+                        }
+                        continue;
+                    }
+                    let airport_id = AirportId(format!("faa:{icao}:{airport}"));
+                    runways.push(CanonicalRunway {
+                        id: RunwayId(format!(
+                            "faa:{icao}:{airport}:{}-{}",
+                            le.designator, he.designator
+                        )),
+                        airport_id,
+                        airport_ident: airport.clone(),
+                        official_designator: le.designator.clone(),
+                        computed_magnetic_designator: None,
+                        true_heading_deg: None,
+                        length_ft: le.length_ft,
+                        width_ft: None,
+                        surface: None,
+                        le_ident: le.designator.clone(),
+                        le_lat: le.le_lat,
+                        le_lon: le.le_lon,
+                        le_elevation_ft: None,
+                        he_ident: he.designator.clone(),
+                        he_lat: he.le_lat,
+                        he_lon: he.le_lon,
+                        he_elevation_ft: None,
+                        temporal: TemporalValidity {
+                            valid_from,
+                            valid_until: None,
+                            source_snapshot_id: snapshot_id.clone(),
+                        },
+                    });
+                    report.runways_decoded += 1;
+                }
+            }
+        }
+
+        // Real-world cycle 2608 contains duplicate object ids with
+        // CONFLICTING payloads (terminal waypoints shared across
+        // procedures). Fail-closed: the first occurrence is kept,
+        // conflicting duplicates are skipped with diagnostics — never
+        // merged, never silently chosen.
+        let waypoints = dedupe_entities(
+            waypoints,
+            |w| &w.object_id.0,
+            &mut report.duplicate_conflicts,
+            &mut report.unsupported_reasons,
+        );
+        let navaids = dedupe_entities(
+            navaids,
+            |n| &n.object_id.0,
+            &mut report.duplicate_conflicts,
+            &mut report.unsupported_reasons,
+        );
+        let airway_legs = dedupe_entities(
+            airway_legs,
+            |l| &l.object_id.0,
+            &mut report.duplicate_conflicts,
+            &mut report.unsupported_reasons,
+        );
+        let procedure_legs = dedupe_entities(
+            procedure_legs,
+            |l| &l.object_id.0,
+            &mut report.duplicate_conflicts,
+            &mut report.unsupported_reasons,
+        );
+        let airports = dedupe_entities(
+            airports,
+            |a| &a.id.0,
+            &mut report.duplicate_conflicts,
+            &mut report.unsupported_reasons,
+        );
+        let runways = dedupe_entities(
+            runways,
+            |r| &r.id.0,
+            &mut report.duplicate_conflicts,
+            &mut report.unsupported_reasons,
+        );
+
+        (
+            waypoints,
+            navaids,
+            airway_legs,
+            procedure_legs,
+            airports,
+            runways,
+            report,
+        )
     }
 
     /// Parse CIFP content and ingest the canonical entities into the store
@@ -1213,11 +1529,18 @@ impl FaaCifpAdapter {
         valid_from: DateTime<Utc>,
         store: &mut WorldStore,
     ) -> Result<CifpScanReport> {
-        let (waypoints, navaids, airway_legs, procedure_legs, report) =
+        let (waypoints, navaids, airway_legs, procedure_legs, airports, runways, report) =
             Self::parse_cifp_content(content, snapshot_id, valid_from);
 
         store.transact(|conn| {
-            insert_cifp_entities_conn(conn, &waypoints, &navaids, &airway_legs, &procedure_legs)
+            insert_cifp_entities_conn(conn, &waypoints, &navaids, &airway_legs, &procedure_legs)?;
+            for airport in &airports {
+                openairac_store::insert_airport_conn(conn, airport)?;
+            }
+            for runway in &runways {
+                openairac_store::insert_runway_conn(conn, runway)?;
+            }
+            Ok(())
         })?;
 
         Ok(report)
@@ -1252,7 +1575,9 @@ pub fn insert_cifp_entities_conn(
 }
 
 /// CIFP entity tables eligible for full-snapshot close semantics.
-pub const CIFP_ENTITY_TABLES: [openairac_store::EntityTable; 4] = [
+pub const CIFP_ENTITY_TABLES: [openairac_store::EntityTable; 6] = [
+    openairac_store::EntityTable::Airports,
+    openairac_store::EntityTable::Runways,
     openairac_store::EntityTable::Waypoints,
     openairac_store::EntityTable::Navaids,
     openairac_store::EntityTable::AirwayLegs,
@@ -1471,7 +1796,7 @@ impl crate::provider::DataProvider for CifpProvider {
             }
         }
 
-        let (waypoints, navaids, airway_legs, procedure_legs, scan) =
+        let (waypoints, navaids, airway_legs, procedure_legs, airports, runways, scan) =
             FaaCifpAdapter::parse_cifp_content(&dataset.raw_content, &snapshot_id, valid_from);
 
         // Full-snapshot removal semantics: build the per-table seen sets
@@ -1536,8 +1861,8 @@ impl crate::provider::DataProvider for CifpProvider {
             kind: update_kind,
             valid_from,
             payloads: openairac_store::EntityPayloads {
-                airports: Vec::new(),
-                runways: Vec::new(),
+                airports: airports.clone(),
+                runways: runways.clone(),
                 navaids: navaids.clone(),
                 waypoints: waypoints.clone(),
                 airway_legs: airway_legs.clone(),
@@ -1577,6 +1902,12 @@ impl crate::provider::DataProvider for CifpProvider {
         report
             .kind_counts
             .insert("procedure_legs".into(), scan.procedure_legs_decoded);
+        report
+            .kind_counts
+            .insert("airports".into(), scan.airports_decoded);
+        report
+            .kind_counts
+            .insert("runways".into(), scan.runways_decoded);
         report.records_rejected = scan.decode_errors;
         report.records_quarantined = scan.unsupported_records;
         report.warnings = scan.unsupported_reasons;
@@ -1820,7 +2151,12 @@ mod tests {
 
     #[test]
     fn test_unsupported_record_is_explicit() {
-        match decode_line(PA_AIRPORT).unwrap() {
+        // PA airports are decoded now (v0.5); an unknown P-blank kind
+        // stays explicit and lossless.
+        let mut pz_line: Vec<char> = PA_AIRPORT.chars().collect();
+        pz_line[12] = 'Z';
+        let pz: String = pz_line.iter().collect();
+        match decode_line(&pz).unwrap() {
             CifpRecord::Unsupported {
                 section,
                 subsection,
@@ -1833,6 +2169,11 @@ mod tests {
             }
             other => panic!("expected unsupported, got {other:?}"),
         }
+        // The unmodified PA record decodes as an airport.
+        assert!(matches!(
+            decode_line(PA_AIRPORT).unwrap(),
+            CifpRecord::Airport { .. }
+        ));
     }
 
     #[test]
@@ -1934,7 +2275,7 @@ mod tests {
     fn test_parse_cifp_content_chains_airway_legs() {
         let content = format!("{ER_A315_1}\n{ER_A315_2}\n{ER_A315_3}\n{EA_AAARG}\n");
         let snapshot_id = SourceSnapshotId("snap-faa".to_string());
-        let (waypoints, _navaids, legs, _procedures, report) =
+        let (waypoints, _navaids, legs, _procedures, _airports, _runways, report) =
             FaaCifpAdapter::parse_cifp_content(&content, &snapshot_id, Utc::now());
 
         assert_eq!(waypoints.len(), 1);
@@ -2510,5 +2851,109 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("UNCONFIRMED"), "{err}");
+    }
+
+    // Real PA/PG fixtures, transcribed verbatim from FAA CIFP 2608.
+
+    #[test]
+    fn test_decode_pa_airport_ksfo() {
+        let line = "SUSAP KSFOK2ASFO     0     118YHN37370770W122223150E014000013         1800018000C    MNAR    SAN FRANCISCO INTL            139021513";
+        let record = decode_line(line).unwrap();
+        match &record {
+            CifpRecord::Airport {
+                airport_ident,
+                icao_code,
+                name,
+                latitude_deg,
+                longitude_deg,
+                elevation_ft,
+            } => {
+                assert_eq!(airport_ident, "KSFO");
+                assert_eq!(icao_code, "K2");
+                assert_eq!(name, "SAN FRANCISCO INTL");
+                // Coordinates are DDDMMSS.ss: N37370770 = 37 deg
+                // 37' 07.70" = 37.618806 (the real KSFO ARP latitude).
+                assert!(
+                    (*latitude_deg - 37.618806).abs() < 1e-5,
+                    "latitude {latitude_deg}"
+                );
+                assert!(
+                    (*longitude_deg - (-122.375417)).abs() < 1e-5,
+                    "longitude {longitude_deg}"
+                );
+                assert_eq!(*elevation_ft, Some(13.0));
+            }
+            other => panic!("expected Airport, got {other:?}"),
+        }
+
+        // Interpretation carries the canonical airport.
+        let snapshot = SourceSnapshotId("snap-t".to_string());
+        let mut interpretations = interpret(&record, &snapshot, Utc::now());
+        assert_eq!(interpretations.len(), 1);
+        match interpretations.pop().unwrap() {
+            CifpInterpretation::Airport(airport) => {
+                assert_eq!(airport.id.0, "faa:K2:KSFO");
+                assert_eq!(airport.ident, "KSFO");
+                assert_eq!(airport.elevation_ft, Some(13.0));
+            }
+            other => panic!("expected Airport, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_decode_pg_runway_pair_ksfo() {
+        // KSFO 10L and 28R ends: length 11870 ft, thresholds
+        // 37.374346/-122.233621 (10L) and the 28R end.
+        let content = [
+            "SUSAP KSFOK2GRW10L   0118701040 N37374346W122233621         -0030900006000055200R                                          146341707",
+            "SUSAP KSFOK2GRW28R   0118701040 N37359023W122231356         -0030900006000055200L                                          146351707",
+        ]
+        .join("\n");
+        let snapshot = SourceSnapshotId("snap-t".to_string());
+        let (_wp, _nav, _legs, _proc, _airports, runways, report) =
+            FaaCifpAdapter::parse_cifp_content(&content, &snapshot, Utc::now());
+        assert_eq!(report.runway_ends_decoded, 2);
+        assert_eq!(report.runways_decoded, 1);
+        assert_eq!(report.unpaired_runway_ends, 0);
+        assert_eq!(runways.len(), 1);
+        let runway = &runways[0];
+        assert_eq!(runway.id.0, "faa:K2:KSFO:10L-28R");
+        assert_eq!(runway.airport_id.0, "faa:K2:KSFO");
+        assert_eq!(runway.official_designator, "10L");
+        assert_eq!(runway.length_ft, 11870);
+        assert_eq!(runway.width_ft, None); // never fabricated
+        assert_eq!(runway.le_ident, "10L");
+        assert!((runway.le_lat - 37.62873889).abs() < 1e-5);
+        assert!((runway.le_lon - (-122.39339167)).abs() < 1e-5);
+        assert_eq!(runway.he_ident, "28R");
+        assert!(runway.true_heading_deg.is_none());
+    }
+
+    #[test]
+    fn test_decode_pg_runway_pair_kden_16r() {
+        let content = [
+            "SUSAP KDENK2GRW16R   0160001730 N39534487W104414590         -00604005322000055200                                         155751707 ",
+            "SUSAP KDENK2GRW34L   0160001730 N39515230W104404896         -00604005330000055200                                         155761707 ",
+        ]
+        .join("\n");
+        let snapshot = SourceSnapshotId("snap-t".to_string());
+        let (_wp, _nav, _legs, _proc, _airports, runways, report) =
+            FaaCifpAdapter::parse_cifp_content(&content, &snapshot, Utc::now());
+        assert_eq!(report.runways_decoded, 1);
+        assert_eq!(report.unpaired_runway_ends, 0);
+        assert_eq!(runways[0].length_ft, 16000);
+        assert_eq!(runways[0].id.0, "faa:K2:KDEN:16R-34L");
+    }
+
+    #[test]
+    fn test_pg_unpaired_end_skipped() {
+        // Only one end of 10L/28R: fail closed, no half-runway.
+        let content = "SUSAP KSFOK2GRW10L   0118701040 N37374346W122233621         -0030900006000055200R                                          146341707\n";
+        let snapshot = SourceSnapshotId("snap-t".to_string());
+        let (_wp, _nav, _legs, _proc, _airports, runways, report) =
+            FaaCifpAdapter::parse_cifp_content(content, &snapshot, Utc::now());
+        assert_eq!(report.runways_decoded, 0);
+        assert_eq!(report.unpaired_runway_ends, 1);
+        assert!(runways.is_empty());
     }
 }

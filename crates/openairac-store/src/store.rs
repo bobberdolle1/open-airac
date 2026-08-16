@@ -212,7 +212,12 @@ impl WorldStore {
                 )?;
             }
         }
-        self.conn.pragma_update(None, "user_version", 8)?;
+        if version < 9 {
+            self.conn
+                .execute_batch(include_str!("../migrations/v9_runway_width.sql"))
+                .context("Failed to execute database migration v9_runway_width.sql")?;
+        }
+        self.conn.pragma_update(None, "user_version", 9)?;
         Ok(())
     }
 
@@ -2011,7 +2016,7 @@ pub fn insert_runway_conn(conn: &Connection, runway: &CanonicalRunway) -> Result
                     row.get::<_, Option<String>>(3)?,
                     row.get::<_, Option<f64>>(4)?,
                     row.get::<_, u32>(5)?,
-                    row.get::<_, u32>(6)?,
+                    row.get::<_, Option<u32>>(6)?,
                     row.get::<_, Option<String>>(7)?,
                     row.get::<_, String>(8)?,
                     row.get::<_, f64>(9)?,
@@ -4850,7 +4855,7 @@ mod tests {
             computed_magnetic_designator: Some("28R".to_string()),
             true_heading_deg: Some(284.0),
             length_ft: 11870,
-            width_ft: 200,
+            width_ft: Some(200),
             surface: Some("ASP".to_string()),
             le_ident: "28R".to_string(),
             le_lat: 37.6188,
@@ -4873,7 +4878,7 @@ mod tests {
         let store = WorldStore::open_in_memory().unwrap();
         let status = store.status().unwrap();
         assert!(status.integrity_ok);
-        assert_eq!(status.migration_version, 8);
+        assert_eq!(status.migration_version, 9);
         assert_eq!(status.total_airports, 0);
 
         let snap = snapshot("snap-001");
@@ -5311,7 +5316,7 @@ mod tests {
 
         // Opening with the current code must migrate v1 -> v3 in place.
         let store = WorldStore::open(&path).unwrap();
-        assert_eq!(store.migration_version().unwrap(), 8);
+        assert_eq!(store.migration_version().unwrap(), 9);
         let at = store.query_airports_at(Utc::now()).unwrap();
         assert_eq!(at.len(), 1);
         assert_eq!(at[0].ident, "KSFO");

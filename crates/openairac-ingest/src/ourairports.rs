@@ -309,7 +309,7 @@ impl OurAirportsImporter {
                 computed_magnetic_designator: computed_designator,
                 true_heading_deg: heading,
                 length_ft,
-                width_ft,
+                width_ft: Some(width_ft),
                 surface: rec.surface,
                 le_ident: rec.le_ident,
                 le_lat,
@@ -728,6 +728,6 @@ id,filename,ident,name,type,frequency_khz,latitude_deg,longitude_deg,elevation_f
         assert_eq!(status.total_runways, 3);
         assert_eq!(status.total_navaids, 4);
         assert_eq!(status.total_snapshots, 3);
-        assert_eq!(status.migration_version, 8);
+        assert_eq!(status.migration_version, 9);
     }
 }

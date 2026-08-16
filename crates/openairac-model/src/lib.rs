@@ -177,7 +177,7 @@ pub struct CanonicalRunway {
     pub computed_magnetic_designator: Option<String>, // WMM analysis; None = unknown
     pub true_heading_deg: Option<f64>,                // None = source did not publish it
     pub length_ft: u32,
-    pub width_ft: u32,
+    pub width_ft: Option<u32>,
     pub surface: Option<String>,
     pub le_ident: String,
     pub le_lat: f64,
@@ -579,11 +579,17 @@ pub const PROVIDER_MANIFESTS: &[ProviderManifest] = &[
         namespace: "faa",
         datasets: &[DatasetManifest {
             name: "FAACIFP18",
-            // The decoder emits waypoints, navaids, airway legs and
-            // procedure legs; PA/PG terminal airports/runways are
-            // explicit Unsupported records, so those tables carry no
-            // CIFP-owned rows today.
-            entity_tables: &["waypoints", "navaids", "airway_legs", "procedure_legs"],
+            // The decoder emits airports and runways (PA/PG, paired by
+            // reciprocal designator), waypoints, navaids, airway legs
+            // and procedure legs.
+            entity_tables: &[
+                "airports",
+                "runways",
+                "waypoints",
+                "navaids",
+                "airway_legs",
+                "procedure_legs",
+            ],
         }],
     },
 ];

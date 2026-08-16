@@ -474,7 +474,7 @@ fn test_runway_renumbering_same_physical_runway() {
         computed_magnetic_designator: None,
         true_heading_deg: Some(90.0),
         length_ft: 9000,
-        width_ft: 150,
+        width_ft: Some(150),
         surface: Some("ASP".to_string()),
         le_ident: designator.to_string(),
         le_lat: 40.0,
