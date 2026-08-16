@@ -156,7 +156,12 @@ impl WorldStore {
                 .execute_batch(include_str!("../migrations/v6_publications.sql"))
                 .context("Failed to execute database migration v6_publications.sql")?;
         }
-        self.conn.pragma_update(None, "user_version", 6)?;
+        if version < 7 {
+            self.conn
+                .execute_batch(include_str!("../migrations/v7_reconciliation.sql"))
+                .context("Failed to execute database migration v7_reconciliation.sql")?;
+        }
+        self.conn.pragma_update(None, "user_version", 7)?;
         Ok(())
     }
 
@@ -409,6 +414,37 @@ impl WorldStore {
         let report = rollback_cycle_conn(&txn, cycle_id, at)?;
         txn.commit()?;
         Ok(report)
+    }
+
+    /// Raw connection access for read-only reconciliation/audit layers.
+    pub fn raw_conn(&self) -> &Connection {
+        &self.conn
+    }
+
+    /// Read all source memberships.
+    pub fn query_memberships(&self) -> Result<Vec<SourceMembership>> {
+        query_memberships_conn(&self.conn)
+    }
+
+    /// Read all reconciliation conflicts.
+    pub fn query_reconciliation_conflicts(&self) -> Result<Vec<ReconciliationConflict>> {
+        query_reconciliation_conflicts_conn(&self.conn)
+    }
+
+    /// Read all canonical identities.
+    pub fn query_canonical_identities(&self) -> Result<Vec<CanonicalIdentityRow>> {
+        query_canonical_identities_conn(&self.conn)
+    }
+
+    /// Apply one reconciliation batch atomically.
+    pub fn apply_reconciliation(
+        &mut self,
+        f: impl FnOnce(&Connection) -> Result<()>,
+    ) -> Result<()> {
+        let txn = self.conn.transaction()?;
+        f(&txn)?;
+        txn.commit()?;
+        Ok(())
     }
 
     /// Advance cycle bookkeeping atomically (one transaction).
@@ -1215,6 +1251,169 @@ impl WorldStore {
                         valid_from.as_deref().unwrap_or("NULL")
                     ),
                 );
+            }
+        }
+
+        // 24. Memberships: namespace consistency, temporal interval
+        // sanity, dangling source entities.
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT provider, entity_table, entity_id, valid_from, valid_until
+                 FROM source_memberships ORDER BY provider, entity_table, entity_id, valid_from",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                ))
+            })?;
+            for row in rows {
+                let (provider, table, entity_id, vf, vu) = row?;
+                match openairac_model::namespace_for_provider(&provider) {
+                    None => push(
+                        "warning",
+                        "source_memberships",
+                        entity_id.clone(),
+                        format!("unknown provider '{provider}'"),
+                    ),
+                    Some(ns) => {
+                        if !entity_id.starts_with(&format!("{ns}:")) {
+                            push(
+                                "warning",
+                                "source_memberships",
+                                entity_id.clone(),
+                                format!("entity outside provider '{provider}' namespace '{ns}'"),
+                            );
+                        }
+                    }
+                }
+                let vf_t = parse_utc(&vf, "valid_from");
+                let vu_t = vu
+                    .as_deref()
+                    .map(|v| parse_utc(v, "valid_until"))
+                    .transpose();
+                if let (Ok(vf_t), Ok(Some(vu_t))) = (vf_t, vu_t)
+                    && vu_t <= vf_t
+                {
+                    push(
+                        "error",
+                        "source_memberships",
+                        entity_id.clone(),
+                        "valid_until not strictly after valid_from".into(),
+                    );
+                }
+                if let Some(t) = EntityTable::parse(&table) {
+                    let exists: bool = self
+                        .conn
+                        .query_row(
+                            &format!("SELECT 1 FROM {} WHERE id = ?1 LIMIT 1", t.as_str()),
+                            params![entity_id],
+                            |_| Ok(()),
+                        )
+                        .optional()?
+                        .is_some();
+                    if !exists {
+                        push(
+                            "warning",
+                            "source_memberships",
+                            entity_id.clone(),
+                            "membership references a source entity with no rows".into(),
+                        );
+                    }
+                }
+            }
+        }
+
+        // 25. Canonical identities vs membership entity tables: a
+        // canonical identity must never span entity kinds.
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT c.canonical_id, c.entity_table, m.entity_table
+                 FROM canonical_identities c
+                 JOIN source_memberships m ON m.canonical_id = c.canonical_id
+                 WHERE c.entity_table != m.entity_table
+                 ORDER BY c.canonical_id LIMIT 20",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?;
+            for row in rows {
+                let (cid, c_table, m_table) = row?;
+                push(
+                    "error",
+                    "canonical_identities",
+                    cid,
+                    format!("identity kind '{c_table}' has membership kind '{m_table}'"),
+                );
+            }
+        }
+
+        // 26. One source entity linked to multiple canonical identities
+        // at overlapping instants.
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT provider, entity_table, entity_id, COUNT(DISTINCT canonical_id) AS n
+                 FROM source_memberships
+                 GROUP BY provider, entity_table, entity_id, valid_from
+                 HAVING n > 1 ORDER BY provider, entity_id LIMIT 20",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                ))
+            })?;
+            for row in rows {
+                let (provider, entity_id, n) = row?;
+                push(
+                    "warning",
+                    "source_memberships",
+                    entity_id.clone(),
+                    format!(
+                        "'{provider}' entity linked to {n} canonical identities at one instant"
+                    ),
+                );
+            }
+        }
+
+        // 27. Conflicts: severity membership and ref sanity.
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, severity, entity_table FROM reconciliation_conflicts ORDER BY id",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?;
+            for row in rows {
+                let (id, severity, table) = row?;
+                if ConflictSeverity::parse(&severity).is_none() {
+                    push(
+                        "error",
+                        "reconciliation_conflicts",
+                        id.to_string(),
+                        format!("unknown severity '{severity}'"),
+                    );
+                }
+                if EntityTable::parse(&table).is_none() {
+                    push(
+                        "warning",
+                        "reconciliation_conflicts",
+                        id.to_string(),
+                        format!("unknown entity_table '{table}'"),
+                    );
+                }
             }
         }
 
@@ -3369,6 +3568,243 @@ pub fn apply_dataset_publication_conn(
 }
 
 // ---------------------------------------------------------------------------
+// Reconciliation (v0.4 S8) — connection-level CRUD
+// ---------------------------------------------------------------------------
+
+/// Insert a canonical identity if not already present (deterministic,
+/// idempotent across reconciliation runs).
+pub fn upsert_canonical_identity_conn(
+    conn: &Connection,
+    canonical_id: &CanonicalEntityId,
+    entity_table: &str,
+    identity_key: &str,
+    kind_hint: Option<&str>,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO canonical_identities
+            (canonical_id, entity_table, identity_key, kind_hint, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            canonical_id.0,
+            entity_table,
+            identity_key,
+            kind_hint,
+            rfc3339(now),
+        ],
+    )
+    .context("upserting canonical identity")?;
+    Ok(())
+}
+
+/// Insert one membership (idempotent by source revision interval).
+pub fn upsert_membership_conn(conn: &Connection, membership: &SourceMembership) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO source_memberships
+            (canonical_id, provider, entity_table, entity_id, valid_from,
+             valid_until, confidence, match_method, evidence, status)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![
+            membership.canonical_id.0,
+            membership.source.provider,
+            membership.source.entity_table,
+            membership.source.entity_id,
+            rfc3339(membership.valid_from),
+            membership.valid_until.map(rfc3339),
+            membership.confidence.as_str(),
+            membership.match_method,
+            serde_json::to_string(&membership.evidence).unwrap_or_else(|_| "[]".to_string()),
+            match membership.status {
+                MembershipStatus::Active => "Active",
+                MembershipStatus::Superseded => "Superseded",
+            },
+        ],
+    )
+    .context("upserting source membership")?;
+    Ok(())
+}
+
+/// Explicit same-facility continuity link across a natural identity
+/// change (identifier change, runway renumbering).
+pub fn insert_identity_continuity_conn(
+    conn: &Connection,
+    prev: &CanonicalEntityId,
+    next: &CanonicalEntityId,
+    evidence: &[EvidenceFact],
+) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO identity_continuity
+            (prev_canonical_id, next_canonical_id, evidence)
+         VALUES (?1, ?2, ?3)",
+        params![
+            prev.0,
+            next.0,
+            serde_json::to_string(evidence).unwrap_or_else(|_| "[]".to_string()),
+        ],
+    )
+    .context("inserting identity continuity")?;
+    Ok(())
+}
+
+/// Insert a conflict (deduplicated by the unique index; idempotent
+/// across reconciliation runs). Returns the row id, or 0 when the
+/// conflict was already recorded.
+pub fn insert_reconciliation_conflict_conn(
+    conn: &Connection,
+    conflict: &ReconciliationConflict,
+) -> Result<i64> {
+    let inserted = conn
+        .execute(
+            "INSERT OR IGNORE INTO reconciliation_conflicts
+                (entity_table, canonical_id, ref_a, ref_b, category,
+                 field_name, value_a, value_b, severity, evidence,
+                 detected_at, resolved)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                conflict.entity_table,
+                conflict.canonical_id.as_ref().map(|c| c.0.as_str()),
+                conflict.ref_a,
+                conflict.ref_b,
+                conflict.category,
+                conflict.field_name,
+                conflict.value_a,
+                conflict.value_b,
+                conflict.severity.as_str(),
+                serde_json::to_string(&conflict.evidence).unwrap_or_else(|_| "[]".to_string()),
+                rfc3339(conflict.detected_at),
+                conflict.resolved.as_deref(),
+            ],
+        )
+        .context("inserting reconciliation conflict")?;
+    if inserted == 0 {
+        return Ok(0);
+    }
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn query_memberships_conn(conn: &Connection) -> Result<Vec<SourceMembership>> {
+    let mut stmt = conn.prepare(
+        "SELECT canonical_id, provider, entity_table, entity_id, valid_from,
+                valid_until, confidence, match_method, evidence, status
+         FROM source_memberships
+         ORDER BY canonical_id, provider, entity_table, entity_id, valid_from",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
+            r.get::<_, String>(4)?,
+            r.get::<_, Option<String>>(5)?,
+            r.get::<_, String>(6)?,
+            r.get::<_, String>(7)?,
+            r.get::<_, String>(8)?,
+            r.get::<_, String>(9)?,
+        ))
+    })?;
+    let mut memberships = Vec::new();
+    for row in rows {
+        let (cid, prov, table, eid, vf, vu, conf, method, evidence, status) = row?;
+        memberships.push(SourceMembership {
+            canonical_id: CanonicalEntityId(cid),
+            source: SourceEntityRef {
+                provider: prov,
+                entity_table: table,
+                entity_id: eid,
+            },
+            valid_from: parse_utc(&vf, "source_memberships.valid_from")?,
+            valid_until: vu
+                .map(|v| parse_utc(&v, "source_memberships.valid_until"))
+                .transpose()?,
+            confidence: MatchConfidence::parse(&conf)
+                .ok_or_else(|| anyhow::anyhow!("unknown confidence '{conf}'"))?,
+            match_method: method,
+            evidence: serde_json::from_str(&evidence).unwrap_or_default(),
+            status: if status == "Superseded" {
+                MembershipStatus::Superseded
+            } else {
+                MembershipStatus::Active
+            },
+        });
+    }
+    Ok(memberships)
+}
+
+pub fn query_reconciliation_conflicts_conn(
+    conn: &Connection,
+) -> Result<Vec<ReconciliationConflict>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, entity_table, canonical_id, ref_a, ref_b, category,
+                field_name, value_a, value_b, severity, evidence,
+                detected_at, resolved
+         FROM reconciliation_conflicts ORDER BY id",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, Option<String>>(2)?,
+            r.get::<_, String>(3)?,
+            r.get::<_, String>(4)?,
+            r.get::<_, String>(5)?,
+            r.get::<_, Option<String>>(6)?,
+            r.get::<_, Option<String>>(7)?,
+            r.get::<_, Option<String>>(8)?,
+            r.get::<_, String>(9)?,
+            r.get::<_, String>(10)?,
+            r.get::<_, String>(11)?,
+            r.get::<_, Option<String>>(12)?,
+        ))
+    })?;
+    let mut conflicts = Vec::new();
+    for row in rows {
+        let (id, table, cid, a, b, cat, field, va, vb, sev, ev, det, res) = row?;
+        conflicts.push(ReconciliationConflict {
+            id,
+            entity_table: table,
+            canonical_id: cid.map(CanonicalEntityId),
+            ref_a: a,
+            ref_b: b,
+            category: cat,
+            field_name: field,
+            value_a: va,
+            value_b: vb,
+            severity: ConflictSeverity::parse(&sev)
+                .ok_or_else(|| anyhow::anyhow!("unknown severity '{sev}'"))?,
+            evidence: serde_json::from_str(&ev).unwrap_or_default(),
+            detected_at: parse_utc(&det, "reconciliation_conflicts.detected_at")?,
+            resolved: res,
+        });
+    }
+    Ok(conflicts)
+}
+
+/// One canonical identity row: (id, entity_table, identity_key, kind_hint).
+pub type CanonicalIdentityRow = (CanonicalEntityId, String, String, Option<String>);
+
+pub fn query_canonical_identities_conn(conn: &Connection) -> Result<Vec<CanonicalIdentityRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT canonical_id, entity_table, identity_key, kind_hint
+         FROM canonical_identities ORDER BY canonical_id",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, Option<String>>(3)?,
+        ))
+    })?;
+    let mut ids = Vec::new();
+    for row in rows {
+        let (cid, table, key, hint) = row?;
+        ids.push((CanonicalEntityId(cid), table, key, hint));
+    }
+    Ok(ids)
+}
+
+// ---------------------------------------------------------------------------
 // Cycle rollback (v0.4): re-publication of the pre-cycle state
 // ---------------------------------------------------------------------------
 
@@ -4023,7 +4459,7 @@ mod tests {
         let store = WorldStore::open_in_memory().unwrap();
         let status = store.status().unwrap();
         assert!(status.integrity_ok);
-        assert_eq!(status.migration_version, 6);
+        assert_eq!(status.migration_version, 7);
         assert_eq!(status.total_airports, 0);
 
         let snap = snapshot("snap-001");
@@ -4461,7 +4897,7 @@ mod tests {
 
         // Opening with the current code must migrate v1 -> v3 in place.
         let store = WorldStore::open(&path).unwrap();
-        assert_eq!(store.migration_version().unwrap(), 6);
+        assert_eq!(store.migration_version().unwrap(), 7);
         let at = store.query_airports_at(Utc::now()).unwrap();
         assert_eq!(at.len(), 1);
         assert_eq!(at[0].ident, "KSFO");

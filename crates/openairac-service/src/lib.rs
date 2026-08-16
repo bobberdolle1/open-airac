@@ -8,7 +8,8 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use openairac_integration::{FlightPlan, FlightPlanRequest, Planner};
 use openairac_model::{
-    CanonicalAirport, CanonicalNavaid, CanonicalWaypoint, NavaidKind, StoreStatus,
+    CanonicalAirport, CanonicalEntityId, CanonicalNavaid, CanonicalWaypoint, NavaidKind,
+    ReconciliationConflict, ReconciliationStats, ResolvedEntity, SourceEntityRef, StoreStatus,
 };
 use openairac_procedures::ProcedureKind;
 use openairac_routing::Coordinate;
@@ -79,6 +80,14 @@ pub struct ProcedureSummary {
     pub ident: String,
     pub legs: usize,
     pub transitions: Vec<String>,
+}
+
+/// Reconciliation bookkeeping counts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReconciliationStatus {
+    pub canonical_entities: usize,
+    pub memberships: usize,
+    pub conflicts: usize,
 }
 
 /// Service entry point.
@@ -294,6 +303,50 @@ impl WorldQuery {
         Ok(graph.disconnected_components())
     }
 
+    /// Run multi-source reconciliation for the world valid at `as_of`.
+    /// Deterministic and idempotent: re-running writes nothing new.
+    pub fn reconcile(&self, as_of: DateTime<Utc>) -> Result<ReconciliationStats> {
+        openairac_reconcile::Reconciler::new(&self.store).reconcile(as_of)
+    }
+
+    /// Reconciliation bookkeeping counts.
+    pub fn reconciliation_status(&self) -> Result<ReconciliationStatus> {
+        Ok(ReconciliationStatus {
+            canonical_entities: self.store.query_canonical_identities()?.len(),
+            memberships: self.store.query_memberships()?.len(),
+            conflicts: self.store.query_reconciliation_conflicts()?.len(),
+        })
+    }
+
+    /// Resolved canonical entity at `as_of` (fields + provenance +
+    /// conflicts). Raw provider rows remain queryable unchanged.
+    pub fn canonical_entity(
+        &self,
+        canonical_id: &CanonicalEntityId,
+        as_of: DateTime<Utc>,
+    ) -> Result<Option<ResolvedEntity>> {
+        openairac_reconcile::resolved_entity(&self.store, canonical_id, as_of)
+    }
+
+    /// Canonical identities a source entity belongs to.
+    pub fn aliases(&self, source: &SourceEntityRef) -> Result<Vec<CanonicalEntityId>> {
+        let mut ids: Vec<CanonicalEntityId> = self
+            .store
+            .query_memberships()?
+            .into_iter()
+            .filter(|m| m.source == *source)
+            .map(|m| m.canonical_id)
+            .collect();
+        ids.sort();
+        ids.dedup();
+        Ok(ids)
+    }
+
+    /// All recorded reconciliation conflicts.
+    pub fn conflicts(&self) -> Result<Vec<ReconciliationConflict>> {
+        self.store.query_reconciliation_conflicts()
+    }
+
     /// The current waypoint list (for diagnostics and exporters).
     pub fn waypoints(&self, date: DateTime<Utc>) -> Result<Vec<CanonicalWaypoint>> {
         self.store.query_waypoints_at(date)
@@ -454,7 +507,7 @@ mod tests {
         assert_eq!(world.waypoints, 1);
         assert_eq!(world.airway_legs, 1);
         assert_eq!(world.procedure_legs, 1);
-        assert_eq!(world.migration_version, 6);
+        assert_eq!(world.migration_version, 7);
     }
 
     #[test]

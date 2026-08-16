@@ -1,5 +1,5 @@
 [package]
-name = "openairac-service"
+name = "openairac-reconcile"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,10 +8,10 @@ repository.workspace = true
 [dependencies]
 openairac-model = { path = "../openairac-model" }
 openairac-store = { path = "../openairac-store" }
-openairac-procedures = { path = "../openairac-procedures" }
-openairac-routing = { path = "../openairac-routing" }
-openairac-integration = { path = "../openairac-integration" }
-openairac-reconcile = { path = "../openairac-reconcile" }
+openairac-ingest = { path = "../openairac-ingest" }
 anyhow.workspace = true
 chrono.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+rusqlite.workspace = true

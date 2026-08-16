@@ -1021,6 +1021,11 @@ pub struct CifpScanReport {
     pub procedure_legs_decoded: usize,
     pub unsupported_records: usize,
     pub decode_errors: usize,
+    /// Duplicate object ids whose payloads CONFLICT (first occurrence
+    /// kept, rest skipped with diagnostics — never merged, never chosen
+    /// silently). Found in real cycle 2608 (terminal waypoints shared
+    /// across procedures).
+    pub duplicate_conflicts: usize,
     pub unsupported_reasons: Vec<String>,
     /// Structured (section, subsection, kind) of unsupported record
     /// classes — the basis for close_absent masking (a parser failure
@@ -1167,6 +1172,36 @@ impl FaaCifpAdapter {
             }
         }
 
+        // Real-world cycle 2608 contains duplicate object ids with
+        // CONFLICTING payloads (terminal waypoints shared across
+        // procedures). Fail-closed: the first occurrence is kept,
+        // conflicting duplicates are skipped with diagnostics — never
+        // merged, never silently chosen.
+        let waypoints = dedupe_entities(
+            waypoints,
+            |w| &w.object_id.0,
+            &mut report.duplicate_conflicts,
+            &mut report.unsupported_reasons,
+        );
+        let navaids = dedupe_entities(
+            navaids,
+            |n| &n.object_id.0,
+            &mut report.duplicate_conflicts,
+            &mut report.unsupported_reasons,
+        );
+        let airway_legs = dedupe_entities(
+            airway_legs,
+            |l| &l.object_id.0,
+            &mut report.duplicate_conflicts,
+            &mut report.unsupported_reasons,
+        );
+        let procedure_legs = dedupe_entities(
+            procedure_legs,
+            |l| &l.object_id.0,
+            &mut report.duplicate_conflicts,
+            &mut report.unsupported_reasons,
+        );
+
         (waypoints, navaids, airway_legs, procedure_legs, report)
     }
 
@@ -1278,6 +1313,39 @@ pub fn masked_tables(scan: &CifpScanReport) -> BTreeSet<openairac_store::EntityT
         }
     }
     masked
+}
+
+/// Keep the first occurrence of each object id; silently drop exact
+/// payload repeats, count + diagnose conflicting repeats.
+fn dedupe_entities<T: Clone + PartialEq>(
+    items: Vec<T>,
+    id_of: impl Fn(&T) -> &str,
+    conflicts: &mut usize,
+    reasons: &mut Vec<String>,
+) -> Vec<T> {
+    let mut seen: std::collections::HashMap<String, T> = std::collections::HashMap::new();
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        let id = id_of(&item).to_string();
+        match seen.get(&id) {
+            None => {
+                seen.insert(id, item.clone());
+                out.push(item);
+            }
+            Some(prev) if prev == &item => {
+                // exact duplicate record: skip
+            }
+            Some(_) => {
+                *conflicts += 1;
+                if reasons.len() < 1000 {
+                    reasons.push(format!(
+                        "duplicate record '{id}' with conflicting payload; first occurrence kept"
+                    ));
+                }
+            }
+        }
+    }
+    out
 }
 
 /// The FAA CIFP as a cycle-aware [`DataProvider`].

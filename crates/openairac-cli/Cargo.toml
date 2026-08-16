@@ -13,6 +13,7 @@ openairac-ingest = { path = "../openairac-ingest" }
 openairac-procedures = { path = "../openairac-procedures" }
 openairac-routing = { path = "../openairac-routing" }
 openairac-export-xplane = { path = "../openairac-export-xplane" }
+openairac-reconcile = { path = "../openairac-reconcile" }
 clap.workspace = true
 anyhow.workspace = true
 tracing.workspace = true

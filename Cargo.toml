@@ -8,6 +8,7 @@ members = [
     "crates/openairac-procedures",
     "crates/openairac-integration",
     "crates/openairac-service",
+    "crates/openairac-reconcile",
     "crates/openairac-routing",
     "crates/openairac-export-xplane",
     "crates/openairac-cli",

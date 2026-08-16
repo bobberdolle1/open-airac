@@ -107,6 +107,15 @@ enum Commands {
         db: PathBuf,
     },
 
+    /// Run multi-source entity reconciliation and report statistics
+    Reconcile {
+        #[arg(short, long, default_value = "./data/world.openairac.sqlite")]
+        db: PathBuf,
+        /// Reconcile the world valid at this instant (RFC3339); default: now
+        #[arg(long)]
+        as_of: Option<String>,
+    },
+
     /// Export canonical navigation data into simulator format
     Export {
         #[command(subcommand)]
@@ -559,6 +568,38 @@ fn main() -> Result<()> {
             );
         }
 
+        Commands::Reconcile { db, as_of } => {
+            let as_of = match as_of {
+                Some(s) => chrono::DateTime::parse_from_rfc3339(s)
+                    .map(|t| t.with_timezone(&chrono::Utc))?,
+                None => chrono::Utc::now(),
+            };
+            let store = WorldStore::open(db)?;
+            let stats = openairac_reconcile::Reconciler::new(&store).reconcile(as_of)?;
+            println!("OpenAIRAC Entity Reconciliation (as of {as_of})");
+            println!("=============================================");
+            println!("  Source entities considered: {}", stats.source_entities);
+            println!("  Candidate pairs:            {}", stats.candidate_pairs);
+            println!("  Exact matches:              {}", stats.exact_matches);
+            println!("  Probable matches:           {}", stats.probable_matches);
+            println!("  Ambiguous (no merge):       {}", stats.ambiguous);
+            println!("  Conflicts:                  {}", stats.conflicts);
+            println!("  Distinct/rejected:          {}", stats.distinct_rejected);
+            let conflicts = store.query_reconciliation_conflicts()?;
+            if !conflicts.is_empty() {
+                println!("\nConflicts (first 10):");
+                for c in conflicts.iter().take(10) {
+                    println!(
+                        "  [{}] {} {} <-> {}: {}",
+                        c.severity.as_str(),
+                        c.entity_table,
+                        c.ref_a,
+                        c.ref_b,
+                        c.category
+                    );
+                }
+            }
+        }
         Commands::Validate { db } => {
             if !db.exists() {
                 println!("Database not found at {:?}", db);

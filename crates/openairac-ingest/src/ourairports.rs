@@ -728,6 +728,6 @@ id,filename,ident,name,type,frequency_khz,latitude_deg,longitude_deg,elevation_f
         assert_eq!(status.total_runways, 3);
         assert_eq!(status.total_navaids, 4);
         assert_eq!(status.total_snapshots, 3);
-        assert_eq!(status.migration_version, 6);
+        assert_eq!(status.migration_version, 7);
     }
 }

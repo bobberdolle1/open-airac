@@ -1127,6 +1127,7 @@ dependencies = [
  "openairac-magnetic",
  "openairac-model",
  "openairac-procedures",
+ "openairac-reconcile",
  "openairac-routing",
  "openairac-store",
  "reqwest",
@@ -1221,6 +1222,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "openairac-reconcile"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "openairac-ingest",
+ "openairac-model",
+ "openairac-store",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "openairac-routing"
 version = "0.2.0"
 dependencies = [
@@ -1241,6 +1257,7 @@ dependencies = [
  "openairac-integration",
  "openairac-model",
  "openairac-procedures",
+ "openairac-reconcile",
  "openairac-routing",
  "openairac-store",
  "serde",

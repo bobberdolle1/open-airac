@@ -66,7 +66,7 @@ pub struct WorldRevision {
 }
 
 /// Temporal Validity Envelope
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TemporalValidity {
     pub valid_from: DateTime<Utc>,
     pub valid_until: Option<DateTime<Utc>>,
@@ -74,7 +74,7 @@ pub struct TemporalValidity {
 }
 
 /// Canonical Waypoint (Fix)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CanonicalWaypoint {
     pub object_id: WaypointId,
     pub ident: String,
@@ -133,7 +133,7 @@ impl NavaidKind {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CanonicalNavaid {
     pub object_id: NavaidId,
     pub ident: String,
@@ -168,7 +168,7 @@ pub struct CanonicalNavaid {
 }
 
 /// Canonical Airport & Runway with Dual Designators
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CanonicalRunway {
     pub id: RunwayId,
     pub airport_id: AirportId,
@@ -190,7 +190,7 @@ pub struct CanonicalRunway {
     pub temporal: TemporalValidity,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CanonicalAirport {
     pub id: AirportId,
     pub ident: String,
@@ -206,7 +206,7 @@ pub struct CanonicalAirport {
 }
 
 /// Canonical Airway Segment (one leg of an enroute airway, ARINC 424 `ER`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CanonicalAirwayLeg {
     pub object_id: AirwayLegId,
     /// Route identifier (e.g. `J1`, `V257`, `A315`).
@@ -234,7 +234,7 @@ pub struct CanonicalAirwayLeg {
 
 /// Canonical procedure leg (one record of an ARINC 424 PD/PE/PF procedure).
 /// convert424toxplane output; anything not decodable stays in `raw`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CanonicalProcedureLeg {
     pub object_id: ProcedureLegId,
     pub airport_ident: String,
@@ -714,4 +714,184 @@ pub struct ObserveReport {
     pub activated: Vec<CycleId>,
     pub superseded: Vec<CycleId>,
     pub expired: Vec<CycleId>,
+}
+
+// ---------------------------------------------------------------------------
+// Multi-source entity reconciliation (v0.4 S8)
+// ---------------------------------------------------------------------------
+
+/// Stable canonical reconciliation identity, derived deterministically
+/// from the entity's natural identity key — independent of which
+/// provider happens to be preferred.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct CanonicalEntityId(pub String);
+
+/// Reference to one provider-native source entity. Provider records
+/// remain immutable facts; reconciliation only relates them.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct SourceEntityRef {
+    pub provider: String,
+    pub entity_table: String,
+    pub entity_id: String,
+}
+
+impl SourceEntityRef {
+    pub fn display(&self) -> String {
+        format!("{}:{}:{}", self.provider, self.entity_table, self.entity_id)
+    }
+}
+
+/// Membership confidence. Never merged silently: only Exact and
+/// Probable create memberships; Ambiguous stays separate and is
+/// surfaced as a diagnostic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MatchConfidence {
+    Exact,
+    Probable,
+}
+
+impl MatchConfidence {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            MatchConfidence::Exact => "Exact",
+            MatchConfidence::Probable => "Probable",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "Exact" => Some(MatchConfidence::Exact),
+            "Probable" => Some(MatchConfidence::Probable),
+            _ => None,
+        }
+    }
+}
+
+/// Membership lifecycle status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MembershipStatus {
+    Active,
+    Superseded,
+}
+
+/// Structured reconciliation evidence: WHY two entities were related.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value")]
+pub enum EvidenceFact {
+    /// Natural identifier equal (ICAO ident, fix ident, ...).
+    IdentEqual(String),
+    /// ICAO region code equal.
+    RegionEqual(String),
+    /// Associated airport ident equal.
+    AirportAssociation(String),
+    /// ISO country equal.
+    CountryEqual(String),
+    /// Great-circle distance between coordinates, nautical miles.
+    DistanceNm(f64),
+    /// Navaid kind equal (VOR/VOR-DME/VORTAC/NDB/DME/TACAN).
+    KindEqual(String),
+    /// Frequency equal, kHz.
+    FrequencyKhz(u32),
+    /// Runway-end designator equal at the compared instant.
+    RunwayDesignator(String),
+    /// Physical runway geometry equal (endpoint coordinates).
+    RunwayGeometryEqual,
+    /// Normalized name similarity in [0, 1].
+    NameSimilarity(f64),
+    /// Published provider cross-reference.
+    PublishedCrossReference(String),
+    /// Validity windows overlap at the compared instant.
+    TemporalOverlap,
+}
+
+/// Conflict severity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConflictSeverity {
+    Info,
+    Warning,
+    Error,
+}
+
+impl ConflictSeverity {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ConflictSeverity::Info => "Info",
+            ConflictSeverity::Warning => "Warning",
+            ConflictSeverity::Error => "Error",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "Info" => Some(ConflictSeverity::Info),
+            "Warning" => Some(ConflictSeverity::Warning),
+            "Error" => Some(ConflictSeverity::Error),
+            _ => None,
+        }
+    }
+}
+
+/// One persisted reconciliation conflict/diagnostic.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReconciliationConflict {
+    pub id: i64,
+    pub entity_table: String,
+    pub canonical_id: Option<CanonicalEntityId>,
+    pub ref_a: String,
+    pub ref_b: String,
+    /// identity | field | geometry | ambiguity
+    pub category: String,
+    pub field_name: Option<String>,
+    pub value_a: Option<String>,
+    pub value_b: Option<String>,
+    pub severity: ConflictSeverity,
+    pub evidence: Vec<EvidenceFact>,
+    pub detected_at: DateTime<Utc>,
+    /// Resolution status when applicable (None = open).
+    pub resolved: Option<String>,
+}
+
+/// One resolved field: value + the source it came from (traceability).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResolvedField {
+    pub field: String,
+    pub value: String,
+    pub source: SourceEntityRef,
+    pub conflicts: Vec<String>,
+}
+
+/// A canonical entity with its members and field provenance.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResolvedEntity {
+    pub canonical_id: CanonicalEntityId,
+    pub entity_table: String,
+    pub members: Vec<SourceEntityRef>,
+    pub fields: Vec<ResolvedField>,
+}
+
+/// Reconciliation run statistics (S8.12 reporting).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ReconciliationStats {
+    pub source_entities: usize,
+    pub candidate_pairs: usize,
+    pub exact_matches: usize,
+    pub probable_matches: usize,
+    pub ambiguous: usize,
+    pub conflicts: usize,
+    pub distinct_rejected: usize,
+}
+
+/// One membership record: a source revision interval related to a
+/// canonical identity. Interval semantics match the store: valid_from
+/// inclusive, valid_until exclusive/NULL.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SourceMembership {
+    pub canonical_id: CanonicalEntityId,
+    pub source: SourceEntityRef,
+    pub valid_from: DateTime<Utc>,
+    pub valid_until: Option<DateTime<Utc>>,
+    pub confidence: MatchConfidence,
+    pub match_method: String,
+    pub evidence: Vec<EvidenceFact>,
+    pub status: MembershipStatus,
 }
