@@ -248,6 +248,11 @@ pub enum CifpRecord {
         /// Glideslope antenna position (cols 56-74).
         glideslope_latitude_deg: Option<f64>,
         glideslope_longitude_deg: Option<f64>,
+        /// Glideslope angle in degrees (cols 88-90, hundredths).
+        /// Published directly on the PI record (verified: IABE '300'
+        /// -> 3.00, IMCW '290' -> 2.90); more authoritative than the
+        /// PF-derived association angle.
+        glideslope_angle_deg: Option<f64>,
         /// Localizer front course, magnetic, degrees (cols 52-55,
         /// tenths). The authoritative front course: PF-derived
         /// association courses can disagree between procedure
@@ -674,6 +679,13 @@ pub fn decode_line(line: &str) -> Result<CifpRecord> {
                 // '2332' -> 233.2, IAAD '2822' -> 282.2).
                 let magnetic_variation_deg = parse_mag_variation(cifp.field(91, 95));
                 let elevation_ft = cifp.field(98, 102).trim().parse::<i32>().ok();
+                let glideslope_angle_deg = cifp
+                    .field(88, 90)
+                    .trim()
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|v| *v > 0.0)
+                    .map(|v| v / 100.0);
                 let front_course_mag_deg = cifp
                     .field(52, 55)
                     .trim()
@@ -694,6 +706,7 @@ pub fn decode_line(line: &str) -> Result<CifpRecord> {
                     elevation_ft,
                     glideslope_latitude_deg: glideslope_position.map(|p| p.0),
                     glideslope_longitude_deg: glideslope_position.map(|p| p.1),
+                    glideslope_angle_deg,
                     front_course_mag_deg,
                     raw: line.to_string(),
                 })
@@ -1002,10 +1015,20 @@ pub fn interpret(
             elevation_ft,
             glideslope_latitude_deg,
             glideslope_longitude_deg,
+            glideslope_angle_deg,
             front_course_mag_deg,
             ..
         } => {
             let temporal = temporal.clone();
+            // True bearing preserved directly from the PI record
+            // (mag course + station declination, normalized; verified:
+            // IABE 63.3 - 12.0 = 51.3, IDLG 195.5 + 11.0 = 206.5,
+            // IMCW 360.0 + 0.0 -> 0.0).
+            let localizer_bearing_true_deg = match (*magnetic_variation_deg, *front_course_mag_deg)
+            {
+                (Some(var), Some(mag)) => Some((mag + var).rem_euclid(360.0)),
+                _ => None,
+            };
             let localizer = CanonicalNavaid {
                 object_id: NavaidId(format!("faa:{record_type}:{icao_code}:{ident}")),
                 ident: ident.clone(),
@@ -1019,7 +1042,7 @@ pub fn interpret(
                 associated_airport: Some(airport_ident.clone()),
                 associated_runway: (!runway.is_empty()).then(|| runway.clone()),
                 magnetic_variation_deg: *magnetic_variation_deg,
-                localizer_bearing_true_deg: None,
+                localizer_bearing_true_deg,
                 localizer_bearing_mag_deg: *front_course_mag_deg,
                 glideslope_angle_deg: None,
                 slaved_variation_deg: None,
@@ -1043,9 +1066,9 @@ pub fn interpret(
                     associated_airport: Some(airport_ident.clone()),
                     associated_runway: (!runway.is_empty()).then(|| runway.clone()),
                     magnetic_variation_deg: *magnetic_variation_deg,
-                    localizer_bearing_true_deg: None,
+                    localizer_bearing_true_deg,
                     localizer_bearing_mag_deg: *front_course_mag_deg,
-                    glideslope_angle_deg: None,
+                    glideslope_angle_deg: *glideslope_angle_deg,
                     slaved_variation_deg: None,
                     service_volume_nm: Some(18),
                     dme_paired: false,
@@ -1563,6 +1586,7 @@ impl FaaCifpAdapter {
                     Option<f64>,
                     Option<String>,
                     Option<f64>,
+                    Option<f64>,
                 ),
             > = navaids
                 .iter()
@@ -1580,6 +1604,7 @@ impl FaaCifpAdapter {
                             n.magnetic_variation_deg,
                             n.associated_runway.clone(),
                             n.localizer_bearing_mag_deg,
+                            n.localizer_bearing_true_deg,
                         ),
                     )
                 })
@@ -1596,7 +1621,7 @@ impl FaaCifpAdapter {
                 })
                 .map(|mut n| {
                     if n.kind == NavaidKind::IlsLocalizer
-                        && let Some((lat, lon, elev, decl, runway, course)) = pi_loc.get(&(
+                        && let Some((lat, lon, elev, decl, runway, course, true_b)) = pi_loc.get(&(
                             n.ident.clone(),
                             n.associated_airport.clone().unwrap_or_default(),
                         ))
@@ -1607,6 +1632,7 @@ impl FaaCifpAdapter {
                         n.magnetic_variation_deg = *decl;
                         n.associated_runway = runway.clone();
                         n.localizer_bearing_mag_deg = *course;
+                        n.localizer_bearing_true_deg = *true_b;
                     }
                     n
                 })
@@ -1844,7 +1870,12 @@ impl FaaCifpAdapter {
                     if n.localizer_bearing_mag_deg.is_none() {
                         n.localizer_bearing_mag_deg = Some(assoc.localizer_bearing_mag_deg);
                     }
-                    n.glideslope_angle_deg = Some(assoc.glideslope_angle_deg);
+                    // The PI-published angle (when present) is
+                    // authoritative; the association fills the D-only
+                    // case and must not overwrite it.
+                    if n.glideslope_angle_deg.is_none() {
+                        n.glideslope_angle_deg = Some(assoc.glideslope_angle_deg);
+                    }
                     // The D record does not publish the runway; the
                     // PF-derived association does. Without it, D-record
                     // localizers can never emit an X-Plane row 4/5.
@@ -2526,6 +2557,7 @@ mod tests {
                 longitude_deg,
                 magnetic_variation_deg,
                 elevation_ft,
+                glideslope_angle_deg,
                 front_course_mag_deg,
                 ..
             } => {
@@ -2538,6 +2570,8 @@ mod tests {
                 assert!((longitude_deg - (-75.426430556)).abs() < 5e-9);
                 assert!((magnetic_variation_deg.unwrap() - (-12.0)).abs() < 1e-6);
                 assert_eq!(elevation_ft, Some(385));
+                // Glideslope angle cols 88-90 in hundredths: '300' -> 3.00.
+                assert_eq!(glideslope_angle_deg, Some(3.0));
                 // Front course cols 52-55 in tenths: '0633' -> 63.3.
                 assert!((front_course_mag_deg.unwrap() - 63.3).abs() < 1e-6);
             }
@@ -2548,7 +2582,9 @@ mod tests {
     #[test]
     fn test_interpret_pi_localizer() {
         let snapshot_id = SourceSnapshotId("snap-pi".to_string());
-        match &interpret(&decode_line(PI_IABE).unwrap(), &snapshot_id, Utc::now())[0] {
+        let interpreted = interpret(&decode_line(PI_IABE).unwrap(), &snapshot_id, Utc::now());
+        assert_eq!(interpreted.len(), 2);
+        match &interpreted[0] {
             CifpInterpretation::Navaid(nav) => {
                 assert_eq!(nav.kind, NavaidKind::IlsLocalizer);
                 assert_eq!(nav.object_id.0, "faa:SUSA:K6:IABE");
@@ -2558,8 +2594,76 @@ mod tests {
                 assert_eq!(nav.elevation_ft, Some(385));
                 assert!((nav.magnetic_variation_deg.unwrap() - (-12.0)).abs() < 1e-6);
                 assert!((nav.localizer_bearing_mag_deg.unwrap() - 63.3).abs() < 1e-6);
+                assert!((nav.localizer_bearing_true_deg.unwrap() - 51.3).abs() < 1e-6);
             }
-            other => panic!("expected navaid, got {other:?}"),
+            other => panic!("expected localizer navaid, got {other:?}"),
+        }
+        match &interpreted[1] {
+            CifpInterpretation::Navaid(nav) => {
+                assert_eq!(nav.kind, NavaidKind::IlsGlidepath);
+                assert_eq!(nav.object_id.0, "faa:SUSA:K6:IABE:gs");
+                assert_eq!(nav.glideslope_angle_deg, Some(3.0));
+                assert!((nav.localizer_bearing_true_deg.unwrap() - 51.3).abs() < 1e-6);
+            }
+            other => panic!("expected glideslope navaid, got {other:?}"),
+        }
+    }
+
+    // Real LOC-only PI record (PADL DLG RW19): no glideslope component.
+    const PI_IDLG_LOC_ONLY: &str = "SCANP PADLPAIIDLG0   011190RW19 N59020727W1583052301955                   0607     0570   E0110                            069512409";
+
+    #[test]
+    fn test_loc_only_facility_emits_no_fabricated_gs() {
+        let snapshot_id = SourceSnapshotId("snap-loc".to_string());
+        let record = decode_line(PI_IDLG_LOC_ONLY).unwrap();
+        match &record {
+            CifpRecord::IlsLocalizerRecord {
+                glideslope_latitude_deg,
+                glideslope_longitude_deg,
+                glideslope_angle_deg,
+                front_course_mag_deg,
+                ..
+            } => {
+                assert_eq!(*glideslope_latitude_deg, None);
+                assert_eq!(*glideslope_longitude_deg, None);
+                assert_eq!(*glideslope_angle_deg, None);
+                assert_eq!(*front_course_mag_deg, Some(195.5));
+            }
+            other => panic!("expected PI record, got {other:?}"),
+        }
+        let interpreted = interpret(&record, &snapshot_id, Utc::now());
+        assert_eq!(interpreted.len(), 1);
+        match &interpreted[0] {
+            CifpInterpretation::Navaid(nav) => {
+                assert_eq!(nav.kind, NavaidKind::IlsLocalizer);
+                assert_eq!(nav.ident, "IDLG");
+                assert_eq!(nav.associated_airport.as_deref(), Some("PADL"));
+                assert_eq!(nav.associated_runway.as_deref(), Some("19"));
+                assert_eq!(nav.localizer_bearing_mag_deg, Some(195.5));
+                assert!((nav.localizer_bearing_true_deg.unwrap() - 206.5).abs() < 1e-6);
+                assert_eq!(nav.glideslope_angle_deg, None);
+            }
+            other => panic!("expected localizer, got {other:?}"),
+        }
+    }
+
+    // Real north-aligned localizer (KMCW RW36, IMCW): mag course
+    // 360.0, declination 0.0 -> true normalized to 0.0.
+    const PI_IMCW_NORTH: &str = "SUSAP KMCWK3IIMCW0   010950RW36 N43102190W0931939793600N43085521W0932000511019 12380482300E000057001188                     178491807";
+
+    #[test]
+    fn test_north_aligned_localizer_normalizes_true() {
+        let snapshot_id = SourceSnapshotId("snap-north".to_string());
+        let record = decode_line(PI_IMCW_NORTH).unwrap();
+        let interpreted = interpret(&record, &snapshot_id, Utc::now());
+        assert_eq!(interpreted.len(), 2);
+        match &interpreted[0] {
+            CifpInterpretation::Navaid(nav) => {
+                assert_eq!(nav.ident, "IMCW");
+                assert_eq!(nav.localizer_bearing_mag_deg, Some(360.0));
+                assert_eq!(nav.localizer_bearing_true_deg, Some(0.0));
+            }
+            other => panic!("expected localizer, got {other:?}"),
         }
     }
 

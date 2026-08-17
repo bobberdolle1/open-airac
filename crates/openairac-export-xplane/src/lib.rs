@@ -949,19 +949,17 @@ fn ils_required(nav: &CanonicalNavaid) -> Result<(&str, &str, &str, f64, f64), S
     let Some(bearing_mag) = nav.localizer_bearing_mag_deg else {
         return Err("missing localizer magnetic bearing".to_string());
     };
-    let Some(declination) = nav.magnetic_variation_deg else {
-        return Err("missing station declination".to_string());
-    };
+    // Prefer the preserved PI-derived true bearing; derive from the
+    // station declination when only the magnetic course is known.
     // Normalize: a due-north course is published as 360.0 and must
     // not produce a 360.0 true bearing (IAGY: 347 + 13 = 360 -> 0.0,
     // verified against converter output 124920.114).
-    Ok((
-        airport,
-        region,
-        runway,
-        bearing_mag,
-        (bearing_mag + declination).rem_euclid(360.0),
-    ))
+    let bearing_true = match (nav.localizer_bearing_true_deg, nav.magnetic_variation_deg) {
+        (Some(true_b), _) => true_b.rem_euclid(360.0),
+        (None, Some(declination)) => (bearing_mag + declination).rem_euclid(360.0),
+        (None, None) => return Err("missing station declination".to_string()),
+    };
+    Ok((airport, region, runway, bearing_mag, bearing_true))
 }
 
 fn ensure_name_suffix(name: &str, kind: NavaidKind) -> String {

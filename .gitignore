@@ -18,3 +18,4 @@ prompt.md
 # Signing key material (NEVER commit)
 *.key
 *.sig
+__pycache__/
