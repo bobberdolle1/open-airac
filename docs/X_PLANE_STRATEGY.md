@@ -155,6 +155,40 @@ differences in either direction. Coverage: SIDs, STARs, ILS
 approaches (I-series), localizer-only (L-series), RNAV (H-series),
 transitions, and missed-approach legs (FM/HA/HM terminators).
 
+
+## LPV / SBAS strategy (stage 0 decision)
+
+Research basis: official Laminar specs (XP-CIFP1250/1101) and the
+X-Plane developer documentation.
+
+1. **The official deployment path for terminal procedures is the
+   converter-generated per-airport `CIFP/$ICAO.dat` set** (XP CIFP
+   1250), produced by Laminar's own convert424toxplane tool. The spec
+   explicitly states these files must never be hand-built: the
+   converter is the only sanctioned encoder.
+2. **The raw `FAACIFP18` rename hack (`earth_424.dat`) is NOT
+   officially supported** and causes simulator instability — rejected.
+3. **LPV/SBAS needs no special rows.** The CIFP1250 row set is
+   SID/STAR/APPCH/RWY/PRDAT (+ helicopter variants in 12.5). LPV
+   vertical guidance travels in the PF legs themselves: the ARINC
+   5.70 vertical angle and 5.211 RNP fields on the final segment of
+   RNAV (R-series) approaches. OpenAIRAC decodes both (verified on
+   cycle 2608: KSFO R10L legs carry -3.0 deg / RNP 0.31, R19RY
+   -3.15 / 0.31).
+4. **Decision: FAA CIFP -> convert424toxplane -> Custom Data/CIFP/**
+   remains the production US terminal-data strategy** (already
+   documented above). No PP->row-14/16 reimplementation; the
+   earth_nav.dat SBAS point rows 14/16 are converter-synthesized
+   display geometry, not a prerequisite for LPV guidance.
+5. **Simulator-side requirement (documented, not ours):** the flown
+   aircraft must have an SBAS receiver assigned in Plane Maker
+   (Systems > Bus Loads) for the LPV glideslope to appear — a
+   navdata-independent aircraft configuration issue.
+
+Cycle compatibility: the converter consumed cycles 2608 and 2609
+successfully in our harnesses; current convert424toxplane versions
+support the current FAA CIFP layout (see the X-Plane forum thread on
+recent CIFP downloads for version requirements).
 ## Related
 
 * `crates/openairac-ingest/src/faa_cifp.rs` — layered CIFP decoder
