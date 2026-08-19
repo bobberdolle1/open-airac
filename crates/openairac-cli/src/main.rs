@@ -596,6 +596,46 @@ fn main() -> Result<()> {
                 ),
             }
 
+            // 7. Multi-format export + verification for every
+            // implemented exporter (format-level gate; per-target
+            // install gates run on SUPPORTED targets only).
+            let out_msfs = out.join("gate-msfs");
+            let out_lnm = out.join("gate-lnm");
+            let _ = std::fs::remove_dir_all(&out_msfs);
+            let _ = std::fs::remove_dir_all(&out_lnm);
+            match openairac_export::FormatExporter::export(
+                &openairac_export_msfs::MsfsNavdataExporter,
+                &store,
+                effective,
+                &out_msfs,
+            ) {
+                Ok(set) => {
+                    let ok = set.verify(&out_msfs).is_ok();
+                    check(
+                        "msfs-export",
+                        ok,
+                        format!("{} artifacts", set.artifacts.len()),
+                    );
+                }
+                Err(e) => check("msfs-export", false, format!("{e}")),
+            }
+            match openairac_export::FormatExporter::export(
+                &openairac_export_lnm::LnmNavdataExporter,
+                &store,
+                effective,
+                &out_lnm,
+            ) {
+                Ok(set) => {
+                    let ok = set.verify(&out_lnm).is_ok();
+                    check(
+                        "lnm-export",
+                        ok,
+                        format!("{} artifacts", set.artifacts.len()),
+                    );
+                }
+                Err(e) => check("lnm-export", false, format!("{e}")),
+            }
+
             if failures.is_empty() {
                 println!("RELEASE GATE: PASS");
             } else {
