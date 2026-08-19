@@ -294,6 +294,16 @@ enum CycleCmd {
 enum ExportTarget {
     /// List registered simulator/format targets with support states
     Targets {},
+    /// Export a Little Navmap nav database (open-source schema)
+    Lnm {
+        #[arg(short, long, default_value = "./data/world.openairac.sqlite")]
+        db: PathBuf,
+        #[arg(short, long, default_value = "./dist/lnm")]
+        out: PathBuf,
+        /// Effective date for the export (YYYY-MM-DD or RFC3339)
+        #[arg(long)]
+        date: Option<String>,
+    },
     /// Export MSFS navdata sources (official SDK SimpleNavData path)
     Msfs {
         #[arg(short, long, default_value = "./data/world.openairac.sqlite")]
@@ -1289,6 +1299,20 @@ fn main() -> Result<()> {
                         t.display_name,
                         t.format_family.as_str()
                     );
+                }
+            }
+            ExportTarget::Lnm { db, out, date } => {
+                let export_date = parse_export_date(date)?;
+                let store = WorldStore::open(db)?;
+                let set = openairac_export::FormatExporter::export(
+                    &openairac_export_lnm::LnmNavdataExporter,
+                    &store,
+                    export_date,
+                    out,
+                )?;
+                println!("Exported Little Navmap database (cycle {}):", set.cycle);
+                for a in &set.artifacts {
+                    println!("  {} ({} bytes)", a.path, a.size);
                 }
             }
             ExportTarget::Msfs {

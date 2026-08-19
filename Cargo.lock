@@ -1421,6 +1421,7 @@ dependencies = [
  "clap",
  "openairac-bundle",
  "openairac-export",
+ "openairac-export-lnm",
  "openairac-export-msfs",
  "openairac-export-xplane",
  "openairac-ingest",
@@ -1447,6 +1448,22 @@ dependencies = [
  "openairac-export-xplane",
  "openairac-model",
  "openairac-store",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "openairac-export-lnm"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "openairac-export",
+ "openairac-export-xplane",
+ "openairac-model",
+ "openairac-store",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",
