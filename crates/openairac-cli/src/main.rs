@@ -820,6 +820,106 @@ fn main() -> Result<()> {
                 }
                 Err(e) => check("lnm-export", false, format!("{e}")),
             }
+            // 8. Multi-target gate (v2): registry-driven, per target -
+            // export + artifact verify + transactional install into a
+            // sandbox + post-install validation + rollback proving the
+            // previous state is restored. SUPPORTED + EXPERIMENTAL
+            // targets only; Research targets are excluded by design.
+            for t in openairac_export::target_registry() {
+                if support_rank(t.support_state)
+                    < support_rank(openairac_export::SupportState::Experimental)
+                {
+                    continue;
+                }
+                let sandbox = out.join(format!("gate-target-{}", t.id));
+                let _ = std::fs::remove_dir_all(&sandbox);
+                let staging = sandbox.join("staging");
+                let target_root = sandbox.join("target");
+                std::fs::create_dir_all(&staging)?;
+                std::fs::create_dir_all(&target_root)?;
+
+                // Seed the "previous vendor state" the rollback must
+                // restore byte-identically.
+                let mut seeded: Vec<(PathBuf, Vec<u8>)> = Vec::new();
+                match &t.install_strategy {
+                    openairac_export::InstallStrategy::CustomData { layer_files, .. } => {
+                        for name in layer_files {
+                            let p = target_root.join(name);
+                            std::fs::write(&p, format!("previous vendor layer {name}"))?;
+                            seeded.push((p, format!("previous vendor layer {name}").into_bytes()));
+                        }
+                    }
+                    openairac_export::InstallStrategy::Subdirectory { relative } => {
+                        let dest = if relative.is_empty() {
+                            target_root.clone()
+                        } else {
+                            target_root.join(relative)
+                        };
+                        std::fs::create_dir_all(&dest)?;
+                        let p = dest.join("previous-vendor-marker.txt");
+                        std::fs::write(&p, b"previous vendor state")?;
+                        seeded.push((p, b"previous vendor state".to_vec()));
+                    }
+                }
+
+                let gate_name = format!("target-{}", t.id);
+                let result =
+                    export_for_family(&store, t.format_family.as_str(), effective, &staging)
+                        .and_then(|set| {
+                            set.verify(&staging)?;
+                            let installed: Vec<String> =
+                                set.artifacts.iter().map(|a| a.path.clone()).collect();
+                            let installer = installer_for(t);
+                            let report = openairac_export::TargetInstaller::install(
+                                installer.as_ref(),
+                                &staging,
+                                &set,
+                                &target_root,
+                            )?;
+                            verify_semantic(t, &target_root)?;
+                            // Rollback: previous state restored byte-identically.
+                            openairac_export::TargetInstaller::rollback(
+                                installer.as_ref(),
+                                &target_root,
+                            )?;
+                            Ok((report, installed))
+                        });
+                match result {
+                    Ok((_report, installed)) => {
+                        let (restored, removed) = match &t.install_strategy {
+                            openairac_export::InstallStrategy::CustomData {
+                                identity_file, ..
+                            } => {
+                                let seeded_ok = seeded.iter().all(|(p, bytes)| {
+                                    std::fs::read(p).map(|b| b == *bytes).unwrap_or(false)
+                                });
+                                let identity_gone = !target_root.join(identity_file).exists();
+                                (seeded_ok && identity_gone, true)
+                            }
+                            openairac_export::InstallStrategy::Subdirectory { relative } => {
+                                let seeded_ok = seeded.iter().all(|(p, bytes)| {
+                                    std::fs::read(p).map(|b| b == *bytes).unwrap_or(false)
+                                });
+                                let dest = if relative.is_empty() {
+                                    target_root.clone()
+                                } else {
+                                    target_root.join(relative)
+                                };
+                                let installed_gone =
+                                    installed.iter().all(|f| !dest.join(f).exists());
+                                (seeded_ok, installed_gone)
+                            }
+                        };
+                        check(
+                            &gate_name,
+                            restored && removed,
+                            "export+install+validate+rollback round-trip; previous state byte-identical, installed files removed"
+                                .to_string(),
+                        );
+                    }
+                    Err(e) => check(&gate_name, false, format!("{e}")),
+                }
+            }
 
             if failures.is_empty() {
                 println!("RELEASE GATE: PASS");

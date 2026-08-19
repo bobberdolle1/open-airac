@@ -1,0 +1,8 @@
+{
+  "as_of": "2026-09-04T00:00:00+00:00",
+  "cycle": "2609",
+  "format_family": "pmdg-text",
+  "generator": "openairac 1.0.0",
+  "schema_authority": "AIRNAV Navdata Data File Definition / PMDG Navdata Technical Glossary (public domain / open interface reference)",
+  "support_state": "EXPERIMENTAL"
+}

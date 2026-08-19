@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AssetPackage Version="0.1.0" Name="openairac-navdata">
+  <ItemSettings>
+    <ContentType>NAVDATA</ContentType>
+    <Title>OpenAIRAC Navigation Data</Title>
+    <Manufacturer>OpenAIRAC</Manufacturer>
+    <Creator>OpenAIRAC</Creator>
+    <PackageOrderHint>CUSTOM_NAVDATA</PackageOrderHint>
+  </ItemSettings>
+  <AssetGroups>
+    <AssetGroup Name="ContentInfo">
+      <Type>ContentInfo</Type>
+      <Flags>
+        <FSXCompatibility>false</FSXCompatibility>
+      </Flags>
+      <AssetDir>PackageSources/navdata/</AssetDir>
+      <OutputDir>NAVDATA/</OutputDir>
+    </AssetGroup>
+  </AssetGroups>
+</AssetPackage>

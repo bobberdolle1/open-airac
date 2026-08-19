@@ -1,0 +1,100 @@
+{
+  "core": {
+    "format_version": 1,
+    "schema_version": 10,
+    "effective_from": "2026-09-03T09:01:00+00:00",
+    "effective_until": null,
+    "airac_cycle": "2609",
+    "providers": [
+      "FAA_CIFP",
+      "OurAirports"
+    ],
+    "publications": [
+      {
+        "publication_id": "FAACIFP18:2609:baseline",
+        "provider": "FAA_CIFP",
+        "dataset": "FAACIFP18",
+        "airac_cycle": "2609",
+        "content_sha256": "fbea2179a990e1d371d77439961d137e83252582b3c67b6ec85b8d9d11c76cad",
+        "revision_kind": "Baseline",
+        "coverage": "FullSnapshot",
+        "valid_from": "2026-09-03T09:01:00+00:00"
+      },
+      {
+        "publication_id": "ourairports:airports:f23f8924e70a585c",
+        "provider": "OurAirports",
+        "dataset": "airports",
+        "airac_cycle": null,
+        "content_sha256": "f23f8924e70a585ceebc03ec4e49beb3aa7743588caf5490c045f1fe53320a71",
+        "revision_kind": "Baseline",
+        "coverage": "FullSnapshot",
+        "valid_from": "2026-08-16T14:00:14.318015500+00:00"
+      },
+      {
+        "publication_id": "ourairports:runways:8ed45429794ccfd2",
+        "provider": "OurAirports",
+        "dataset": "runways",
+        "airac_cycle": null,
+        "content_sha256": "8ed45429794ccfd202613dd756ee3daf97254e8d15db97299f9f7cafb18349ab",
+        "revision_kind": "Baseline",
+        "coverage": "FullSnapshot",
+        "valid_from": "2026-08-16T14:00:23.468351800+00:00"
+      },
+      {
+        "publication_id": "ourairports:navaids:57fb332b75be1173",
+        "provider": "OurAirports",
+        "dataset": "navaids",
+        "airac_cycle": null,
+        "content_sha256": "57fb332b75be1173c45fd97447611eb3fba07b2c508c2f330961b9a8976e24cb",
+        "revision_kind": "Baseline",
+        "coverage": "FullSnapshot",
+        "valid_from": "2026-08-16T14:00:26.895361100+00:00"
+      }
+    ],
+    "reconciliation": {
+      "canonical_entities": 1420,
+      "memberships": 2840,
+      "conflicts": 0
+    },
+    "provenance": [
+      {
+        "snapshot_id": "faa_cifp:2609:fbea2179a990e1d3",
+        "provider": "FAA_CIFP",
+        "dataset": "FAACIFP18",
+        "content_sha256": "fbea2179a990e1d371d77439961d137e83252582b3c67b6ec85b8d9d11c76cad",
+        "effective_from": "2026-09-03T09:01:00+00:00"
+      },
+      {
+        "snapshot_id": "snap-ourairports-57fb332b",
+        "provider": "OurAirports",
+        "dataset": "navaids",
+        "content_sha256": "57fb332b75be1173c45fd97447611eb3fba07b2c508c2f330961b9a8976e24cb",
+        "effective_from": "2026-08-16T14:00:26.895361100+00:00"
+      },
+      {
+        "snapshot_id": "snap-ourairports-8ed45429",
+        "provider": "OurAirports",
+        "dataset": "runways",
+        "content_sha256": "8ed45429794ccfd202613dd756ee3daf97254e8d15db97299f9f7cafb18349ab",
+        "effective_from": "2026-08-16T14:00:23.468351800+00:00"
+      },
+      {
+        "snapshot_id": "snap-ourairports-f23f8924",
+        "provider": "OurAirports",
+        "dataset": "airports",
+        "content_sha256": "f23f8924e70a585ceebc03ec4e49beb3aa7743588caf5490c045f1fe53320a71",
+        "effective_from": "2026-08-16T14:00:14.318015500+00:00"
+      }
+    ],
+    "files": [
+      {
+        "path": "world.sqlite",
+        "sha256": "04e8edb07311c153065f2c04478f5cb1040ab779f932aeca9b1d9b4ae49da3f4",
+        "size": 253714432
+      }
+    ],
+    "authenticity": "SignedTrusted"
+  },
+  "generated_at": "2026-08-19T20:37:40.805883900+00:00",
+  "bundle_hash": "942cdbfc0aaa56c35adf6ead2deb51d9cfbf65ae515f673b48145898276d09a0"
+}

@@ -1,0 +1,25 @@
+{
+  "generator": "openairac 1.0.0",
+  "cycle": "2609",
+  "build_date": "20260904",
+  "generated_at": "2026-08-19T20:38:32.328384900+00:00",
+  "files": [
+    {
+      "name": "earth_fix.dat",
+      "sha256": "98246de0b27c5366fc544b7e720f1956a58554bef798fa0f77ed341ab992cec8",
+      "rows": 32457
+    },
+    {
+      "name": "earth_nav.dat",
+      "sha256": "7a293f3c7cbb7bf1328725f98091de133bf4f506aaeb6215b41bd44016ccc7e4",
+      "rows": 4958
+    },
+    {
+      "name": "earth_awy.dat",
+      "sha256": "ce03261814fb665e47638727a860a99817cf91f0536aaea7a9057b2adf6736d5",
+      "rows": 14151
+    }
+  ],
+  "allow_empty": true,
+  "world_fingerprint": "4d607e69f2a3cc15aefb4ef3eec31b757945fc1c2d22fbb0173cb4b98f2186ff"
+}
