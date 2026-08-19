@@ -42,6 +42,7 @@ pub struct ExportReport {
     pub fixes_written: usize,
     pub navaids_written: usize,
     pub lpv_fas_written: usize,
+    pub holds_written: usize,
     /// Airway LEGS accepted for the layer (before merging).
     pub airway_legs_accepted: usize,
     /// Physical merged segment rows written to `earth_awy.dat`. This is the
@@ -578,7 +579,107 @@ impl XPlane12Exporter {
         Ok(())
     }
 
-    /// Full export from the temporal store: query at `date`, stage the three
+    /// Export holding patterns into `earth_hold.dat` (HOLD1140).
+    ///
+    /// Extracted from procedural holding legs (`HA`, `HF`, `HM`).
+    /// Deduplicated by (fix_ident, fix_icao_code, airport_ident, course, turn).
+    pub fn export_earth_hold<W: Write>(
+        procedure_legs: &[CanonicalProcedureLeg],
+        cycle: &str,
+        build_date: &str,
+        mut writer: W,
+        report: &mut ExportReport,
+    ) -> Result<()> {
+        write_header(&mut writer, "1140", "HoldXP1140.", cycle, build_date)?;
+
+        use std::collections::BTreeMap;
+        type HoldKey = (String, String, String, i32, char);
+        struct HoldRow {
+            fix_ident: String,
+            icao_code: String,
+            airport_ident: String,
+            fix_type: u8,
+            course_deg: f64,
+            leg_time_min: f64,
+            leg_dist_nm: f64,
+            turn: char,
+            min_alt_ft: u32,
+            max_alt_ft: u32,
+            speed_limit_kts: u32,
+        }
+
+        let mut holds: BTreeMap<HoldKey, HoldRow> = BTreeMap::new();
+        for leg in procedure_legs {
+            if !matches!(leg.path_terminator.as_str(), "HA" | "HF" | "HM") {
+                continue;
+            }
+            if leg.fix_ident.is_empty() {
+                continue;
+            }
+            let Some(course) = leg.course_b_deg.or(leg.course_a_deg) else {
+                continue;
+            };
+            let turn = leg.turn_direction.unwrap_or('R');
+            let dist = leg.distance_b_nm.or(leg.distance_a_nm).unwrap_or(0.0);
+            let time = if dist == 0.0 { 1.0 } else { 0.0 };
+            let min_alt = leg.altitude_1_ft.unwrap_or(0);
+            let max_alt = leg.altitude_2_ft.unwrap_or(0);
+            let speed = leg.speed_limit_kts.unwrap_or(0);
+
+            let fix_type = match leg.fix_section.as_str() {
+                "D " => 3,
+                "DB" | "PN" => 2,
+                _ => 11,
+            };
+
+            let course_key = (course * 10.0).round() as i32;
+            let key = (
+                leg.fix_ident.clone(),
+                leg.fix_icao_code.clone(),
+                leg.airport_ident.clone(),
+                course_key,
+                turn,
+            );
+
+            holds.entry(key).or_insert(HoldRow {
+                fix_ident: leg.fix_ident.clone(),
+                icao_code: leg.fix_icao_code.clone(),
+                airport_ident: leg.airport_ident.clone(),
+                fix_type,
+                course_deg: course,
+                leg_time_min: time,
+                leg_dist_nm: dist,
+                turn,
+                min_alt_ft: min_alt,
+                max_alt_ft: max_alt,
+                speed_limit_kts: speed,
+            });
+        }
+
+        for (_, h) in holds {
+            writeln!(
+                writer,
+                "{:<5} {:<2} {:<4} {:>2} {:>8.1} {:>8.1} {:>8.1} {} {:>8} {:>8} {:>8}",
+                h.fix_ident,
+                h.icao_code,
+                h.airport_ident,
+                h.fix_type,
+                h.course_deg,
+                h.leg_time_min,
+                h.leg_dist_nm,
+                h.turn,
+                h.min_alt_ft,
+                h.max_alt_ft,
+                h.speed_limit_kts,
+            )?;
+            report.holds_written += 1;
+        }
+
+        writeln!(writer, "99")?;
+        Ok(())
+    }
+
+    /// Full export from the temporal store: query at `date`, stage the four
     /// dat files plus a manifest next to `out_dir`, validate, swap in.
     pub fn export_from_db<P: AsRef<Path>>(
         store: &WorldStore,
@@ -597,6 +698,7 @@ impl XPlane12Exporter {
         let waypoints = store.query_waypoints_at(date)?;
         let navaids = store.query_navaids_at(date)?;
         let airway_legs = store.query_airway_legs_at(date)?;
+        let procedure_legs = store.query_procedure_legs_at(date).unwrap_or_default();
         let lpv_fas = store.query_lpv_fas_at(date).unwrap_or_default();
 
         let mut report = ExportReport::default();
@@ -609,6 +711,7 @@ impl XPlane12Exporter {
         let staged_fix = staging.join("earth_fix.dat");
         let staged_nav = staging.join("earth_nav.dat");
         let staged_awy = staging.join("earth_awy.dat");
+        let staged_hold = staging.join("earth_hold.dat");
         let staged_manifest = staging.join("manifest.json");
 
         let fix_file = std::fs::File::create(&staged_fix)
@@ -643,6 +746,9 @@ impl XPlane12Exporter {
             awy_file,
             &mut report,
         )?;
+        let hold_file = std::fs::File::create(&staged_hold)
+            .with_context(|| format!("creating staged {:?}", staged_hold))?;
+        Self::export_earth_hold(&procedure_legs, &cycle, &build_date, hold_file, &mut report)?;
 
         // X-Plane loads the layer as a unit: an incomplete layer (missing
         // or empty file) destroys referential integrity on install.
@@ -681,6 +787,7 @@ impl XPlane12Exporter {
                 manifest_file_entry(&staged_fix, report.fixes_written)?,
                 manifest_file_entry(&staged_nav, report.navaids_written)?,
                 manifest_file_entry(&staged_awy, report.airway_rows_written)?,
+                manifest_file_entry(&staged_hold, report.holds_written)?,
             ],
             allow_empty,
             world_fingerprint: Some(world_fingerprint),
@@ -691,6 +798,7 @@ impl XPlane12Exporter {
         swap_file(&staged_fix, &dir.join("earth_fix.dat"))?;
         swap_file(&staged_nav, &dir.join("earth_nav.dat"))?;
         swap_file(&staged_awy, &dir.join("earth_awy.dat"))?;
+        swap_file(&staged_hold, &dir.join("earth_hold.dat"))?;
         swap_file(&staged_manifest, &dir.join("manifest.json"))?;
         let _ = std::fs::remove_dir_all(&staging);
 
@@ -2785,11 +2893,7 @@ I
                 .lines()
                 .filter(|l| {
                     let t = l.trim();
-                    !t.is_empty()
-                        && t != "99"
-                        && t != "I"
-                        && !t.starts_with("1200 Version")
-                        && !t.starts_with("1100 Version")
+                    !t.is_empty() && t != "99" && t != "I" && !t.contains("Version")
                 })
                 .count();
             assert_eq!(
@@ -2885,6 +2989,117 @@ I
                 "K1",
                 "26",
                 "W26A"
+            ]
+        );
+        assert_eq!(lines[5], "99");
+    }
+
+    #[test]
+    fn test_export_earth_hold_golden() {
+        let leg1 = CanonicalProcedureLeg {
+            object_id: ProcedureLegId("leg-1".to_string()),
+            airport_ident: "PAAK".to_string(),
+            icao_code: "PA".to_string(),
+            procedure_kind: 'F',
+            procedure_ident: "RNV-A".to_string(),
+            route_type: "R".to_string(),
+            transition_ident: "INOTY".to_string(),
+            sequence_number: 10,
+            fix_ident: "INOTY".to_string(),
+            fix_icao_code: "PA".to_string(),
+            fix_section: "EA".to_string(),
+            waypoint_description: "A".to_string(),
+            turn_direction: Some('R'),
+            rnp_nm: None,
+            path_terminator: "HF".to_string(),
+            recommended_navaid: None,
+            arc_radius_nm: None,
+            course_a_deg: None,
+            distance_a_nm: None,
+            course_b_deg: Some(59.9),
+            distance_b_nm: Some(7.0),
+            altitude_descriptor: Some('H'),
+            altitude_1_ft: Some(7500),
+            altitude_2_ft: None,
+            speed_limit_kts: None,
+            course_c_deg: None,
+            vertical_angle_deg: None,
+            msa_center_fix: None,
+            route_qualifiers: String::new(),
+            raw: String::new(),
+            temporal: TemporalValidity {
+                valid_from: Utc::now(),
+                valid_until: None,
+                source_snapshot_id: SourceSnapshotId("snap-test".to_string()),
+            },
+        };
+
+        let leg2 = CanonicalProcedureLeg {
+            object_id: ProcedureLegId("leg-2".to_string()),
+            airport_ident: "PAAQ".to_string(),
+            icao_code: "PA".to_string(),
+            procedure_kind: 'F',
+            procedure_ident: "RNV-A".to_string(),
+            route_type: "R".to_string(),
+            transition_ident: "BGQ".to_string(),
+            sequence_number: 10,
+            fix_ident: "BGQ".to_string(),
+            fix_icao_code: "PA".to_string(),
+            fix_section: "D ".to_string(),
+            waypoint_description: "A".to_string(),
+            turn_direction: Some('R'),
+            rnp_nm: None,
+            path_terminator: "HM".to_string(),
+            recommended_navaid: Some("BGQ".to_string()),
+            arc_radius_nm: None,
+            course_a_deg: None,
+            distance_a_nm: None,
+            course_b_deg: Some(88.0),
+            distance_b_nm: Some(4.0),
+            altitude_descriptor: Some('H'),
+            altitude_1_ft: Some(4500),
+            altitude_2_ft: None,
+            speed_limit_kts: None,
+            course_c_deg: None,
+            vertical_angle_deg: None,
+            msa_center_fix: None,
+            route_qualifiers: String::new(),
+            raw: String::new(),
+            temporal: TemporalValidity {
+                valid_from: Utc::now(),
+                valid_until: None,
+                source_snapshot_id: SourceSnapshotId("snap-test".to_string()),
+            },
+        };
+
+        let mut report = ExportReport::default();
+        let mut buf = Vec::new();
+        XPlane12Exporter::export_earth_hold(
+            &[leg1, leg2],
+            "2609",
+            "20260903",
+            &mut buf,
+            &mut report,
+        )
+        .unwrap();
+
+        assert_eq!(report.holds_written, 2);
+
+        let text = String::from_utf8(buf).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines[0], "I");
+        assert!(lines[1].starts_with("1140 Version"));
+
+        assert_eq!(
+            lines[3].split_whitespace().collect::<Vec<&str>>(),
+            vec![
+                "BGQ", "PA", "PAAQ", "3", "88.0", "0.0", "4.0", "R", "4500", "0", "0"
+            ]
+        );
+        assert_eq!(
+            lines[4].split_whitespace().collect::<Vec<&str>>(),
+            vec![
+                "INOTY", "PA", "PAAK", "11", "59.9", "0.0", "7.0", "R", "7500", "0", "0"
             ]
         );
         assert_eq!(lines[5], "99");

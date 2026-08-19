@@ -60,10 +60,10 @@ TOTAL CONVERTER-ONLY ROWS: 1,459
 ### 3.2. Enroute & Terminal Holdings (`earth_hold.dat`)
 - **Source Semantics:** ARINC 424 Section `E`, Subsection `P` (Enroute Holds) and Section `P`, Subsection `D`/`E`/`F`/`G` (Terminal/Approach Holds). Encodes holding fix, inbound course, turn direction (L/R), leg length/time, minimum/maximum altitudes, and maximum holding speed.
 - **X-Plane Representation:** `HOLD1140` format: `FixIdent Region Airport FixType InboundCourse LegTime LegDist TurnDirection MinAlt MaxAlt MaxSpeed` (e.g. `AE701 DA DAAE 11 171.0 1.0 0.0 R 5580 14000 230`).
-- **OpenAIRAC Current Status:** Modeled in `openairac-procedures` (`PathTerminator::HF`, `HA`, `HM`) and `FAACIFP18` Section `H ` (6,193 lines), but not exported as a standalone `earth_hold.dat` file.
+- **OpenAIRAC Current Status:** **IMPLEMENTED (v1.1.2+)**. Extracted from procedural holding legs (`HA`, `HF`, `HM`), deduplicated by `(fix_ident, fix_icao_code, airport_ident, course, turn)`, and serialized to `earth_hold.dat` (`HOLD1140` format) with 8,914 holding patterns across the NAS.
 - **Importance for 1.0:** **Medium**. FMS units parse procedural holds directly from `CIFP/<ICAO>.dat`; `earth_hold.dat` provides fallback holds for published enroute intersections.
-- **Source Available from Open Data:** **Yes (100% in FAA CIFP Section `H` and procedure legs)**.
-- **Action Recommendation:** **POST-1.0 / Candidate for v1.2**.
+- **Source Available from Open Data:** **Yes (100% in FAA CIFP procedure legs)**.
+- **Action Recommendation:** **SHIPPED**.
 
 ---
 
@@ -133,7 +133,7 @@ TOTAL CONVERTER-ONLY ROWS: 1,459
 | :--- | :--- | :--- | :--- | :--- |
 | **ILS LOC & GS Direct Decode** | `earth_nav.dat` Rows 4 & 6 | **SHIPPED (1.0)** | Low | FAA CIFP `PI` |
 | **LPV FAS Guidance** | `earth_nav.dat` Rows 14 & 16 | **SHIPPED (v1.1.0+)** | Medium | FAA CIFP `PP` |
-| **Procedural Holds** | `earth_hold.dat` | Post-1.0 (v1.2) | Low | FAA CIFP `H` |
+| **Procedural Holds** | `earth_hold.dat` | **SHIPPED (v1.1.2+)** | Low | FAA CIFP `H` / `HA,HF,HM` |
 | **Marker Beacons** | `earth_nav.dat` Rows 7, 8, 9 | Post-1.0 (v1.2) | Low | FAA CIFP `PM` |
 | **Airport Meta / Transitions**| `earth_aptmeta.dat` | Post-1.0 (v1.2) | Low | OurAirports / FAA |
 | **Minimum Sector Altitudes** | `earth_msa.dat` | Post-1.0 (v1.2) | Medium | FAA CIFP `PS` |
