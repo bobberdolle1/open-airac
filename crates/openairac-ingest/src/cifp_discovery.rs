@@ -76,8 +76,98 @@ pub fn discover_cifp_cycles() -> Result<Vec<DiscoveredCycle>> {
     Ok(parse_cifp_listing(&listing.raw_content))
 }
 
+/// Parse the authoritative effective interval from FAA CIFP Readme text.
+///
+/// Under ICAO Annex 15 and FAA Order 8260.19, the international standard
+/// AIRAC effective time is exactly `09:01:00Z` UTC (0901Z) on the effective date.
+/// The official FAA CIFP Readme publishes:
+/// ```text
+/// Effective:  0901Z
+/// 03 September 2026
+/// To:  0901Z
+/// 01 October 2026
+/// ```
+pub fn parse_cifp_readme_effective(content: &str) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+    let mut words = content.split_whitespace();
+    let mut eff_from: Option<DateTime<Utc>> = None;
+    let mut eff_until: Option<DateTime<Utc>> = None;
+
+    while let Some(w) = words.next() {
+        if w.eq_ignore_ascii_case("Effective:")
+            && let (Some(time_str), Some(day_str), Some(mon_str), Some(year_str)) =
+                (words.next(), words.next(), words.next(), words.next())
+        {
+            eff_from = parse_readme_date(time_str, day_str, mon_str, year_str);
+        } else if w.eq_ignore_ascii_case("To:")
+            && let (Some(time_str), Some(day_str), Some(mon_str), Some(year_str)) =
+                (words.next(), words.next(), words.next(), words.next())
+        {
+            eff_until = parse_readme_date(time_str, day_str, mon_str, year_str);
+        }
+    }
+
+    match (eff_from, eff_until) {
+        (Some(from), Some(until)) => Some((from, until)),
+        _ => None,
+    }
+}
+
+fn parse_readme_date(time_str: &str, day: &str, mon: &str, year: &str) -> Option<DateTime<Utc>> {
+    let t = time_str.trim_end_matches('Z').trim_end_matches('z');
+    if t.len() != 4 {
+        return None;
+    }
+    let hour: u32 = t[..2].parse().ok()?;
+    let min: u32 = t[2..].parse().ok()?;
+    let day: u32 = day.parse().ok()?;
+    let year: i32 = year.parse().ok()?;
+    let month: u32 = match mon.to_lowercase().as_str() {
+        "january" | "jan" => 1,
+        "february" | "feb" => 2,
+        "march" | "mar" => 3,
+        "april" | "apr" => 4,
+        "may" => 5,
+        "june" | "jun" => 6,
+        "july" | "jul" => 7,
+        "august" | "aug" => 8,
+        "september" | "sep" => 9,
+        "october" | "oct" => 10,
+        "november" | "nov" => 11,
+        "december" | "dec" => 12,
+        _ => return None,
+    };
+
+    use chrono::TimeZone;
+    Utc.with_ymd_and_hms(year, month, day, hour, min, 0)
+        .single()
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_parse_cifp_readme_effective_2609_golden() {
+        let readme = r#"
+FAA/Aeronautical Information Services CIFP Readme 
+ 
+Volume:  2609 
+ 
+Effective:  0901Z  
+03 September 2026 
+To:  0901Z  
+01 October 2026 
+ 
+Last Transmittal Letter:  31 July 2026 
+"#;
+        let (eff_from, eff_until) =
+            parse_cifp_readme_effective(readme).expect("should parse authoritative 2609 dates");
+        use chrono::TimeZone;
+        assert_eq!(eff_from, Utc.with_ymd_and_hms(2026, 9, 3, 9, 1, 0).unwrap());
+        assert_eq!(
+            eff_until,
+            Utc.with_ymd_and_hms(2026, 10, 1, 9, 1, 0).unwrap()
+        );
+    }
+
     use super::*;
 
     #[test]
