@@ -13,3 +13,11 @@ openairac-routing = { path = "../openairac-routing" }
 anyhow.workspace = true
 chrono.workspace = true
 serde.workspace = true
+
+[dev-dependencies]
+openairac-bundle = { path = "../openairac-bundle" }
+openairac-export-xplane = { path = "../openairac-export-xplane" }
+serde_json.workspace = true
+zip = "2.2"
+tempfile = "3.12"
+sha2.workspace = true

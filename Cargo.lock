@@ -1525,11 +1525,17 @@ version = "1.0.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "openairac-bundle",
+ "openairac-export-xplane",
  "openairac-model",
  "openairac-procedures",
  "openairac-routing",
  "openairac-store",
  "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "zip",
 ]
 
 [[package]]
