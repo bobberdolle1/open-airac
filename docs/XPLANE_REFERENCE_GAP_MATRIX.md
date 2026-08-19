@@ -113,10 +113,10 @@ TOTAL CONVERTER-ONLY ROWS: 1,459
 ### 3.7. Airport Operational Metadata (`earth_aptmeta.dat`)
 - **Source Semantics:** Transition Altitude (TA), Transition Level (TL), default speed restrictions (e.g. 250 KT below 10,000 FT).
 - **X-Plane Representation:** `AptXP1210` format: `Airport Region Lat Lon Elev Class SpeedLimit SpeedAlt TransAlt TransLevel` (e.g. `KSFO K2 37.619 -122.375 13 C 250 10000 18000 FL180`).
-- **OpenAIRAC Current Status:** Transition altitude/level modeled in `CanonicalAirport`, but file export not staged.
+- **OpenAIRAC Current Status:** **IMPLEMENTED (v1.1.3+)**. Modeled in `CanonicalAirport`, serialized to `earth_aptmeta.dat` (`AptXP1210` format) with geographic region derivation, runway lengths, IFR classification, and transition altitudes (99.92% exact field match on 18,078 airports).
 - **Importance for 1.0:** **Medium**. Used by default X-Plane ATC and FMS VNAV descent profiling.
 - **Source Available from Open Data:** **Yes (OurAirports + FAA CIFP `PA` records)**.
-- **Action Recommendation:** **POST-1.0 / Candidate for v1.2**.
+- **Action Recommendation:** **SHIPPED**.
 
 ---
 
@@ -135,7 +135,7 @@ TOTAL CONVERTER-ONLY ROWS: 1,459
 | **LPV FAS Guidance** | `earth_nav.dat` Rows 14 & 16 | **SHIPPED (v1.1.0+)** | Medium | FAA CIFP `PP` |
 | **Procedural Holds** | `earth_hold.dat` | **SHIPPED (v1.1.2+)** | Low | FAA CIFP `H` / `HA,HF,HM` |
 | **Marker Beacons** | `earth_nav.dat` Rows 7, 8, 9 | Post-1.0 (v1.2) | Low | FAA CIFP `PM` |
-| **Airport Meta / Transitions**| `earth_aptmeta.dat` | Post-1.0 (v1.2) | Low | OurAirports / FAA |
+| **Airport Meta / Transitions**| `earth_aptmeta.dat` | **SHIPPED (v1.1.3+)** | Low | OurAirports / FAA |
 | **Minimum Sector Altitudes** | `earth_msa.dat` | Post-1.0 (v1.2) | Medium | FAA CIFP `PS` |
 | **GLS / GBAS Stations** | `earth_nav.dat` Row 15 | Post-1.0 (v1.2) | Medium | Open-AIP / NASR |
 | **Grid MORA Matrix** | `earth_mora.dat` | Post-1.0 (v1.2) | Low | DEM Calculation |

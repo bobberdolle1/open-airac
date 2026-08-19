@@ -532,6 +532,7 @@ pub mod registry {
                         "earth_nav.dat".to_string(),
                         "earth_awy.dat".to_string(),
                         "earth_hold.dat".to_string(),
+                        "earth_aptmeta.dat".to_string(),
                     ],
                     optional_artifacts: vec![],
                     version_constraints: vec![VersionConstraint {
@@ -546,6 +547,7 @@ pub mod registry {
                             "earth_nav.dat".to_string(),
                             "earth_awy.dat".to_string(),
                             "earth_hold.dat".to_string(),
+                            "earth_aptmeta.dat".to_string(),
                         ],
                         identity_file: "openairac_layer.json".to_string(),
                     },
@@ -595,6 +597,7 @@ pub mod registry {
                         "earth_nav.dat".to_string(),
                         "earth_awy.dat".to_string(),
                         "earth_hold.dat".to_string(),
+                        "earth_aptmeta.dat".to_string(),
                     ],
                     optional_artifacts: vec![],
                     version_constraints: vec![VersionConstraint {
@@ -608,6 +611,7 @@ pub mod registry {
                             "earth_nav.dat".to_string(),
                             "earth_awy.dat".to_string(),
                             "earth_hold.dat".to_string(),
+                            "earth_aptmeta.dat".to_string(),
                         ],
                         identity_file: "openairac_layer.json".to_string(),
                     },

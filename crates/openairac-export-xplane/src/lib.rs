@@ -43,6 +43,7 @@ pub struct ExportReport {
     pub navaids_written: usize,
     pub lpv_fas_written: usize,
     pub holds_written: usize,
+    pub airports_meta_written: usize,
     /// Airway LEGS accepted for the layer (before merging).
     pub airway_legs_accepted: usize,
     /// Physical merged segment rows written to `earth_awy.dat`. This is the
@@ -192,6 +193,53 @@ impl ExportedEntityIndex {
 }
 
 pub struct XPlane12Exporter;
+
+/// Derive standard ICAO / FAA region code from airport location & identifier.
+pub fn derive_airport_region(lat: f64, lon: f64, ident: &str, country: &str) -> &'static str {
+    if country == "CA" || (ident.starts_with('C') && ident.len() == 4) {
+        return "CY";
+    }
+    if country == "MX" || (ident.starts_with('M') && ident.len() == 4) {
+        return "MM";
+    }
+    if ident.starts_with("PA")
+        || ident.starts_with("PF")
+        || ident.starts_with("PO")
+        || ident.starts_with("PP")
+    {
+        return "PA";
+    }
+    if ident.starts_with("PH") {
+        return "PH";
+    }
+    if ident.starts_with("TJ") || ident.starts_with("MD") {
+        return "PR";
+    }
+    if lat >= 50.0 && lon <= -130.0 {
+        return "PA";
+    }
+    if lat <= 25.0 && lon <= -150.0 {
+        return "PH";
+    }
+    if lat <= 20.0 && lon >= -70.0 {
+        return "PR";
+    }
+
+    // Continental United States
+    if lon <= -104.0 {
+        if lat >= 42.0 { "K1" } else { "K2" }
+    } else if lon <= -89.0 {
+        if lat >= 37.0 { "K3" } else { "K4" }
+    } else {
+        if lat >= 40.0 && lon <= -80.5 {
+            "K5"
+        } else if lat >= 37.0 {
+            "K6"
+        } else {
+            "K7"
+        }
+    }
+}
 
 impl XPlane12Exporter {
     /// Export waypoints into `earth_fix.dat` (FIX1200).
@@ -679,7 +727,82 @@ impl XPlane12Exporter {
         Ok(())
     }
 
-    /// Full export from the temporal store: query at `date`, stage the four
+    /// Export airport operational metadata into `earth_aptmeta.dat` (AptXP1210).
+    ///
+    /// Row format:
+    /// `Airport Region Lat Lon Elev Class LongestRunway IFR TransAlt TransLevel`
+    /// e.g. `KSFO K2  37.618805556 -122.375416667    13 C 11800 I 18000 FL180`
+    pub fn export_earth_aptmeta<W: Write>(
+        airports: &[CanonicalAirport],
+        cycle: &str,
+        build_date: &str,
+        mut writer: W,
+        report: &mut ExportReport,
+    ) -> Result<()> {
+        write_header(&mut writer, "1210", "AptXP1210.", cycle, build_date)?;
+
+        let mut sorted: Vec<&CanonicalAirport> = airports.iter().collect();
+        sorted.sort_by_key(|a| a.ident.clone());
+
+        for airport in sorted {
+            let ident = airport.ident.trim();
+            if ident.is_empty() {
+                continue;
+            }
+            let region = derive_airport_region(
+                airport.latitude,
+                airport.longitude,
+                ident,
+                airport.iso_country.as_deref().unwrap_or("US"),
+            );
+
+            let elev = airport.elevation_ft.unwrap_or(0.0).round() as i32;
+            let class = match airport.airport_type.as_str() {
+                "military" => "M",
+                "closed" | "seaplane_base" => "P",
+                _ => "C",
+            };
+
+            let longest_rwy = airport
+                .runways
+                .iter()
+                .map(|r| r.length_ft)
+                .max()
+                .unwrap_or(0);
+
+            let ifr = if airport.runways.iter().any(|r| r.length_ft >= 3000)
+                || !airport.runways.is_empty()
+            {
+                "I"
+            } else {
+                "0"
+            };
+
+            let trans_alt = 18000;
+            let trans_lvl = "FL180";
+
+            writeln!(
+                writer,
+                "{:>4} {:<2} {:>13.9} {:>14.9} {:>5} {} {:>5} {:<1} {:>5} {}",
+                ident,
+                region,
+                airport.latitude,
+                airport.longitude,
+                elev,
+                class,
+                longest_rwy,
+                ifr,
+                trans_alt,
+                trans_lvl,
+            )?;
+            report.airports_meta_written += 1;
+        }
+
+        writeln!(writer, "99")?;
+        Ok(())
+    }
+
+    /// Full export from the temporal store: query at `date`, stage the five
     /// dat files plus a manifest next to `out_dir`, validate, swap in.
     pub fn export_from_db<P: AsRef<Path>>(
         store: &WorldStore,
@@ -695,6 +818,7 @@ impl XPlane12Exporter {
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."));
 
+        let airports = store.query_airports_at(date)?;
         let waypoints = store.query_waypoints_at(date)?;
         let navaids = store.query_navaids_at(date)?;
         let airway_legs = store.query_airway_legs_at(date)?;
@@ -712,6 +836,7 @@ impl XPlane12Exporter {
         let staged_nav = staging.join("earth_nav.dat");
         let staged_awy = staging.join("earth_awy.dat");
         let staged_hold = staging.join("earth_hold.dat");
+        let staged_aptmeta = staging.join("earth_aptmeta.dat");
         let staged_manifest = staging.join("manifest.json");
 
         let fix_file = std::fs::File::create(&staged_fix)
@@ -749,6 +874,9 @@ impl XPlane12Exporter {
         let hold_file = std::fs::File::create(&staged_hold)
             .with_context(|| format!("creating staged {:?}", staged_hold))?;
         Self::export_earth_hold(&procedure_legs, &cycle, &build_date, hold_file, &mut report)?;
+        let aptmeta_file = std::fs::File::create(&staged_aptmeta)
+            .with_context(|| format!("creating staged {:?}", staged_aptmeta))?;
+        Self::export_earth_aptmeta(&airports, &cycle, &build_date, aptmeta_file, &mut report)?;
 
         // X-Plane loads the layer as a unit: an incomplete layer (missing
         // or empty file) destroys referential integrity on install.
@@ -788,6 +916,7 @@ impl XPlane12Exporter {
                 manifest_file_entry(&staged_nav, report.navaids_written)?,
                 manifest_file_entry(&staged_awy, report.airway_rows_written)?,
                 manifest_file_entry(&staged_hold, report.holds_written)?,
+                manifest_file_entry(&staged_aptmeta, report.airports_meta_written)?,
             ],
             allow_empty,
             world_fingerprint: Some(world_fingerprint),
@@ -799,6 +928,7 @@ impl XPlane12Exporter {
         swap_file(&staged_nav, &dir.join("earth_nav.dat"))?;
         swap_file(&staged_awy, &dir.join("earth_awy.dat"))?;
         swap_file(&staged_hold, &dir.join("earth_hold.dat"))?;
+        swap_file(&staged_aptmeta, &dir.join("earth_aptmeta.dat"))?;
         swap_file(&staged_manifest, &dir.join("manifest.json"))?;
         let _ = std::fs::remove_dir_all(&staging);
 
@@ -3103,5 +3233,80 @@ I
             ]
         );
         assert_eq!(lines[5], "99");
+    }
+
+    #[test]
+    fn test_export_earth_aptmeta_golden() {
+        let rwy = CanonicalRunway {
+            id: RunwayId("rwy-1".to_string()),
+            airport_id: AirportId("ap-1".to_string()),
+            airport_ident: "KSFO".to_string(),
+            official_designator: "28R".to_string(),
+            computed_magnetic_designator: None,
+            true_heading_deg: None,
+            length_ft: 11870,
+            width_ft: None,
+            surface: None,
+            le_ident: "28R".to_string(),
+            le_lat: 37.6188,
+            le_lon: -122.375,
+            le_elevation_ft: None,
+            he_ident: "10L".to_string(),
+            he_lat: 37.614,
+            he_lon: -122.39,
+            he_elevation_ft: None,
+            temporal: TemporalValidity {
+                valid_from: Utc::now(),
+                valid_until: None,
+                source_snapshot_id: SourceSnapshotId("snap-1".to_string()),
+            },
+        };
+
+        let ap = CanonicalAirport {
+            id: AirportId("ap-1".to_string()),
+            ident: "KSFO".to_string(),
+            name: "San Francisco International Airport".to_string(),
+            airport_type: "large_airport".to_string(),
+            latitude: 37.618805556,
+            longitude: -122.375416667,
+            elevation_ft: Some(13.0),
+            iso_country: Some("US".to_string()),
+            municipality: Some("San Francisco".to_string()),
+            runways: vec![rwy],
+            temporal: TemporalValidity {
+                valid_from: Utc::now(),
+                valid_until: None,
+                source_snapshot_id: SourceSnapshotId("snap-1".to_string()),
+            },
+        };
+
+        let mut report = ExportReport::default();
+        let mut buf = Vec::new();
+        XPlane12Exporter::export_earth_aptmeta(&[ap], "2609", "20260903", &mut buf, &mut report)
+            .unwrap();
+
+        assert_eq!(report.airports_meta_written, 1);
+
+        let text = String::from_utf8(buf).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines[0], "I");
+        assert!(lines[1].starts_with("1210 Version"));
+
+        assert_eq!(
+            lines[3].split_whitespace().collect::<Vec<&str>>(),
+            vec![
+                "KSFO",
+                "K2",
+                "37.618805556",
+                "-122.375416667",
+                "13",
+                "C",
+                "11870",
+                "I",
+                "18000",
+                "FL180"
+            ]
+        );
+        assert_eq!(lines[4], "99");
     }
 }

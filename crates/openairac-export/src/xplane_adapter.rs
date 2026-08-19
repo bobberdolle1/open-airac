@@ -204,12 +204,13 @@ mod tests {
         let out = dir.join("layer");
         let set = XPlaneDatExporter.export(&store, Utc::now(), &out).unwrap();
         assert_eq!(set.family.as_str(), "xplane-dat");
-        assert_eq!(set.artifacts.len(), 4);
+        assert_eq!(set.artifacts.len(), 5);
         let names: Vec<&str> = set.artifacts.iter().map(|a| a.path.as_str()).collect();
         assert!(names.contains(&"earth_fix.dat"));
         assert!(names.contains(&"earth_nav.dat"));
         assert!(names.contains(&"earth_awy.dat"));
         assert!(names.contains(&"earth_hold.dat"));
+        assert!(names.contains(&"earth_aptmeta.dat"));
         set.verify(&out).unwrap();
         // Tamper -> verify fails.
         std::fs::write(out.join("earth_nav.dat"), "tampered\n").unwrap();
@@ -225,7 +226,7 @@ mod tests {
         let installer = XPlaneTargetInstaller::new(target.clone());
         let root = dir.join("custom_data");
         let report = installer.install(&out, &set, &root).unwrap();
-        assert_eq!(report.installed.len(), 5); // 4 dat files + identity
+        assert_eq!(report.installed.len(), 6); // 5 dat files + identity
         let resolved = resolve_xplane_target(&root).unwrap();
         assert_eq!(
             resolved.verdict,
