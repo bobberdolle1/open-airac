@@ -2131,7 +2131,7 @@ mod tests {
         let content = String::from_utf8(buf).unwrap();
         let expected = "\
 I
-1200 Version - data cycle 2608, build 20260806, metadata FixXP1200. OpenAIRAC 0.2.0
+1200 Version - data cycle 2608, build 20260806, metadata FixXP1200. OpenAIRAC 1.0.0
 
 37.770908333 -122.082811111 AAAME ENRT K2 4530263 AAAME
 32.693963889 -78.051294444 AAARG ENRT K  2105431 AAARG
@@ -2545,7 +2545,7 @@ I
             content_sha256: "hash".to_string(),
             license_id: None,
             license_notes: None,
-            parser_version: "0.2.0".to_string(),
+            parser_version: "1.0.0".to_string(),
         };
         let mut store = store;
         let mut n = navaid("SFO", NavaidKind::Vordme, 115_800, Some("K2"));

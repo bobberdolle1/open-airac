@@ -69,6 +69,18 @@ impl FormatExporter for LnmNavdataExporter {
             rusqlite::params![as_of.timestamp()],
         )?;
 
+        // metadata: required for Little Navmap database compatibility.
+        let cycle_str = openairac_export_xplane::airac_cycle(as_of);
+        conn.execute(
+            "INSERT INTO metadata (db_version_major, db_version_minor, last_load_timestamp,
+                has_sid_star, airac_cycle, valid_through, data_source, compiler_version, properties)
+             VALUES (14, 29, ?1, 1, ?2, NULL, 'OPENAIRAC', ?3, NULL)",
+            rusqlite::params![
+                as_of.to_rfc3339(),
+                cycle_str,
+                format!("OpenAIRAC {}", env!("CARGO_PKG_VERSION")),
+            ],
+        )?;
         let tx = conn.transaction()?;
         {
             // Airports + runways + runway ends.
@@ -189,17 +201,20 @@ impl FormatExporter for LnmNavdataExporter {
 
             // Waypoints (named fixes).
             let mut wp_id_counter = 0i64;
+            let mut wp_map: std::collections::HashMap<String, i64> =
+                std::collections::HashMap::new();
             for wp in &waypoints {
                 if wp.ident.chars().all(|c| c.is_ascii_digit()) {
                     continue;
                 }
+                let id = wp_id_counter + 1;
                 tx.execute(
                     "INSERT INTO waypoint (waypoint_id, file_id, nav_id, ident, name, region,
                         airport_id, airport_ident, artificial, type, arinc_type,
                         num_victor_airway, num_jet_airway, mag_var, lonx, laty)
                      VALUES (?1, 1, NULL, ?2, ?3, ?4, NULL, ?5, NULL, 'WN', NULL, 0, 0, 0.0, ?6, ?7)",
                     rusqlite::params![
-                        wp_id_counter + 1,
+                        id,
                         wp.ident,
                         wp.name,
                         wp.region_code,
@@ -208,10 +223,9 @@ impl FormatExporter for LnmNavdataExporter {
                         wp.latitude,
                     ],
                 )?;
+                wp_map.insert(wp.ident.clone(), id);
                 wp_id_counter += 1;
             }
-
-            // VORs / NDBs.
             let mut vor_id_counter = 0i64;
             let mut ndb_id_counter = 0i64;
             for nav in &navaids {
@@ -329,10 +343,9 @@ impl FormatExporter for LnmNavdataExporter {
             for (name, mut legs) in routes {
                 legs.sort_by_key(|l| l.sequence_number);
                 for (i, leg) in legs.iter().enumerate() {
-                    let (Some(from_id), Some(to_id)) = (
-                        waypoint_id(&tx, &leg.start_fix),
-                        waypoint_id(&tx, &leg.end_fix),
-                    ) else {
+                    let (Some(&from_id), Some(&to_id)) =
+                        (wp_map.get(&leg.start_fix), wp_map.get(&leg.end_fix))
+                    else {
                         continue; // referential integrity: skip unresolved
                     };
                     let atype = match leg.route_type.as_str() {
@@ -412,15 +425,6 @@ impl FormatExporter for LnmNavdataExporter {
             ],
         })
     }
-}
-
-fn waypoint_id(tx: &rusqlite::Transaction, ident: &str) -> Option<i64> {
-    tx.query_row(
-        "SELECT waypoint_id FROM waypoint WHERE ident = ?1 LIMIT 1",
-        rusqlite::params![ident],
-        |r| r.get(0),
-    )
-    .ok()
 }
 
 /// Create the Little Navmap nav database schema (interface contract
@@ -555,6 +559,17 @@ CREATE TABLE parking (parking_id integer primary key);
 CREATE TABLE start (start_id integer primary key);
 CREATE TABLE helipad (helipad_id integer primary key);
 CREATE TABLE taxi_path (taxi_path_id integer primary key);
+CREATE TABLE metadata (
+  db_version_major integer not null,
+  db_version_minor integer not null,
+  last_load_timestamp varchar(30),
+  has_sid_star integer,
+  airac_cycle varchar(10),
+  valid_through varchar(30),
+  data_source varchar(50),
+  compiler_version varchar(100),
+  properties varchar(255)
+);
 "#,
     )?;
     Ok(())
