@@ -19,10 +19,10 @@ This gap matrix characterises every auxiliary dataset and extended row type disc
 - **X-Plane Representation:** 
   - **Row 14 (LPV FAS):** `14 lat lon elev channel 0.0 bearing ident airport region runway LPV` (e.g. `14 28.635934028 -17.755792917 104 47264 0.0 359.019 R36-Z GCLA GC 36 LPV`)
   - **Row 16 (LPV Threshold):** `16 lat lon elev channel tch_ft angle_bearing ident airport region approach_id` (e.g. `16 28.617376389 -17.755430694 104 47264 49.2 300359.019 R36-Z GCLA GC 36 E36A`)
-- **OpenAIRAC Current Status:** Ingested in `openairac-ingest` (`PP` records present in `FAACIFP18` with 9,810 lines), but not yet serialized into `earth_nav.dat` rows 14/16.
-- **Importance for 1.0:** **High / Essential for GPS/WAAS Approaches**. Without rows 14 and 16, GPS receivers in X-Plane 12 (G1000, G530, Primus Epic) downgrade LPV approaches to LNAV/VNAV or LNAV minima.
+- **OpenAIRAC Current Status:** **IMPLEMENTED (v1.1.0+)**. Decoded from primary and continuation `PP` records in `openairac-ingest`, modeled in `CanonicalLpvFas` with temporal migration `v11_lpv_fas.sql`, and serialized to `earth_nav.dat` rows 14 & 16 with sub-millidegree precision (100% channel and app type agreement on 4,709 golden approaches).
+- **Importance for 1.0:** **High / Essential for GPS/WAAS Approaches**.
 - **Source Available from Open Data:** **Yes (100% in FAA CIFP `PP` records)**.
-- **Action Recommendation:** **IMPLEMENT FOR 1.0** (Add Row 14/16 formatter in `openairac-export-xplane`).
+- **Action Recommendation:** **SHIPPED**.
 
 ---
 
@@ -94,7 +94,7 @@ This gap matrix characterises every auxiliary dataset and extended row type disc
 | Feature | File / Row | 1.0 Release Verdict | Complexity | Open Source Provider |
 | :--- | :--- | :--- | :--- | :--- |
 | **ILS LOC & GS Direct Decode** | `earth_nav.dat` Rows 4 & 6 | **SHIPPED (1.0)** | Low | FAA CIFP `PI` |
-| **LPV FAS Guidance** | `earth_nav.dat` Rows 14 & 16 | **Candidate for 1.0** | Medium | FAA CIFP `PP` |
+| **LPV FAS Guidance** | `earth_nav.dat` Rows 14 & 16 | **SHIPPED (v1.1.0+)** | Medium | FAA CIFP `PP` |
 | **Procedural Holds** | `earth_hold.dat` | Post-1.0 (v1.1) | Low | FAA CIFP `H` |
 | **Marker Beacons** | `earth_nav.dat` Rows 7, 8, 9 | Post-1.0 (v1.1) | Low | FAA CIFP `PM` |
 | **Airport Meta / Transitions**| `earth_aptmeta.dat` | Post-1.0 (v1.1) | Low | OurAirports / FAA |

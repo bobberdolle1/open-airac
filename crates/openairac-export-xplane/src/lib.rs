@@ -41,6 +41,7 @@ pub struct ExportReport {
     /// Physical rows serialized into the staged files.
     pub fixes_written: usize,
     pub navaids_written: usize,
+    pub lpv_fas_written: usize,
     /// Airway LEGS accepted for the layer (before merging).
     pub airway_legs_accepted: usize,
     /// Physical merged segment rows written to `earth_awy.dat`. This is the
@@ -262,9 +263,73 @@ impl XPlane12Exporter {
     ///
     /// Rows are emitted sorted by row code, which satisfies the spec's
     /// ordering constraints (glideslopes after localizers, DME after VORs).
+    fn write_fpap<W: Write>(
+        &self,
+        record: &CanonicalLpvFas,
+        mut writer: W,
+        report: &mut ExportReport,
+    ) -> Result<()> {
+        writeln!(
+            writer,
+            "14 {:>14.9} {:>15.9} {:>8} {:>8} {:>6.1} {:>10.3} {:>4} {:<4} {:<2} {:<3} {:<6}",
+            record.fpap_latitude,
+            record.fpap_longitude,
+            record.elevation_ft,
+            record.gnss_channel,
+            record.length_offset_m,
+            record.bearing_true_deg,
+            record.approach_ident,
+            record.airport_ident,
+            record.icao_code,
+            record.runway_ident,
+            record.app_type,
+        )?;
+        report.lpv_fas_written += 1;
+        report.navaids_written += 1;
+        Ok(())
+    }
+
+    fn write_ltp<W: Write>(
+        &self,
+        record: &CanonicalLpvFas,
+        mut writer: W,
+        report: &mut ExportReport,
+    ) -> Result<()> {
+        let angle_course = if record.gpa_deg > 0.0 {
+            (record.gpa_deg * 100.0).round() * 1000.0 + record.bearing_true_deg
+        } else {
+            record.bearing_true_deg
+        };
+        writeln!(
+            writer,
+            "16 {:>14.9} {:>15.9} {:>8} {:>8} {:>5.1} {:>10.3} {:>4} {:<4} {:<2} {:<3} {:<4}",
+            record.ltp_latitude,
+            record.ltp_longitude,
+            record.elevation_ft,
+            record.gnss_channel,
+            record.tch_ft,
+            angle_course,
+            record.approach_ident,
+            record.airport_ident,
+            record.icao_code,
+            record.runway_ident,
+            record.ref_path_ident,
+        )?;
+        report.lpv_fas_written += 1;
+        report.navaids_written += 1;
+        Ok(())
+    }
+
+    /// Export navaids into `earth_nav.dat` (NAV1200).
+    ///
+    /// Rows are emitted sorted by row code, which satisfies the spec's
+    /// ordering constraints (glideslopes after localizers, DME after VORs,
+    /// LTP row 16 after FPAP row 14).
+    #[allow(clippy::too_many_arguments)]
     pub fn export_earth_nav<W: Write>(
         &self,
         navaids: &[CanonicalNavaid],
+        lpv_fas: &[CanonicalLpvFas],
         cycle: &str,
         build_date: &str,
         mut writer: W,
@@ -318,6 +383,24 @@ impl XPlane12Exporter {
                     format!("unexportable navaid kind {}", nav.kind.as_str()),
                 ),
             }
+        }
+
+        // Row 14 (FPAP) and Row 16 (LTP) for SBAS / LPV approach path points.
+        // Emitting 14 then 16 satisfies the NAV1200 spec requirement:
+        // "LTP/FTP records must come later in the file than their associated FPAP".
+        let mut sorted_lpv: Vec<&CanonicalLpvFas> = lpv_fas.iter().collect();
+        sorted_lpv.sort_by_key(|f| {
+            (
+                f.airport_ident.clone(),
+                f.runway_ident.clone(),
+                f.ref_path_ident.clone(),
+            )
+        });
+        for fas in &sorted_lpv {
+            self.write_fpap(fas, &mut writer, report)?;
+        }
+        for fas in &sorted_lpv {
+            self.write_ltp(fas, &mut writer, report)?;
         }
 
         writeln!(writer, "99")?;
@@ -514,6 +597,7 @@ impl XPlane12Exporter {
         let waypoints = store.query_waypoints_at(date)?;
         let navaids = store.query_navaids_at(date)?;
         let airway_legs = store.query_airway_legs_at(date)?;
+        let lpv_fas = store.query_lpv_fas_at(date).unwrap_or_default();
 
         let mut report = ExportReport::default();
         let mut index = ExportedEntityIndex::default();
@@ -542,6 +626,7 @@ impl XPlane12Exporter {
             .with_context(|| format!("creating staged {:?}", staged_nav))?;
         XPlane12Exporter.export_earth_nav(
             &navaids,
+            &lpv_fas,
             &cycle,
             &build_date,
             nav_file,
@@ -1962,6 +2047,7 @@ mod tests {
         XPlane12Exporter
             .export_earth_nav(
                 &with_gs,
+                &[],
                 "2608",
                 "20260806",
                 &mut out,
@@ -1981,6 +2067,7 @@ mod tests {
         XPlane12Exporter
             .export_earth_nav(
                 &without_gs,
+                &[],
                 "2608",
                 "20260806",
                 &mut out2,
@@ -2003,6 +2090,7 @@ mod tests {
         XPlane12Exporter
             .export_earth_nav(
                 &[bare_loc, bare_dme],
+                &[],
                 "2608",
                 "20260806",
                 &mut out3,
@@ -2201,6 +2289,7 @@ I
         XPlane12Exporter
             .export_earth_nav(
                 &[sea, sea_dme],
+                &[],
                 "2608",
                 "20260806",
                 &mut buf,
@@ -2280,6 +2369,7 @@ I
         XPlane12Exporter
             .export_earth_nav(
                 &[nav],
+                &[],
                 "2608",
                 "20260806",
                 &mut buf,
@@ -2298,6 +2388,7 @@ I
         XPlane12Exporter
             .export_earth_nav(
                 &[nav2],
+                &[],
                 "2608",
                 "20260806",
                 &mut buf2,
@@ -2315,6 +2406,7 @@ I
         XPlane12Exporter
             .export_earth_nav(
                 &[nav3],
+                &[],
                 "2608",
                 "20260806",
                 &mut buf3,
@@ -2372,6 +2464,7 @@ I
         XPlane12Exporter
             .export_earth_nav(
                 &[ndb, vhf],
+                &[],
                 "2608",
                 "20260806",
                 &mut nav_buf,
@@ -2454,6 +2547,7 @@ I
         XPlane12Exporter
             .export_earth_nav(
                 &[nav],
+                &[],
                 "2608",
                 "20260806",
                 &mut nav_buf,
@@ -2492,6 +2586,7 @@ I
         XPlane12Exporter
             .export_earth_nav(
                 &[dme],
+                &[],
                 "2608",
                 "20260806",
                 &mut nav_buf,
@@ -2544,6 +2639,7 @@ I
         XPlane12Exporter
             .export_earth_nav(
                 &[loc],
+                &[],
                 "2608",
                 "20260806",
                 &mut buf,
@@ -2583,6 +2679,7 @@ I
         XPlane12Exporter
             .export_earth_nav(
                 &[loc, gs],
+                &[],
                 "2608",
                 "20260806",
                 &mut buf,
@@ -2702,5 +2799,94 @@ I
             );
         }
         let _ = std::fs::remove_dir_all(&out_dir);
+    }
+
+    #[test]
+    fn test_lpv_fas_rows_14_and_16_export_golden() {
+        let fas = CanonicalLpvFas {
+            object_id: LpvFasId("faa:PP:K1:00U:RW26:W26A".to_string()),
+            airport_ident: "00U".to_string(),
+            icao_code: "K1".to_string(),
+            approach_ident: "R26".to_string(),
+            runway_ident: "26".to_string(),
+            ref_path_ident: "W26A".to_string(),
+            gnss_channel: 65644,
+            app_type: "LPV".to_string(),
+            ltp_latitude: 45.744409444,
+            ltp_longitude: -107.651660694,
+            fpap_latitude: 45.744372361,
+            fpap_longitude: -107.687001667,
+            bearing_true_deg: 269.927,
+            elevation_ft: 3004,
+            length_offset_m: 1384.0,
+            tch_ft: 40.0,
+            gpa_deg: 3.00,
+            temporal: TemporalValidity {
+                valid_from: Utc::now(),
+                valid_until: None,
+                source_snapshot_id: SourceSnapshotId("snap-test".to_string()),
+            },
+        };
+
+        let mut report = ExportReport::default();
+        let mut buf = Vec::new();
+        XPlane12Exporter
+            .export_earth_nav(
+                &[],
+                &[fas],
+                "2609",
+                "20260903",
+                &mut buf,
+                &mut report,
+                &mut ExportedEntityIndex::default(),
+            )
+            .unwrap();
+
+        assert_eq!(report.lpv_fas_written, 2);
+        assert_eq!(report.navaids_written, 2);
+
+        let text = String::from_utf8(buf).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines[0], "I");
+        assert!(lines[1].starts_with("1200 Version"));
+
+        let row14_tokens: Vec<&str> = lines[3].split_whitespace().collect();
+        assert_eq!(
+            row14_tokens,
+            vec![
+                "14",
+                "45.744372361",
+                "-107.687001667",
+                "3004",
+                "65644",
+                "1384.0",
+                "269.927",
+                "R26",
+                "00U",
+                "K1",
+                "26",
+                "LPV"
+            ]
+        );
+
+        let row16_tokens: Vec<&str> = lines[4].split_whitespace().collect();
+        assert_eq!(
+            row16_tokens,
+            vec![
+                "16",
+                "45.744409444",
+                "-107.651660694",
+                "3004",
+                "65644",
+                "40.0",
+                "300269.927",
+                "R26",
+                "00U",
+                "K1",
+                "26",
+                "W26A"
+            ]
+        );
+        assert_eq!(lines[5], "99");
     }
 }

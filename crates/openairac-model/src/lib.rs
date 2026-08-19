@@ -23,6 +23,9 @@ pub struct SourceSnapshotId(pub String);
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct WorldRevisionId(pub String);
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct LpvFasId(pub String);
+
 /// Frequency wrapper with explicit units (kHz)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrequencyKhz(pub u32);
@@ -88,6 +91,29 @@ pub struct CanonicalWaypoint {
     /// ARINC 424-18 field 5.42 (3 columns, cols 27-29) encoded as a
     /// little-endian u32 with the 4th byte 0 (X-Plane FIX1200 waypoint type).
     pub waypoint_type: Option<u32>,
+    pub temporal: TemporalValidity,
+}
+
+/// Canonical LPV/LP Final Approach Segment (FAS) data (ARINC 424 PP Path Point records)
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CanonicalLpvFas {
+    pub object_id: LpvFasId,
+    pub airport_ident: String,
+    pub icao_code: String,
+    pub approach_ident: String,
+    pub runway_ident: String,
+    pub ref_path_ident: String,
+    pub gnss_channel: u32,
+    pub app_type: String,
+    pub ltp_latitude: f64,
+    pub ltp_longitude: f64,
+    pub fpap_latitude: f64,
+    pub fpap_longitude: f64,
+    pub bearing_true_deg: f64,
+    pub elevation_ft: i32,
+    pub length_offset_m: f64,
+    pub tch_ft: f64,
+    pub gpa_deg: f64,
     pub temporal: TemporalValidity,
 }
 
@@ -310,6 +336,7 @@ pub struct StoreStatus {
     pub total_waypoints: usize,
     pub total_airway_legs: usize,
     pub total_procedure_legs: usize,
+    pub total_lpv_fas: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -666,6 +693,7 @@ pub const PROVIDER_MANIFESTS: &[ProviderManifest] = &[
                 "navaids",
                 "airway_legs",
                 "procedure_legs",
+                "lpv_fas",
             ],
         }],
     },

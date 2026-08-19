@@ -40,7 +40,7 @@
 //! - Terminal waypoints (`PC`) are not emitted for US airspace in CIFP;
 //!   terminal procedures (PD/PE/PF) are future work.
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
 use openairac_model::*;
 use openairac_store::WorldStore;
@@ -183,6 +183,55 @@ fn parse_altitude_ft(field: &str) -> Option<u32> {
         return None;
     }
     s.parse::<u32>().ok().filter(|v| *v > 0)
+}
+
+/// High-resolution ARINC 424 Path Point latitude (11 chars: NDDMMSSSSSS) -> decimal.
+fn parse_path_point_lat(s: &str) -> Result<f64> {
+    let s = s.trim();
+    if s.len() < 7 {
+        anyhow::bail!("invalid PP latitude: '{s}'");
+    }
+    let sign = if s.starts_with('N') || s.starts_with('+') {
+        1.0
+    } else {
+        -1.0
+    };
+    let deg: f64 = s[1..3].parse().context("PP lat degrees")?;
+    let min: f64 = s[3..5].parse().context("PP lat minutes")?;
+    let sec: f64 = format!("{}.{}", &s[5..7], &s[7..])
+        .parse()
+        .context("PP lat seconds")?;
+    Ok(sign * (deg + min / 60.0 + sec / 3600.0))
+}
+
+/// High-resolution ARINC 424 Path Point longitude (12 chars: WDDDMMSSSSSS) -> decimal.
+fn parse_path_point_lon(s: &str) -> Result<f64> {
+    let s = s.trim();
+    if s.len() < 8 {
+        anyhow::bail!("invalid PP longitude: '{s}'");
+    }
+    let sign = if s.starts_with('E') || s.starts_with('+') {
+        1.0
+    } else {
+        -1.0
+    };
+    let deg: f64 = s[1..4].parse().context("PP lon degrees")?;
+    let min: f64 = s[4..6].parse().context("PP lon minutes")?;
+    let sec: f64 = format!("{}.{}", &s[6..8], &s[8..])
+        .parse()
+        .context("PP lon seconds")?;
+    Ok(sign * (deg + min / 60.0 + sec / 3600.0))
+}
+
+/// Initial geodesic bearing from point 1 to point 2, in true degrees [0, 360).
+pub fn geodesic_bearing_deg(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
+    let phi1 = lat1.to_radians();
+    let phi2 = lat2.to_radians();
+    let delta_lambda = (lon2 - lon1).to_radians();
+    let y = delta_lambda.sin() * phi2.cos();
+    let x = phi1.cos() * phi2.sin() - phi1.sin() * phi2.cos() * delta_lambda.cos();
+    let theta = y.atan2(x);
+    (theta.to_degrees() + 360.0).rem_euclid(360.0)
 }
 
 // ---------------------------------------------------------------------------
@@ -347,6 +396,28 @@ pub enum CifpRecord {
         length_ft: u32,
         le_lat: f64,
         le_lon: f64,
+    },
+    PathPoint {
+        record_type: String,
+        airport_ident: String,
+        icao_code: String,
+        approach_ident: String,
+        runway_ident: String,
+        continuation: char,
+        ref_path_ident: String,
+        ltp_latitude_deg: f64,
+        ltp_longitude_deg: f64,
+        ltp_ellipsoid_height_m: f64,
+        gpa_deg: f64,
+        fpap_latitude_deg: f64,
+        fpap_longitude_deg: f64,
+        length_offset_m: f64,
+        tch_ft: f64,
+        fpap_ortho_height_m: Option<f64>,
+        ltp_ortho_height_m: Option<f64>,
+        app_type: Option<String>,
+        gnss_channel: Option<u32>,
+        raw: String,
     },
     Unsupported {
         record_type: String,
@@ -733,6 +804,112 @@ pub fn decode_line(line: &str) -> Result<CifpRecord> {
                     longitude_deg,
                     elevation_ft,
                 })
+            } else if kind_char == 'P' {
+                // PP Path Point record (ARINC 424 §4.1.17.1).
+                // Primary (cont == '1' || cont == '0') defines LTP and FPAP geometry;
+                // continuation (cont == '2') defines orthometric heights, app type (LPV/LP),
+                // and GNSS channel number.
+                let airport_ident = cifp.field(7, 10).trim().to_string();
+                let icao_code = cifp.field(11, 12).trim().to_string();
+                let approach_ident = cifp.field(14, 19).trim().to_string();
+                let runway_raw = cifp.field(20, 24).trim();
+                let runway_ident = runway_raw
+                    .strip_prefix("RW")
+                    .unwrap_or(runway_raw)
+                    .to_string();
+                let continuation = cifp.field(27, 27).chars().next().unwrap_or('0');
+
+                if continuation == '2' {
+                    let fpap_ortho_height_m = cifp
+                        .field(35, 40)
+                        .trim()
+                        .parse::<f64>()
+                        .ok()
+                        .map(|v| v / 10.0);
+                    let ltp_ortho_height_m = cifp
+                        .field(41, 46)
+                        .trim()
+                        .parse::<f64>()
+                        .ok()
+                        .map(|v| v / 10.0);
+                    let app_type =
+                        Some(cifp.field(47, 56).trim().to_string()).filter(|s| !s.is_empty());
+                    let gnss_channel = cifp.field(57, 61).trim().parse::<u32>().ok();
+
+                    Ok(CifpRecord::PathPoint {
+                        record_type,
+                        airport_ident,
+                        icao_code,
+                        approach_ident,
+                        runway_ident,
+                        continuation,
+                        ref_path_ident: String::new(),
+                        ltp_latitude_deg: 0.0,
+                        ltp_longitude_deg: 0.0,
+                        ltp_ellipsoid_height_m: 0.0,
+                        gpa_deg: 0.0,
+                        fpap_latitude_deg: 0.0,
+                        fpap_longitude_deg: 0.0,
+                        length_offset_m: 0.0,
+                        tch_ft: 0.0,
+                        fpap_ortho_height_m,
+                        ltp_ortho_height_m,
+                        app_type,
+                        gnss_channel,
+                        raw: line.to_string(),
+                    })
+                } else {
+                    let ref_path_ident = cifp.field(33, 36).trim().to_string();
+                    let ltp_latitude_deg = parse_path_point_lat(cifp.field(38, 48))?;
+                    let ltp_longitude_deg = parse_path_point_lon(cifp.field(49, 60))?;
+                    let ltp_ellipsoid_height_m = cifp
+                        .field(61, 66)
+                        .trim()
+                        .parse::<f64>()
+                        .ok()
+                        .map(|v| v / 10.0)
+                        .unwrap_or(0.0);
+                    let gpa_deg = cifp
+                        .field(67, 70)
+                        .trim()
+                        .parse::<f64>()
+                        .ok()
+                        .map(|v| v / 100.0)
+                        .unwrap_or(0.0);
+                    let fpap_latitude_deg = parse_path_point_lat(cifp.field(71, 81))?;
+                    let fpap_longitude_deg = parse_path_point_lon(cifp.field(82, 93))?;
+                    let length_offset_m = cifp.field(99, 102).trim().parse::<f64>().unwrap_or(0.0);
+                    let tch_ft = cifp
+                        .field(103, 108)
+                        .trim()
+                        .parse::<f64>()
+                        .ok()
+                        .map(|v| v / 10.0)
+                        .unwrap_or(0.0);
+
+                    Ok(CifpRecord::PathPoint {
+                        record_type,
+                        airport_ident,
+                        icao_code,
+                        approach_ident,
+                        runway_ident,
+                        continuation,
+                        ref_path_ident,
+                        ltp_latitude_deg,
+                        ltp_longitude_deg,
+                        ltp_ellipsoid_height_m,
+                        gpa_deg,
+                        fpap_latitude_deg,
+                        fpap_longitude_deg,
+                        length_offset_m,
+                        tch_ft,
+                        fpap_ortho_height_m: None,
+                        ltp_ortho_height_m: None,
+                        app_type: None,
+                        gnss_channel: None,
+                        raw: line.to_string(),
+                    })
+                }
             } else if kind_char == 'G' {
                 // PG terminal runway END. Layout verified against real
                 // cycle 2608 records: ident 7-10, ICAO 11-12,
@@ -1325,6 +1502,7 @@ pub fn interpret(
             le_lat: *le_lat,
             le_lon: *le_lon,
         })],
+        CifpRecord::PathPoint { .. } => vec![],
         CifpRecord::Unsupported {
             reason,
             raw,
@@ -1350,6 +1528,7 @@ fn record_to_raw(record: &CifpRecord) -> String {
         | CifpRecord::NdbNavaid { raw, .. }
         | CifpRecord::Airway { raw, .. }
         | CifpRecord::ProcedureLeg { raw, .. }
+        | CifpRecord::PathPoint { raw, .. }
         | CifpRecord::Unsupported { raw, .. } => raw.clone(),
         CifpRecord::Airport { .. } | CifpRecord::Runway { .. } => String::new(),
     }
@@ -1374,6 +1553,7 @@ pub struct CifpScanReport {
     pub runways_decoded: usize,
     /// Runway ends whose reciprocal was missing (skipped, fail-closed).
     pub unpaired_runway_ends: usize,
+    pub lpv_fas_decoded: usize,
     pub unsupported_records: usize,
     pub decode_errors: usize,
     /// Duplicate object ids whose payloads CONFLICT (first occurrence
@@ -1409,6 +1589,7 @@ impl FaaCifpAdapter {
         Vec<CanonicalAirport>,
         Vec<CanonicalRunway>,
         Vec<IlsAssociation>,
+        Vec<CanonicalLpvFas>,
         CifpScanReport,
     ) {
         let mut waypoints = Vec::new();
@@ -1417,6 +1598,10 @@ impl FaaCifpAdapter {
         let mut procedure_legs = Vec::new();
         let mut airports = Vec::new();
         let mut runway_ends = Vec::new();
+        let mut pp_primaries: std::collections::HashMap<(String, String, String), CifpRecord> =
+            std::collections::HashMap::new();
+        let mut pp_conts: std::collections::HashMap<(String, String, String), CifpRecord> =
+            std::collections::HashMap::new();
         let mut report = CifpScanReport::default();
 
         // Per-route previous record for ER chaining.
@@ -1490,6 +1675,61 @@ impl FaaCifpAdapter {
                             maximum_altitude_ft,
                         },
                     );
+                }
+                Ok(CifpRecord::PathPoint {
+                    record_type,
+                    airport_ident,
+                    icao_code,
+                    approach_ident,
+                    runway_ident,
+                    continuation,
+                    ref_path_ident,
+                    ltp_latitude_deg,
+                    ltp_longitude_deg,
+                    ltp_ellipsoid_height_m,
+                    gpa_deg,
+                    fpap_latitude_deg,
+                    fpap_longitude_deg,
+                    length_offset_m,
+                    tch_ft,
+                    fpap_ortho_height_m,
+                    ltp_ortho_height_m,
+                    app_type,
+                    gnss_channel,
+                    raw,
+                }) => {
+                    let key = (
+                        airport_ident.clone(),
+                        approach_ident.clone(),
+                        runway_ident.clone(),
+                    );
+                    let record = CifpRecord::PathPoint {
+                        record_type,
+                        airport_ident,
+                        icao_code,
+                        approach_ident,
+                        runway_ident,
+                        continuation,
+                        ref_path_ident,
+                        ltp_latitude_deg,
+                        ltp_longitude_deg,
+                        ltp_ellipsoid_height_m,
+                        gpa_deg,
+                        fpap_latitude_deg,
+                        fpap_longitude_deg,
+                        length_offset_m,
+                        tch_ft,
+                        fpap_ortho_height_m,
+                        ltp_ortho_height_m,
+                        app_type,
+                        gnss_channel,
+                        raw,
+                    };
+                    if continuation == '2' {
+                        pp_conts.insert(key, record);
+                    } else {
+                        pp_primaries.insert(key, record);
+                    }
                 }
                 Ok(record) => {
                     for interpretation in interpret(&record, snapshot_id, valid_from) {
@@ -1886,6 +2126,78 @@ impl FaaCifpAdapter {
             }
             let navaids = navs;
 
+            let mut lpv_fas = Vec::new();
+            for (key, prim) in pp_primaries {
+                if let (
+                    CifpRecord::PathPoint {
+                        record_type,
+                        airport_ident,
+                        icao_code,
+                        approach_ident,
+                        runway_ident,
+                        ref_path_ident,
+                        ltp_latitude_deg,
+                        ltp_longitude_deg,
+                        gpa_deg,
+                        fpap_latitude_deg,
+                        fpap_longitude_deg,
+                        length_offset_m,
+                        tch_ft,
+                        ..
+                    },
+                    Some(CifpRecord::PathPoint {
+                        ltp_ortho_height_m,
+                        app_type,
+                        gnss_channel,
+                        ..
+                    }),
+                ) = (&prim, pp_conts.get(&key))
+                {
+                    let elevation_ft = ltp_ortho_height_m
+                        .map(|m| (m * 3.280839895).round() as i32)
+                        .unwrap_or(0);
+                    let app_type = app_type.clone().unwrap_or_else(|| "LPV".to_string());
+                    let gnss_channel = gnss_channel.unwrap_or(0);
+                    let bearing_true_deg = geodesic_bearing_deg(
+                        *ltp_latitude_deg,
+                        *ltp_longitude_deg,
+                        *fpap_latitude_deg,
+                        *fpap_longitude_deg,
+                    );
+
+                    let object_id = openairac_model::LpvFasId(format!(
+                        "faa:{record_type}:{icao_code}:{airport_ident}:{runway_ident}:{ref_path_ident}"
+                    ));
+
+                    lpv_fas.push(CanonicalLpvFas {
+                        object_id,
+                        airport_ident: airport_ident.clone(),
+                        icao_code: icao_code.clone(),
+                        approach_ident: approach_ident.clone(),
+                        runway_ident: runway_ident.clone(),
+                        ref_path_ident: ref_path_ident.clone(),
+                        gnss_channel,
+                        app_type,
+                        ltp_latitude: *ltp_latitude_deg,
+                        ltp_longitude: *ltp_longitude_deg,
+                        fpap_latitude: *fpap_latitude_deg,
+                        fpap_longitude: *fpap_longitude_deg,
+                        bearing_true_deg,
+                        elevation_ft,
+                        length_offset_m: *length_offset_m,
+                        tch_ft: *tch_ft,
+                        gpa_deg: *gpa_deg,
+                        temporal: TemporalValidity {
+                            valid_from,
+                            valid_until: None,
+                            source_snapshot_id: snapshot_id.clone(),
+                        },
+                    });
+                    report.records_decoded += 2;
+                    report.lpv_fas_decoded += 1;
+                }
+            }
+
             (
                 waypoints,
                 navaids,
@@ -1894,6 +2206,7 @@ impl FaaCifpAdapter {
                 airports,
                 runways,
                 ils_associations,
+                lpv_fas,
                 report,
             )
         }
@@ -1915,6 +2228,7 @@ impl FaaCifpAdapter {
             airports,
             runways,
             ils_associations,
+            lpv_fas,
             report,
         ) = Self::parse_cifp_content(content, snapshot_id, valid_from);
 
@@ -1928,6 +2242,9 @@ impl FaaCifpAdapter {
             }
             for assoc in &ils_associations {
                 openairac_store::insert_ils_association_conn(conn, assoc)?;
+            }
+            for fas in &lpv_fas {
+                openairac_store::insert_lpv_fas_conn(conn, fas)?;
             }
             Ok(())
         })?;
@@ -1990,7 +2307,7 @@ pub fn masked_tables(scan: &CifpScanReport) -> BTreeSet<openairac_store::EntityT
     for &(section, subsection, kind) in &scan.unsupported_classes {
         match (section, subsection, kind) {
             // Terminal airports/runways: never entity rows in our tables.
-            ('P', ' ', 'A') | ('P', ' ', 'G') => {}
+            ('P', ' ', 'A') | ('P', ' ', 'G') | ('P', ' ', 'P') => {}
             // Terminal NDBs map to navaids.
             ('P', 'N', _) => {
                 masked.insert(EntityTable::Navaids);
@@ -2211,6 +2528,7 @@ impl crate::provider::DataProvider for CifpProvider {
             airports,
             runways,
             ils_associations,
+            lpv_fas,
             scan,
         ) = FaaCifpAdapter::parse_cifp_content(&dataset.raw_content, &snapshot_id, valid_from);
 
@@ -2240,6 +2558,10 @@ impl crate::provider::DataProvider for CifpProvider {
                 .iter()
                 .map(|l| l.object_id.0.clone())
                 .collect(),
+        );
+        push(
+            openairac_store::EntityTable::LpvFas,
+            lpv_fas.iter().map(|l| l.object_id.0.clone()).collect(),
         );
 
         let start = std::time::Instant::now();
@@ -2282,6 +2604,7 @@ impl crate::provider::DataProvider for CifpProvider {
                 waypoints: waypoints.clone(),
                 airway_legs: airway_legs.clone(),
                 procedure_legs: procedure_legs.clone(),
+                lpv_fas: lpv_fas.clone(),
             },
             tombstones: Vec::new(),
             ils_associations: ils_associations.clone(),
@@ -2820,7 +3143,7 @@ mod tests {
     fn test_parse_cifp_content_chains_airway_legs() {
         let content = format!("{ER_A315_1}\n{ER_A315_2}\n{ER_A315_3}\n{EA_AAARG}\n");
         let snapshot_id = SourceSnapshotId("snap-faa".to_string());
-        let (waypoints, _navaids, legs, _procedures, _airports, _runways, _ils, report) =
+        let (waypoints, _navaids, legs, _procedures, _airports, _runways, _ils, _lpv, report) =
             FaaCifpAdapter::parse_cifp_content(&content, &snapshot_id, Utc::now());
 
         assert_eq!(waypoints.len(), 1);
@@ -2848,7 +3171,7 @@ mod tests {
     fn test_pi_merges_over_d_localizer() {
         let content = format!("{D_IAAD}\n{PI_IAAD}\n");
         let snapshot_id = SourceSnapshotId("snap-pi-merge".to_string());
-        let (_wp, navaids, _legs, _proc, _ap, _rwy, _ils, _report) =
+        let (_wp, navaids, _legs, _proc, _ap, _rwy, _ils, _lpv, _report) =
             FaaCifpAdapter::parse_cifp_content(&content, &snapshot_id, Utc::now());
         let loc: Vec<&CanonicalNavaid> = navaids
             .iter()
@@ -2880,7 +3203,7 @@ mod tests {
     fn test_pi_only_localizer_survives_merge() {
         let content = PI_IAAD.to_string();
         let snapshot_id = SourceSnapshotId("snap-pi-only".to_string());
-        let (_wp, navaids, _legs, _proc, _ap, _rwy, _ils, _report) =
+        let (_wp, navaids, _legs, _proc, _ap, _rwy, _ils, _lpv, _report) =
             FaaCifpAdapter::parse_cifp_content(&content, &snapshot_id, Utc::now());
         let loc: Vec<&CanonicalNavaid> = navaids
             .iter()
@@ -3514,7 +3837,7 @@ mod tests {
         ]
         .join("\n");
         let snapshot = SourceSnapshotId("snap-t".to_string());
-        let (_wp, _nav, _legs, _proc, _airports, runways, _ils, report) =
+        let (_wp, _nav, _legs, _proc, _airports, runways, _ils, _lpv, report) =
             FaaCifpAdapter::parse_cifp_content(&content, &snapshot, Utc::now());
         assert_eq!(report.runway_ends_decoded, 2);
         assert_eq!(report.runways_decoded, 1);
@@ -3541,7 +3864,7 @@ mod tests {
         ]
         .join("\n");
         let snapshot = SourceSnapshotId("snap-t".to_string());
-        let (_wp, _nav, _legs, _proc, _airports, runways, _ils, report) =
+        let (_wp, _nav, _legs, _proc, _airports, runways, _ils, _lpv, report) =
             FaaCifpAdapter::parse_cifp_content(&content, &snapshot, Utc::now());
         assert_eq!(report.runways_decoded, 1);
         assert_eq!(report.unpaired_runway_ends, 0);
@@ -3554,7 +3877,7 @@ mod tests {
         // Only one end of 10L/28R: fail closed, no half-runway.
         let content = "SUSAP KSFOK2GRW10L   0118701040 N37374346W122233621         -0030900006000055200R                                          146341707\n";
         let snapshot = SourceSnapshotId("snap-t".to_string());
-        let (_wp, _nav, _legs, _proc, _airports, runways, _ils, report) =
+        let (_wp, _nav, _legs, _proc, _airports, runways, _ils, _lpv, report) =
             FaaCifpAdapter::parse_cifp_content(content, &snapshot, Utc::now());
         assert_eq!(report.runways_decoded, 0);
         assert_eq!(report.unpaired_runway_ends, 1);
@@ -3572,7 +3895,7 @@ mod tests {
         ]
         .join("\n");
         let snapshot = SourceSnapshotId("snap-t".to_string());
-        let (_wp, navaids, _legs, proc_legs, _ap, _rwy, assocs, report) =
+        let (_wp, navaids, _legs, proc_legs, _ap, _rwy, assocs, _lpv, report) =
             FaaCifpAdapter::parse_cifp_content(&content, &snapshot, Utc::now());
         assert_eq!(report.procedure_legs_decoded, 3);
         assert_eq!(assocs.len(), 1);
@@ -3588,5 +3911,88 @@ mod tests {
         // no D-record, so nothing to check beyond the association.
         let _ = navaids;
         let _ = proc_legs;
+    }
+
+    const PP_00U_1: &str = "SUSAP 00U K1PR26   RW26 001 0000W26A0N4544398740W10739059785+090140300N4544397405W10741132060106751384000400F40035024EACBCF785962110";
+    const PP_00U_2: &str = "SUSAP 00U K1PR26   RW26 002E      +09159+09159LPV       65644                                                              785972008";
+
+    #[test]
+    fn test_decode_path_point_primary_and_continuation() {
+        let rec1 = decode_line(PP_00U_1).unwrap();
+        match rec1 {
+            CifpRecord::PathPoint {
+                airport_ident,
+                icao_code,
+                approach_ident,
+                runway_ident,
+                continuation,
+                ref_path_ident,
+                ltp_latitude_deg,
+                ltp_longitude_deg,
+                gpa_deg,
+                fpap_latitude_deg,
+                fpap_longitude_deg,
+                length_offset_m,
+                tch_ft,
+                ..
+            } => {
+                assert_eq!(airport_ident, "00U");
+                assert_eq!(icao_code, "K1");
+                assert_eq!(approach_ident, "R26");
+                assert_eq!(runway_ident, "26");
+                assert_eq!(continuation, '1');
+                assert_eq!(ref_path_ident, "W26A");
+                assert!((ltp_latitude_deg - 45.744409444).abs() < 1e-8);
+                assert!((ltp_longitude_deg - -107.651660694).abs() < 1e-8);
+                assert!((fpap_latitude_deg - 45.744372361).abs() < 1e-8);
+                assert!((fpap_longitude_deg - -107.687001667).abs() < 1e-8);
+                assert!((gpa_deg - 3.00).abs() < 1e-6);
+                assert_eq!(length_offset_m, 1384.0);
+                assert_eq!(tch_ft, 40.0);
+            }
+            other => panic!("expected PathPoint, got {other:?}"),
+        }
+
+        let rec2 = decode_line(PP_00U_2).unwrap();
+        match rec2 {
+            CifpRecord::PathPoint {
+                continuation,
+                ltp_ortho_height_m,
+                app_type,
+                gnss_channel,
+                ..
+            } => {
+                assert_eq!(continuation, '2');
+                assert_eq!(ltp_ortho_height_m, Some(915.9));
+                assert_eq!(app_type.as_deref(), Some("LPV"));
+                assert_eq!(gnss_channel, Some(65644));
+            }
+            other => panic!("expected PathPoint cont2, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_cifp_content_pairs_path_points() {
+        let content = format!(
+            "{PP_00U_1}
+{PP_00U_2}
+"
+        );
+        let snapshot_id = SourceSnapshotId("snap-pp".to_string());
+        let (_waypoints, _navaids, _legs, _procedures, _airports, _runways, _ils, lpv_fas, report) =
+            FaaCifpAdapter::parse_cifp_content(&content, &snapshot_id, Utc::now());
+
+        assert_eq!(report.lpv_fas_decoded, 1);
+        assert_eq!(lpv_fas.len(), 1);
+        let fas = &lpv_fas[0];
+        assert_eq!(fas.airport_ident, "00U");
+        assert_eq!(fas.icao_code, "K1");
+        assert_eq!(fas.approach_ident, "R26");
+        assert_eq!(fas.runway_ident, "26");
+        assert_eq!(fas.ref_path_ident, "W26A");
+        assert_eq!(fas.gnss_channel, 65644);
+        assert_eq!(fas.app_type, "LPV");
+        assert_eq!(fas.elevation_ft, 3005);
+        assert!((fas.bearing_true_deg - 269.927).abs() < 0.001);
     }
 }

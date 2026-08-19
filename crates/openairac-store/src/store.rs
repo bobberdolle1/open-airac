@@ -222,7 +222,12 @@ impl WorldStore {
                 .execute_batch(include_str!("../migrations/v10_ils_associations.sql"))
                 .context("Failed to execute database migration v10_ils_associations.sql")?;
         }
-        self.conn.pragma_update(None, "user_version", 10)?;
+        if version < 11 {
+            self.conn
+                .execute_batch(include_str!("../migrations/v11_lpv_fas.sql"))
+                .context("Failed to execute database migration v11_lpv_fas.sql")?;
+        }
+        self.conn.pragma_update(None, "user_version", 11)?;
         Ok(())
     }
 
@@ -284,9 +289,18 @@ impl WorldStore {
         insert_waypoint_conn(&self.conn, waypoint)
     }
 
+    pub fn insert_lpv_fas(&self, record: &CanonicalLpvFas) -> Result<EntityWrite> {
+        insert_lpv_fas_conn(&self.conn, record)
+    }
+
     /// Query airports valid at a given UTC instant.
     pub fn query_airports_at(&self, date: DateTime<Utc>) -> Result<Vec<CanonicalAirport>> {
         query_airports_at_conn(&self.conn, date)
+    }
+
+    /// Query LPV FAS records valid at a given UTC instant.
+    pub fn query_lpv_fas_at(&self, date: DateTime<Utc>) -> Result<Vec<CanonicalLpvFas>> {
+        query_lpv_fas_at_conn(&self.conn, date)
     }
 }
 
@@ -1950,6 +1964,9 @@ impl WorldStore {
                 [],
                 |r| r.get(0),
             )?,
+            total_lpv_fas: self
+                .conn
+                .query_row("SELECT COUNT(*) FROM lpv_fas;", [], |r| r.get(0))?,
         })
     }
 }
@@ -2967,6 +2984,209 @@ pub fn query_procedure_legs_at(
     Ok(legs)
 }
 
+pub fn insert_lpv_fas_conn(conn: &Connection, record: &CanonicalLpvFas) -> Result<EntityWrite> {
+    validate_coords(record.ltp_latitude, record.ltp_longitude)?;
+    validate_coords(record.fpap_latitude, record.fpap_longitude)?;
+    validate_temporal(&record.temporal)?;
+    let id = &record.object_id.0;
+    let vf = rfc3339(record.temporal.valid_from);
+    let vu = record.temporal.valid_until.map(rfc3339);
+
+    let existing = conn
+        .query_row(
+            "SELECT airport_ident, icao_code, approach_ident, runway_ident,
+                    ref_path_ident, gnss_channel, app_type, ltp_latitude,
+                    ltp_longitude, fpap_latitude, fpap_longitude,
+                    bearing_true_deg, elevation_ft, length_offset_m, tch_ft,
+                    gpa_deg, source_snapshot_id, valid_from
+             FROM lpv_fas WHERE id = ?1 ORDER BY valid_from DESC LIMIT 1",
+            params![id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, u32>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, f64>(7)?,
+                    row.get::<_, f64>(8)?,
+                    row.get::<_, f64>(9)?,
+                    row.get::<_, f64>(10)?,
+                    row.get::<_, f64>(11)?,
+                    row.get::<_, i32>(12)?,
+                    row.get::<_, f64>(13)?,
+                    row.get::<_, f64>(14)?,
+                    row.get::<_, f64>(15)?,
+                    row.get::<_, String>(16)?,
+                    row.get::<_, String>(17)?,
+                ))
+            },
+        )
+        .optional()?;
+
+    let write = if let Some((
+        airport_ident,
+        icao_code,
+        approach_ident,
+        runway_ident,
+        ref_path_ident,
+        gnss_channel,
+        app_type,
+        ltp_latitude,
+        ltp_longitude,
+        fpap_latitude,
+        fpap_longitude,
+        bearing_true_deg,
+        elevation_ft,
+        length_offset_m,
+        tch_ft,
+        gpa_deg,
+        source_snapshot_id,
+        prev_vf,
+    )) = existing
+    {
+        let unchanged = airport_ident == record.airport_ident
+            && icao_code == record.icao_code
+            && approach_ident == record.approach_ident
+            && runway_ident == record.runway_ident
+            && ref_path_ident == record.ref_path_ident
+            && gnss_channel == record.gnss_channel
+            && app_type == record.app_type
+            && (ltp_latitude - record.ltp_latitude).abs() < 1e-9
+            && (ltp_longitude - record.ltp_longitude).abs() < 1e-9
+            && (fpap_latitude - record.fpap_latitude).abs() < 1e-9
+            && (fpap_longitude - record.fpap_longitude).abs() < 1e-9
+            && (bearing_true_deg - record.bearing_true_deg).abs() < 1e-6
+            && elevation_ft == record.elevation_ft
+            && (length_offset_m - record.length_offset_m).abs() < 1e-6
+            && (tch_ft - record.tch_ft).abs() < 1e-6
+            && (gpa_deg - record.gpa_deg).abs() < 1e-6
+            && source_snapshot_id == record.temporal.source_snapshot_id.0;
+
+        if unchanged {
+            EntityWrite::Unchanged
+        } else {
+            close_open_revision(conn, "lpv_fas", id, &prev_vf, &vf)?;
+            insert_lpv_fas_row(conn, record, &vf, &vu)?;
+            EntityWrite::Updated
+        }
+    } else {
+        insert_lpv_fas_row(conn, record, &vf, &vu)?;
+        EntityWrite::Created
+    };
+
+    record_observation(
+        conn,
+        "lpv_fas",
+        id,
+        &record.temporal.source_snapshot_id.0,
+        &vf,
+    )?;
+
+    Ok(write)
+}
+
+fn insert_lpv_fas_row(
+    conn: &Connection,
+    record: &CanonicalLpvFas,
+    vf: &str,
+    vu: &Option<String>,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO lpv_fas (
+            id, airport_ident, icao_code, approach_ident, runway_ident,
+            ref_path_ident, gnss_channel, app_type, ltp_latitude,
+            ltp_longitude, fpap_latitude, fpap_longitude, bearing_true_deg,
+            elevation_ft, length_offset_m, tch_ft, gpa_deg,
+            source_snapshot_id, valid_from, valid_until
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+                  ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+        params![
+            record.object_id.0,
+            record.airport_ident,
+            record.icao_code,
+            record.approach_ident,
+            record.runway_ident,
+            record.ref_path_ident,
+            record.gnss_channel,
+            record.app_type,
+            record.ltp_latitude,
+            record.ltp_longitude,
+            record.fpap_latitude,
+            record.fpap_longitude,
+            record.bearing_true_deg,
+            record.elevation_ft,
+            record.length_offset_m,
+            record.tch_ft,
+            record.gpa_deg,
+            record.temporal.source_snapshot_id.0,
+            vf,
+            vu,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Query LPV FAS records valid at a given UTC instant.
+pub fn query_lpv_fas_at_conn(
+    conn: &Connection,
+    date: DateTime<Utc>,
+) -> Result<Vec<CanonicalLpvFas>> {
+    let date_str = rfc3339(date);
+    let mut stmt = conn.prepare(&format!(
+        "SELECT id, airport_ident, icao_code, approach_ident, runway_ident,
+                ref_path_ident, gnss_channel, app_type, ltp_latitude,
+                ltp_longitude, fpap_latitude, fpap_longitude,
+                bearing_true_deg, elevation_ft, length_offset_m, tch_ft,
+                gpa_deg, source_snapshot_id, valid_from, valid_until
+         FROM lpv_fas WHERE {VALID_FROM_LE} AND {VALID_UNTIL_GT}
+         ORDER BY airport_ident, runway_ident;"
+    ))?;
+
+    let rows = stmt.query_and_then(params![date_str], |row| -> Result<CanonicalLpvFas> {
+        let id: String = row.get(0).context("lpv_fas.id")?;
+        Ok(CanonicalLpvFas {
+            object_id: LpvFasId(id),
+            airport_ident: row.get(1).context("airport_ident")?,
+            icao_code: row.get(2).context("icao_code")?,
+            approach_ident: row.get(3).context("approach_ident")?,
+            runway_ident: row.get(4).context("runway_ident")?,
+            ref_path_ident: row.get(5).context("ref_path_ident")?,
+            gnss_channel: row.get(6).context("gnss_channel")?,
+            app_type: row.get(7).context("app_type")?,
+            ltp_latitude: row.get(8).context("ltp_latitude")?,
+            ltp_longitude: row.get(9).context("ltp_longitude")?,
+            fpap_latitude: row.get(10).context("fpap_latitude")?,
+            fpap_longitude: row.get(11).context("fpap_longitude")?,
+            bearing_true_deg: row.get(12).context("bearing_true_deg")?,
+            elevation_ft: row.get(13).context("elevation_ft")?,
+            length_offset_m: row.get(14).context("length_offset_m")?,
+            tch_ft: row.get(15).context("tch_ft")?,
+            gpa_deg: row.get(16).context("gpa_deg")?,
+            temporal: TemporalValidity {
+                valid_from: parse_utc(
+                    &row.get::<_, String>(18).context("valid_from")?,
+                    "valid_from",
+                )?,
+                valid_until: row
+                    .get::<_, Option<String>>(19)
+                    .context("valid_until")?
+                    .map(|s| parse_utc(&s, "valid_until"))
+                    .transpose()?,
+                source_snapshot_id: SourceSnapshotId(row.get(17).context("source_snapshot_id")?),
+            },
+        })
+    })?;
+
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
 // ---------------------------------------------------------------------------
 // AIRAC lifecycle (v5) — connection-level implementation
 // ---------------------------------------------------------------------------
@@ -3305,6 +3525,7 @@ pub enum EntityTable {
     Waypoints,
     AirwayLegs,
     ProcedureLegs,
+    LpvFas,
 }
 
 impl EntityTable {
@@ -3316,6 +3537,7 @@ impl EntityTable {
             EntityTable::Waypoints => "waypoints",
             EntityTable::AirwayLegs => "airway_legs",
             EntityTable::ProcedureLegs => "procedure_legs",
+            EntityTable::LpvFas => "lpv_fas",
         }
     }
 
@@ -3327,6 +3549,7 @@ impl EntityTable {
             "waypoints" => Some(EntityTable::Waypoints),
             "airway_legs" => Some(EntityTable::AirwayLegs),
             "procedure_legs" => Some(EntityTable::ProcedureLegs),
+            "lpv_fas" => Some(EntityTable::LpvFas),
             _ => None,
         }
     }
@@ -3339,6 +3562,7 @@ impl EntityTable {
             EntityTable::Waypoints,
             EntityTable::AirwayLegs,
             EntityTable::ProcedureLegs,
+            EntityTable::LpvFas,
         ]
     }
 }
@@ -3632,6 +3856,7 @@ pub struct EntityPayloads {
     pub waypoints: Vec<CanonicalWaypoint>,
     pub airway_legs: Vec<CanonicalAirwayLeg>,
     pub procedure_legs: Vec<CanonicalProcedureLeg>,
+    pub lpv_fas: Vec<CanonicalLpvFas>,
 }
 
 /// A complete publication plan: what a provider published for one
@@ -3816,6 +4041,17 @@ fn apply_publication_payloads_conn(
             EntityWrite::Unchanged => report.unchanged += 1,
         }
     }
+    for record in &plan.payloads.lpv_fas {
+        let write =
+            insert_with_future_correction(conn, "lpv_fas", &record.object_id.0, vf, now, |c| {
+                insert_lpv_fas_conn(c, record)
+            })?;
+        match write {
+            EntityWrite::Created => report.created += 1,
+            EntityWrite::Updated => report.updated += 1,
+            EntityWrite::Unchanged => report.unchanged += 1,
+        }
+    }
 
     if failpoints.during_apply {
         anyhow::bail!("failpoint: during_apply");
@@ -3839,6 +4075,7 @@ fn apply_publication_payloads_conn(
             EntityTable::Waypoints,
             EntityTable::AirwayLegs,
             EntityTable::ProcedureLegs,
+            EntityTable::LpvFas,
         ];
         for table in tables {
             if plan.masked_tables.contains(&table) {
@@ -3878,6 +4115,12 @@ fn apply_publication_payloads_conn(
                 EntityTable::ProcedureLegs => plan
                     .payloads
                     .procedure_legs
+                    .iter()
+                    .map(|e| e.object_id.0.clone())
+                    .collect(),
+                EntityTable::LpvFas => plan
+                    .payloads
+                    .lpv_fas
                     .iter()
                     .map(|e| e.object_id.0.clone())
                     .collect(),
@@ -4661,6 +4904,25 @@ pub fn rollback_cycle_conn(
                 },
                 insert_procedure_leg_row,
             )?,
+            EntityTable::LpvFas => rollback_table(
+                conn,
+                *table,
+                namespace,
+                eff,
+                at,
+                pre_instant,
+                cur_instant,
+                query_lpv_fas_at_conn,
+                |record: &CanonicalLpvFas| record.object_id.0.clone(),
+                |record: &CanonicalLpvFas| record.temporal.valid_from,
+                |record: &CanonicalLpvFas, vf: DateTime<Utc>| {
+                    let mut c = record.clone();
+                    c.temporal.valid_from = vf;
+                    c.temporal.valid_until = None;
+                    c
+                },
+                insert_lpv_fas_row,
+            )?,
         };
         added += a;
         changed += c;
@@ -5018,6 +5280,49 @@ pub fn query_airway_legs_at(
 }
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn test_lpv_fas_temporal_lifecycle() {
+        let store = WorldStore::open_in_memory().unwrap();
+        let snap = snapshot("snap-001");
+        store.insert_source_snapshot(&snap).unwrap();
+
+        let t0 = Utc::now();
+        let record = CanonicalLpvFas {
+            object_id: LpvFasId("faa:PP:K1:00U:RW26:W26A".to_string()),
+            airport_ident: "00U".to_string(),
+            icao_code: "K1".to_string(),
+            approach_ident: "R26".to_string(),
+            runway_ident: "26".to_string(),
+            ref_path_ident: "W26A".to_string(),
+            gnss_channel: 65644,
+            app_type: "LPV".to_string(),
+            ltp_latitude: 45.744409444,
+            ltp_longitude: -107.651660694,
+            fpap_latitude: 45.744372361,
+            fpap_longitude: -107.687001667,
+            bearing_true_deg: 269.927,
+            elevation_ft: 3004,
+            length_offset_m: 1384.0,
+            tch_ft: 40.0,
+            gpa_deg: 3.00,
+            temporal: TemporalValidity {
+                valid_from: t0,
+                valid_until: None,
+                source_snapshot_id: SourceSnapshotId("snap-001".to_string()),
+            },
+        };
+
+        assert_eq!(store.insert_lpv_fas(&record).unwrap(), EntityWrite::Created);
+        let queried = store.query_lpv_fas_at(t0).unwrap();
+        assert_eq!(queried.len(), 1);
+        assert_eq!(queried[0].airport_ident, "00U");
+        assert_eq!(queried[0].gnss_channel, 65644);
+        assert_eq!(queried[0].app_type, "LPV");
+
+        let status = store.status().unwrap();
+        assert_eq!(status.total_lpv_fas, 1);
+    }
     use super::*;
     use std::time::Duration;
 
@@ -5091,7 +5396,7 @@ mod tests {
         let store = WorldStore::open_in_memory().unwrap();
         let status = store.status().unwrap();
         assert!(status.integrity_ok);
-        assert_eq!(status.migration_version, 10);
+        assert_eq!(status.migration_version, 11);
         assert_eq!(status.total_airports, 0);
 
         let snap = snapshot("snap-001");
@@ -5529,7 +5834,7 @@ mod tests {
 
         // Opening with the current code must migrate v1 -> v3 in place.
         let store = WorldStore::open(&path).unwrap();
-        assert_eq!(store.migration_version().unwrap(), 10);
+        assert_eq!(store.migration_version().unwrap(), 11);
         let at = store.query_airports_at(Utc::now()).unwrap();
         assert_eq!(at.len(), 1);
         assert_eq!(at[0].ident, "KSFO");
