@@ -42,9 +42,19 @@ fn swap_file(src: &Path, dest: &Path) -> Result<()> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    // Windows rename-over requires the destination to be gone or uses
-    // MoveFileEx REPLACE_EXISTING (std::fs::rename maps to that).
-    std::fs::rename(src, dest).with_context(|| format!("swapping {:?} -> {:?}", src, dest))?;
+    // Cross-volume rename is not portable (Windows ERROR_NOT_SAME_DEVICE):
+    // stage the content inside the destination directory first, then
+    // swap by same-volume rename. Never remove the destination before
+    // the replacement is safely in place.
+    let tmp = dest.with_extension("openairac_stage");
+    std::fs::copy(src, &tmp).with_context(|| format!("staging {:?} -> {:?}", src, tmp))?;
+    #[cfg(windows)]
+    {
+        if dest.exists() {
+            std::fs::remove_file(dest).with_context(|| format!("removing previous {:?}", dest))?;
+        }
+    }
+    std::fs::rename(&tmp, dest).with_context(|| format!("swapping {:?} -> {:?}", src, dest))?;
     Ok(())
 }
 
@@ -199,13 +209,21 @@ pub fn install_files_transactionally(
         },
     )?;
 
+    let backed_up = InstallJournal {
+        phase: InstallPhase::BackedUp,
+        ..journal.clone()
+    };
     for rel in relative_files {
         let src = staging_root.join(rel);
         let dest = target_root.join(rel);
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        swap_file(&src, &dest)?;
+        if let Err(e) = swap_file(&src, &dest) {
+            let _ = rollback_target(target_root, &backed_up);
+            bail!("swap failed for {rel}: {e}; previous files restored");
+        }
+        let _ = std::fs::remove_file(dest.with_extension("openairac_stage"));
     }
     write_journal(
         target_root,
@@ -222,12 +240,17 @@ pub fn install_files_transactionally(
     for rel in relative_files {
         let target = target_root.join(rel);
         if !target.is_file() {
-            let report = rollback_target(target_root, &journal)?;
-            let _ = report;
-            bail!("post-install validation failed: {rel} missing after swap");
+            let _ = rollback_target(target_root, &backed_up);
+            bail!(
+                "post-install validation failed: {rel} missing after swap; previous files restored"
+            );
         }
     }
 
+    // Commit: keep the journal and the backup of the previous files so
+    // the operator can undo the last successful install. A subsequent
+    // install recovers the previous state first, then backs it up
+    // again.
     write_journal(
         target_root,
         &InstallJournal {
@@ -235,8 +258,6 @@ pub fn install_files_transactionally(
             ..journal.clone()
         },
     )?;
-    let _ = std::fs::remove_dir_all(&backup_dir);
-    let _ = std::fs::remove_file(target_root.join(INSTALL_JOURNAL));
     drop(lock);
     let _ = std::fs::remove_file(&lock_path);
 

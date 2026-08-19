@@ -855,8 +855,15 @@ mod target_tests {
         assert_eq!(rep.installed.len(), 2);
         assert!(target.join("custom_sub/file1.txt").exists());
 
-        // Rollback on committed install is idempotent (returns none)
+        // Rollback undoes the last successful install (previous state
+        // was empty, so the installed files are removed).
         let rb = installer.rollback(&target).unwrap();
-        assert_eq!(rb.operation_id, "none");
+        assert_eq!(rb.removed.len(), 2);
+        assert!(!target.join("custom_sub/file1.txt").exists());
+        assert!(!target.join("custom_sub/file2.txt").exists());
+
+        // Second rollback is idempotent (no journal left).
+        let rb2 = installer.rollback(&target).unwrap();
+        assert_eq!(rb2.operation_id, "none");
     }
 }

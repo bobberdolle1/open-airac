@@ -990,15 +990,24 @@ fn tempfile_dir(parent: &Path) -> Result<PathBuf> {
     Ok(path)
 }
 
-/// Atomically replace `dest` with `src` (same filesystem: rename).
+/// Replace `dest` with `src`, safe across volumes: the staged content
+/// is first copied into the destination directory (same volume), then
+/// swapped by same-volume rename. A raw cross-volume rename fails on
+/// Windows (ERROR_NOT_SAME_DEVICE) - never remove the destination
+/// before the replacement is safely in place.
 fn swap_file(src: &Path, dest: &Path) -> Result<()> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = dest.with_extension("openairac_stage");
+    std::fs::copy(src, &tmp).with_context(|| format!("staging {:?} -> {:?}", src, tmp))?;
     #[cfg(windows)]
     {
         if dest.exists() {
             std::fs::remove_file(dest).with_context(|| format!("removing previous {:?}", dest))?;
         }
     }
-    std::fs::rename(src, dest).with_context(|| format!("installing {:?} -> {:?}", src, dest))?;
+    std::fs::rename(&tmp, dest).with_context(|| format!("installing {:?} -> {:?}", src, dest))?;
     Ok(())
 }
 
@@ -1313,6 +1322,8 @@ fn rollback_target(target_dir: &Path, journal: &InstallJournal) -> Result<LayerI
             std::fs::remove_file(&target)?;
             removed.push(name.clone());
         }
+        // A failed swap may leave its same-volume staging file behind.
+        let _ = std::fs::remove_file(target.with_extension("openairac_stage"));
     }
     let rolled_back = InstallJournal {
         phase: InstallPhase::RolledBack,
@@ -1458,13 +1469,16 @@ pub fn install_layer_with_failpoints(
             report.restored.len() + report.removed.len()
         );
     }
-
-    // 5. Swap staged files into place; the identity file is a copy of
-    // the staged layer manifest.
     let staged_identity = staging_dir.join(LAYER_IDENTITY_FILE);
     std::fs::copy(staging_dir.join("manifest.json"), &staged_identity)?;
     for name in &journal.files {
-        swap_file(&staging_dir.join(name), &target_dir.join(name))?;
+        if let Err(e) = swap_file(&staging_dir.join(name), &target_dir.join(name)) {
+            let report = rollback_target(target_dir, &backed_up)?;
+            bail!(
+                "swap failed for {name}: {e}; previous layer restored ({} files)",
+                report.restored.len() + report.removed.len()
+            );
+        }
     }
     let _ = std::fs::remove_file(&staged_identity);
     let swapped = InstallJournal {
@@ -1507,14 +1521,15 @@ pub fn install_layer_with_failpoints(
         );
     }
 
-    // 7. Commit: cleanup, then release the lock last.
+    // 7. Commit: mark the operation committed but KEEP the journal and
+    // the backup of the previous layer so the operator can undo the
+    // last successful install (target rollback). A subsequent install
+    // first recovers the previous layer, then backs it up again.
     let committed = InstallJournal {
         phase: InstallPhase::Committed,
         ..journal.clone()
     };
     write_journal(target_dir, &committed)?;
-    let _ = std::fs::remove_dir_all(&backup_dir);
-    let _ = std::fs::remove_file(target_dir.join(INSTALL_JOURNAL));
     drop(lock);
     let _ = std::fs::remove_file(&lock_path);
 
@@ -1652,7 +1667,9 @@ mod tests {
         assert_eq!(report.installed.len(), 4); // 3 dat files + identity
         assert!(target.join("earth_fix.dat").exists());
         assert!(target.join(LAYER_IDENTITY_FILE).exists());
-        assert!(!target.join(INSTALL_JOURNAL).exists());
+        // The journal is retained (phase Committed) so the previous
+        // layer can be restored later; the lock is released.
+        assert!(target.join(INSTALL_JOURNAL).exists());
         assert!(!target.join(INSTALL_LOCK).exists());
         // Reinstall over the same layer: re-stage first (install moves
         // files out of the staging directory).

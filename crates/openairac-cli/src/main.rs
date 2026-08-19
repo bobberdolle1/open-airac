@@ -1507,8 +1507,9 @@ fn main() -> Result<()> {
                         )
                     })?,
                 };
-                let installer = openairac_export::GenericTargetInstaller::new(desc.clone());
-                let report = openairac_export::TargetInstaller::rollback(&installer, &target_dir)?;
+                let installer = installer_for(desc);
+                let report =
+                    openairac_export::TargetInstaller::rollback(installer.as_ref(), &target_dir)?;
                 println!(
                     "Rollback complete for target '{}' in {:?} (op: {})",
                     target, target_dir, report.operation_id
