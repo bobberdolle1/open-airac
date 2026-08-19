@@ -410,7 +410,7 @@ pub mod registry {
                         relative: "openairac-navdata".to_string(),
                     },
                     validation_strategy: ValidationStrategy::HashVerify,
-                    support_state: SupportState::Research,
+                    support_state: SupportState::Experimental,
                 },
                 TargetDescriptor {
                     id: "msfs2020".to_string(),
@@ -434,7 +434,7 @@ pub mod registry {
                         relative: "openairac-navdata".to_string(),
                     },
                     validation_strategy: ValidationStrategy::HashVerify,
-                    support_state: SupportState::Research,
+                    support_state: SupportState::Experimental,
                 },
                 TargetDescriptor {
                     id: "little-navmap".to_string(),
@@ -458,7 +458,7 @@ pub mod registry {
                         relative: String::new(),
                     },
                     validation_strategy: ValidationStrategy::HashVerify,
-                    support_state: SupportState::Research,
+                    support_state: SupportState::Experimental,
                 },
                 TargetDescriptor {
                     id: "aerosoft-crj".to_string(),
