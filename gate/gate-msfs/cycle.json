@@ -1,9 +1,0 @@
-{
-  "as_of": "2026-09-04T00:00:00+00:00",
-  "compile": "official fspackagetool.exe (MSFS SDK Tools/bin); set MSFS_SDK env var or pass --sdk",
-  "cycle": "2609",
-  "format_family": "msfs-bgl",
-  "generator": "openairac 1.0.0",
-  "package": "openairac-navdata",
-  "support_state": "EXPERIMENTAL"
-}

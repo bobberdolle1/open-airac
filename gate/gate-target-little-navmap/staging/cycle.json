@@ -1,8 +1,0 @@
-{
-  "as_of": "2026-09-04T00:00:00+00:00",
-  "cycle": "2609",
-  "format_family": "little-navmap-sqlite",
-  "generator": "openairac 1.0.0",
-  "schema_authority": "albar965/atools resources/sql/fs/db (GPL-3.0; interface reference only)",
-  "support_state": "EXPERIMENTAL"
-}
