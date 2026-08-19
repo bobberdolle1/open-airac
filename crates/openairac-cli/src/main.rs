@@ -12,6 +12,11 @@ use std::path::PathBuf;
 #[command(
     about = "OpenAIRAC — The open navigation data engine for flight simulation. Install once, navigate forever."
 )]
+#[command(
+    name = "openairac",
+    version,
+    about = "OpenAIRAC navigation data engine (flight simulation only)"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -255,6 +260,23 @@ enum KeygenCmd {
         #[arg(long)]
         public_key: PathBuf,
     },
+    /// Sign arbitrary file bytes (release checksums etc.); writes
+    /// `<file>.sig` (base64 Ed25519).
+    SignFile {
+        #[arg(long)]
+        private_key: PathBuf,
+        #[arg(long)]
+        file: PathBuf,
+    },
+    /// Verify a detached file signature against a public key.
+    VerifyFile {
+        #[arg(long)]
+        public_key: PathBuf,
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(long)]
+        signature: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -296,6 +318,8 @@ enum CycleCmd {
 
 #[derive(Subcommand)]
 enum ExportTarget {
+    /// Detect installed simulator targets and report their navdata status
+    Detect {},
     /// List registered simulator/format targets with support states
     Targets {},
     /// Export a Little Navmap nav database (open-source schema)
@@ -673,6 +697,33 @@ fn main() -> Result<()> {
                 let encoded = std::fs::read_to_string(public_key)?;
                 let root = openairac_bundle::TrustRoot::from_base64(encoded.trim())?;
                 println!("{}", openairac_bundle::key_id(&root));
+            }
+            KeygenCmd::SignFile { private_key, file } => {
+                let seed = std::fs::read_to_string(private_key)?;
+                let kp = openairac_bundle::SigningKeyPair::from_seed_base64(seed.trim())?;
+                let data = std::fs::read(file)?;
+                let sig_path = file.with_extension(format!(
+                    "{}.sig",
+                    file.extension().and_then(|e| e.to_str()).unwrap_or("bin")
+                ));
+                openairac_bundle::sign_file(&kp, &data, &sig_path)?;
+                println!("Signed {:?} -> {:?}", file, sig_path);
+                println!("  key id {}", openairac_bundle::key_id(&kp.public_key()));
+            }
+            KeygenCmd::VerifyFile {
+                public_key,
+                file,
+                signature,
+            } => {
+                let encoded = std::fs::read_to_string(public_key)?;
+                let root = openairac_bundle::TrustRoot::from_base64(encoded.trim())?;
+                let data = std::fs::read(file)?;
+                let sig = std::fs::read_to_string(signature)?;
+                openairac_bundle::verify_file(&root, &data, &sig)?;
+                println!(
+                    "Signature VALID (key id {})",
+                    openairac_bundle::key_id(&root)
+                );
             }
         },
         Commands::Doctor { db } => {
@@ -1320,6 +1371,48 @@ fn main() -> Result<()> {
             }
         },
         Commands::Export { target } => match target {
+            ExportTarget::Detect {} => {
+                println!("Simulator detection:");
+                // X-Plane family targets: scan common install roots.
+                for root in [
+                    "C:\\X-Plane 12",
+                    "D:\\X-Plane 12",
+                    "E:\\X-Plane 12",
+                    "F:\\X-Plane 12",
+                    "C:\\X-Plane 11",
+                    "D:\\X-Plane 11",
+                    "F:\\X-Plane 11",
+                    "C:\\Program Files (x86)\\Steam\\steamapps\\common\\X-Plane 12",
+                    "F:\\SteamLibrary\\steamapps\\common\\X-Plane 12",
+                ] {
+                    let base = std::path::Path::new(root);
+                    if base.join("X-Plane.exe").exists() || base.join("X-Plane-x86_64.exe").exists()
+                    {
+                        let cd = base.join("Custom Data");
+                        if cd.is_dir() {
+                            match openairac_export::resolve_xplane_target(&cd) {
+                                Ok(report) => {
+                                    let desc = match &report.verdict {
+                                        openairac_export_xplane::SimWorldVerdict::Consistent => {
+                                            format!(
+                                                "OpenAIRAC layer (cycle {})",
+                                                report.cycle.as_deref().unwrap_or("?")
+                                            )
+                                        }
+                                        openairac_export_xplane::SimWorldVerdict::Missing => {
+                                            "third-party/no OpenAIRAC layer (read-only)".to_string()
+                                        }
+                                        other => format!("{other:?}"),
+                                    };
+                                    println!("  {root}");
+                                    println!("    Custom Data: {}", desc);
+                                }
+                                Err(e) => println!("  {root}: resolve failed: {e}"),
+                            }
+                        }
+                    }
+                }
+            }
             ExportTarget::Targets {} => {
                 println!("Registered targets:");
                 for t in openairac_export::target_registry() {

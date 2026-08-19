@@ -240,6 +240,37 @@ pub fn production_trust_roots() -> Vec<TrustRoot> {
     ]
 }
 
+/// Sign arbitrary file bytes (release archive checksums etc.) with a
+/// keypair; the signature is written to `out` (raw Ed25519, base64).
+pub fn sign_file(keypair: &SigningKeyPair, data: &[u8], out: &Path) -> Result<()> {
+    use base64::Engine;
+    let signature = keypair.signing.sign(data);
+    std::fs::write(
+        out,
+        base64::engine::general_purpose::STANDARD.encode(signature.to_bytes()),
+    )?;
+    Ok(())
+}
+
+/// Verify a detached file signature against a trust root.
+pub fn verify_file(trust: &TrustRoot, data: &[u8], signature_b64: &str) -> Result<()> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(signature_b64.trim())
+        .context("decoding file signature")?;
+    let arr: [u8; 64] = bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow!("file signature must be 64 bytes"))?;
+    let signature =
+        Signature::from_slice(&arr).map_err(|e| anyhow!("invalid file signature bytes: {e}"))?;
+    trust
+        .verifying
+        .verify(data, &signature)
+        .context("file signature verification failed")?;
+    Ok(())
+}
+
 /// Sign an unsigned bundle in place: flips authenticity to
 /// SignedTrusted, recomputes the content hash, and writes
 /// `manifest.sig` (Ed25519 over the exact manifest.json bytes).
