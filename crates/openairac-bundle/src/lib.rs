@@ -557,6 +557,11 @@ pub fn verify_bundle_with_trust(
     };
     match authenticity {
         Authenticity::UnsignedDevelopment => {
+            if trust.is_some() {
+                bail!(
+                    "refusing UnsignedDevelopment bundle when trust root is required (production mode requires SignedTrusted bundle)"
+                );
+            }
             if bundle_dir.join(SIGNATURE_FILE).exists() {
                 bail!("UnsignedDevelopment bundle carries a signature file");
             }
