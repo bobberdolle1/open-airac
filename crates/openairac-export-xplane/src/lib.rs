@@ -2556,6 +2556,63 @@ I
     }
 
     #[test]
+    fn test_ils_localizer_and_glideslope_export_golden() {
+        let mut loc = navaid("IABE", NavaidKind::IlsLocalizer, 110_700, Some("K6"));
+        loc.latitude = 40.661766667;
+        loc.longitude = -75.426430556;
+        loc.associated_airport = Some("KABE".to_string());
+        loc.associated_runway = Some("06".to_string());
+        loc.elevation_ft = Some(385);
+        loc.localizer_bearing_mag_deg = Some(63.3);
+        loc.magnetic_variation_deg = Some(-12.0);
+        loc.localizer_bearing_true_deg = Some(51.3);
+
+        let mut gs = navaid("IABE", NavaidKind::IlsGlidepath, 110_700, Some("K6"));
+        gs.latitude = 40.649708333;
+        gs.longitude = -75.447869444;
+        gs.associated_airport = Some("KABE".to_string());
+        gs.associated_runway = Some("06".to_string());
+        gs.elevation_ft = Some(385);
+        gs.localizer_bearing_mag_deg = Some(63.3);
+        gs.magnetic_variation_deg = Some(-12.0);
+        gs.localizer_bearing_true_deg = Some(51.3);
+        gs.glideslope_angle_deg = Some(3.0);
+
+        let mut report = ExportReport::default();
+        let mut buf = Vec::new();
+        XPlane12Exporter
+            .export_earth_nav(
+                &[loc, gs],
+                "2608",
+                "20260806",
+                &mut buf,
+                &mut report,
+                &mut ExportedEntityIndex::default(),
+            )
+            .unwrap();
+
+        assert_eq!(report.navaids_written, 2);
+        assert_eq!(report.navaids_skipped, 0);
+
+        let text = String::from_utf8(buf).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines[0], "I");
+        assert!(
+            lines[1]
+                .starts_with("1200 Version - data cycle 2608, build 20260806, metadata NavXP1200.")
+        );
+        assert_eq!(
+            lines[3],
+            " 4 40.661766667 -75.426430556   385 11070  18  22731.300 IABE KABE  K6 06 ILS-cat-I"
+        );
+        assert_eq!(
+            lines[4],
+            " 6 40.649708333 -75.447869444   385 11070  18 300051.300 IABE KABE  K6 06 GS"
+        );
+        assert_eq!(lines[5], "99");
+    }
+
+    #[test]
     fn test_export_from_db_refuses_empty_and_stages() {
         let store = WorldStore::open_in_memory().unwrap();
         let out_dir =
