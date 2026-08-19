@@ -79,6 +79,19 @@ impl FormatExporter for MsfsNavdataExporter {
         // --- Airports + runways + ILS + approaches ---
         out.push_str("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n");
         out.push_str("<FSData version=\"9.0\">\n");
+
+        // Navaid region hint per airport, indexed once (avoids an
+        // O(airports x navaids) scan per airport below).
+        let region_by_airport: std::collections::HashMap<String, String> = navaids
+            .iter()
+            .filter_map(|n| {
+                Some((
+                    n.associated_airport.as_deref()?.to_string(),
+                    n.region_code.clone()?,
+                ))
+            })
+            .collect();
+
         for airport in &airports {
             // Country: published ISO country when available; else
             // derived from the ICAO region of a colocated navaid
@@ -87,12 +100,7 @@ impl FormatExporter for MsfsNavdataExporter {
             let region_hint: Option<String> = airport
                 .iso_country
                 .clone()
-                .or_else(|| {
-                    navaids
-                        .iter()
-                        .find(|n| n.associated_airport.as_deref() == Some(airport.ident.as_str()))
-                        .and_then(|n| n.region_code.clone())
-                })
+                .or_else(|| region_by_airport.get(&airport.ident).cloned())
                 .filter(|r| !r.is_empty());
             let country_attr = match region_hint.as_deref() {
                 Some(c) => format!(" country=\"{}\"", esc(c)),

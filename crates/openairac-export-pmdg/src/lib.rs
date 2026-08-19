@@ -92,7 +92,26 @@ impl FormatExporter for PmdgNavdataExporter {
         let aid_path = out_dir.join("wpNavAID.txt");
         std::fs::write(&aid_path, &aid_buf)?;
 
-        // 3. wpNavAPT.txt
+        // 3. wpNavAPT.txt - index ILS localizers by (airport, runway)
+        // end once; avoids an O(runways x navaids) scan per row.
+        let mut ils_index: std::collections::HashMap<
+            (String, String),
+            &openairac_model::CanonicalNavaid,
+        > = std::collections::HashMap::new();
+        for nav in &navaids {
+            if nav.kind != NavaidKind::IlsLocalizer {
+                continue;
+            }
+            if let (Some(apt), Some(rwy)) = (
+                nav.associated_airport.as_deref(),
+                nav.associated_runway.as_deref(),
+            ) {
+                ils_index
+                    .entry((apt.to_string(), rwy.to_string()))
+                    .or_insert(nav);
+            }
+        }
+
         let mut apt_buf = Vec::new();
         for airport in &airports {
             let apt_ident = airport.ident.trim();
@@ -105,11 +124,7 @@ impl FormatExporter for PmdgNavdataExporter {
 
             for rwy in &airport.runways {
                 // Check if an ILS exists for this runway end
-                let ils_end = navaids.iter().find(|n| {
-                    n.associated_airport.as_deref() == Some(apt_ident)
-                        && n.associated_runway.as_deref() == Some(rwy.le_ident.as_str())
-                        && n.kind == NavaidKind::IlsLocalizer
-                });
+                let ils_end = ils_index.get(&(apt_ident.to_string(), rwy.le_ident.clone()));
                 let (ils_freq, ils_hdg, ils_type) = if let Some(ils) = ils_end {
                     let f = format!("{:.2}", ils.frequency.0 as f64 / 1000.0);
                     let h = ils

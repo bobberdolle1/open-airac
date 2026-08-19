@@ -4816,10 +4816,22 @@ pub fn query_airports_at_conn(
         })
     })?;
 
+    // Bulk-load every runway once and group by airport; a per-airport
+    // query here would be an N+1 (13k prepared statements on a real
+    // cycle).
+    let mut runways_by_airport: std::collections::HashMap<String, Vec<CanonicalRunway>> =
+        std::collections::HashMap::new();
+    for rwy in query_runways_conn(conn, date, None)? {
+        runways_by_airport
+            .entry(rwy.airport_id.0.clone())
+            .or_default()
+            .push(rwy);
+    }
+
     let mut airports = Vec::new();
     for row in rows {
         let mut airport = row?;
-        airport.runways = query_runways_conn(conn, date, Some(&airport.id))?;
+        airport.runways = runways_by_airport.remove(&airport.id.0).unwrap_or_default();
         airports.push(airport);
     }
     Ok(airports)
