@@ -1,5 +1,40 @@
 # Changelog
 
+## 1.1.0 — 2026-08-20
+
+### Simulator output
+
+- MSFS: complete ARINC 424 → BGLComp leg mapping (all published path
+  terminators); real cycle 2609: 199,966/199,966 legs written,
+  2,190 departures, 1,916 arrivals, 10,232 approaches, 0 skipped
+  terminators. SDK compile still requires a real `fspackagetool.exe`.
+- PMDG classic FMC text exporter (`wpNavAPT/AID/FIX/RTE`, AIRNAV data
+  file definition); real 2609: 8,172 runway rows, 17,647 navaids,
+  70,085 fixes, 17,889 airway segments.
+- Target registry with multi-platform detection (`%VAR%`/`~`
+  expansion) and honest support states; `target list|detect|install|
+  rollback|update-all` CLI. `update-all` exports once per family and
+  updates every detected target with per-target rollback — never
+  mixes worlds.
+- Installer hardening (found by live verification + red team):
+  cross-volume-safe swaps, automatic rollback on swap failure, undo
+  of the last successful install (journal + backup retained at
+  commit), recovery that treats Committed journals as a feature.
+- Release Gate v2: registry-driven per-target export → install →
+  validate → rollback → byte-identical round-trip. 14/14 PASS on real
+  cycle 2609.
+
+### Performance
+
+- Bulk runway query and indexed lookups: full four-format export on a
+  real cycle down from 124.5s to 20.4s (release build).
+
+### Docs
+
+- `docs/SUPPORTED_TARGETS.md` (new), `docs/1.1_CONSOLIDATION.md`
+  (new), provenance matrix updated.
+
+
 ## 1.0.0 — 2026-08-19
 
 First production release.
