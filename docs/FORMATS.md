@@ -10,15 +10,15 @@ here is claimed without an executed export+install+validation path.
 |---|---|---|---|
 | xplane-dat | XPNAV1200 / XPFIX1200 / XPAWY1101 | Official Laminar specs (v1200/1101), golden-verified vs convert424toxplane v12.4 on cycles 2608+2609 | **Supported** (X-Plane 12), Experimental (X-Plane 11) |
 | xplane-cifp1250 | CIFP/$ICAO.dat terminal procedures | Official Laminar XP-CIFP1250 spec; production encoder = Laminar's convert424toxplane (we feed it the FAA CIFP) | Production path documented (X_PLANE_STRATEGY.md); converter is the sanctioned encoder |
-| msfs-bgl | SimpleNavData-style BGL package sources | Official MSFS SDK path (bglcomp schema, SimpleNavData sample, fspackagetool.exe, PackageOrderHint CUSTOM_NAVDATA) | **Experimental** (source generation + transactional Community install verified; SDK compile + BglExplorer verification pending a real SDK) |
-| little-navmap-sqlite | Little Navmap nav database | Open-source schema (albar965/atools, GPL-3.0; interface reference only) | **Experimental** (schema-valid + referential output verified; in-app load not executed) |
+| msfs-bgl | SimpleNavData-style BGL package sources | Official MSFS SDK path (bglcomp schema, SimpleNavData sample, fspackagetool.exe, PackageOrderHint CUSTOM_NAVDATA); full ARINC 424 -> BGLComp leg mapping (all published path terminators, 199,966 legs on cycle 2609) | **Experimental** (source generation + transactional Community install verified; SDK compile + BglExplorer verification pending a real SDK) |
+| little-navmap-sqlite | Little Navmap nav database | Open-source schema (albar965/atools, GPL-3.0; interface reference only) | **Supported** for install path; in-app load not executed on the verification machine (Little Navmap absent) |
+| pmdg-text | wpNavAPT / wpNavAID / wpNavFIX / wpNavRTE | AIRNAV Navdata Data File Definition (public document) + PMDG Navdata Technical Glossary | **Experimental** (real cycle 2609 export verified; not loaded in a PMDG aircraft) |
 
 ## Research-only families (no implementation yet)
 
 | Family | Target examples | Blocking reason |
 |---|---|---|
 | navdatapro-text | Aerosoft CRJ / NavDataPro | No official vendor specification or open-source reference; community docs are observational only. Implementing from the local commercial package alone would violate the implementation-authority rule. |
-| pmdg-text | PMDG legacy | Same as above. |
 | lnm-flightplans, leveld-xml, feelthere-text, flight1-text | Level-D, FeelThere/Wilco/KLN90B, Flight1/FSBuild | Authority not yet established; per-family clean-room or open reference required. |
 | dfd-sqlite, fwd-sqlite, fenix/tfdi | DFD / FWD-FD / Fenix / TFDi | Container compatibility is observed-only (proprietary); aviation semantics would be independently grounded, but serializer implementation requires clean-room proof per the observed-container policy. |
 
