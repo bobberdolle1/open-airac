@@ -8,14 +8,10 @@ use openairac_store::WorldStore;
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "openairac")]
-#[command(
-    about = "OpenAIRAC — The open navigation data engine for flight simulation. Install once, navigate forever."
-)]
 #[command(
     name = "openairac",
     version,
-    about = "OpenAIRAC navigation data engine (flight simulation only)"
+    about = "OpenAIRAC — The open navigation data engine for flight simulation (flight simulation only)"
 )]
 struct Cli {
     #[command(subcommand)]

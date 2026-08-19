@@ -2,9 +2,9 @@ name: CI Workspace Validation
 
 on:
   push:
-    branches: [ main, "reboot/*" ]
+    branches: [ main, "reboot/*", "release/*" ]
   pull_request:
-    branches: [ main, "reboot/*" ]
+    branches: [ main, "reboot/*", "release/*" ]
 
 jobs:
   validate:
