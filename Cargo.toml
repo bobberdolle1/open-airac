@@ -12,6 +12,8 @@ members = [
     "crates/openairac-bundle",
     "crates/openairac-routing",
     "crates/openairac-export-xplane",
+    "crates/openairac-export",
+    "crates/openairac-export-msfs",
     "crates/openairac-cli",
     "crates/openairac-plugin",
     "tools/xplane-reference-audit",

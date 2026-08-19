@@ -292,6 +292,25 @@ enum CycleCmd {
 
 #[derive(Subcommand)]
 enum ExportTarget {
+    /// List registered simulator/format targets with support states
+    Targets {},
+    /// Export MSFS navdata sources (official SDK SimpleNavData path)
+    Msfs {
+        #[arg(short, long, default_value = "./data/world.openairac.sqlite")]
+        db: PathBuf,
+        #[arg(short, long, default_value = "./dist/msfs")]
+        out: PathBuf,
+        /// Effective date for the export (YYYY-MM-DD or RFC3339)
+        #[arg(long)]
+        date: Option<String>,
+        /// MSFS SDK Tools/bin directory (fspackagetool.exe); also read
+        /// from MSFS_SDK env var
+        #[arg(long)]
+        sdk: Option<PathBuf>,
+        /// Install into this Community folder (transactional)
+        #[arg(long)]
+        install_to: Option<PathBuf>,
+    },
     /// Export X-Plane 12 dat files (earth_fix.dat, earth_nav.dat, earth_awy.dat)
     Xplane {
         #[arg(short, long, default_value = "./data/world.openairac.sqlite")]
@@ -1260,6 +1279,70 @@ fn main() -> Result<()> {
             }
         },
         Commands::Export { target } => match target {
+            ExportTarget::Targets {} => {
+                println!("Registered targets:");
+                for t in openairac_export::target_registry() {
+                    println!(
+                        "  {:<16} {:<14} {} (family {})",
+                        t.id,
+                        t.support_state.as_str(),
+                        t.display_name,
+                        t.format_family.as_str()
+                    );
+                }
+            }
+            ExportTarget::Msfs {
+                db,
+                out,
+                date,
+                sdk,
+                install_to,
+            } => {
+                let export_date = parse_export_date(date)?;
+                let store = WorldStore::open(db)?;
+                let set = openairac_export::FormatExporter::export(
+                    &openairac_export_msfs::MsfsNavdataExporter,
+                    &store,
+                    export_date,
+                    out,
+                )?;
+                println!(
+                    "Exported MSFS navdata sources (cycle {}): {} artifacts",
+                    set.cycle,
+                    set.artifacts.len()
+                );
+                for a in &set.artifacts {
+                    println!("  {} ({} bytes)", a.path, a.size);
+                }
+                if let Some(sdk_bin) = sdk
+                    .as_deref()
+                    .or(openairac_export_msfs::find_sdk_tools_bin(None).as_deref())
+                {
+                    match openairac_export_msfs::compile_package(sdk_bin, out) {
+                        Ok(pkg) => println!("Compiled package: {:?}", pkg),
+                        Err(e) => println!("NOTE: package compile skipped: {e}"),
+                    }
+                } else {
+                    println!(
+                        "NOTE: no MSFS SDK found (MSFS_SDK env or --sdk);                          sources ready for fspackagetool.exe"
+                    );
+                }
+                if let Some(community) = install_to {
+                    let desc = openairac_export::target("msfs2024")
+                        .expect("registered")
+                        .clone();
+                    let installer = openairac_export_msfs::MsfsTargetInstaller::new(desc);
+                    let report = openairac_export::TargetInstaller::install(
+                        &installer, out, &set, community,
+                    )?;
+                    println!(
+                        "Installed {} file(s) into {:?} (op {})",
+                        report.installed.len(),
+                        community,
+                        report.operation_id
+                    );
+                }
+            }
             ExportTarget::Xplane {
                 db,
                 out,
