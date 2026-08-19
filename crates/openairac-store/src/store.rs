@@ -6263,6 +6263,94 @@ mod tests {
     }
 
     #[test]
+    fn test_temporal_airac_activation_boundary() {
+        // Deterministic temporal activation E2E with explicit instants
+        // (never the wall clock):
+        //   2608 effective 2026-08-06T09:01:00Z
+        //   2609 effective 2026-09-03T09:01:00Z
+        // T0 = just before the 2609 boundary, T1 = exact boundary,
+        // T2 = safely after.
+        let mut store = WorldStore::open_in_memory().unwrap();
+        store
+            .insert_source_snapshot(&snapshot("snap-base"))
+            .unwrap();
+        store
+            .insert_source_snapshot(&snapshot("snap-next"))
+            .unwrap();
+        let eff_2608: DateTime<Utc> = DateTime::parse_from_rfc3339("2026-08-06T09:01:00Z")
+            .unwrap()
+            .into();
+        let eff_2609: DateTime<Utc> = DateTime::parse_from_rfc3339("2026-09-03T09:01:00Z")
+            .unwrap()
+            .into();
+        let t0: DateTime<Utc> = DateTime::parse_from_rfc3339("2026-09-03T09:00:59Z")
+            .unwrap()
+            .into();
+        let t1: DateTime<Utc> = DateTime::parse_from_rfc3339("2026-09-03T09:01:00Z")
+            .unwrap()
+            .into();
+        let t2: DateTime<Utc> = DateTime::parse_from_rfc3339("2026-09-04T00:00:00Z")
+            .unwrap()
+            .into();
+
+        // 2608 baseline.
+        store
+            .apply_publication(&PublicationPlan {
+                namespace: "faa".to_string(),
+                kind: UpdateKind::FullSnapshot,
+                ils_associations: vec![],
+                valid_from: eff_2608,
+                payloads: EntityPayloads {
+                    waypoints: vec![s7_wp("faa:WP1", 1.0, eff_2608, "snap-base")],
+                    ..Default::default()
+                },
+                tombstones: vec![],
+                masked_tables: Default::default(),
+                publication_id: "pub-2608".to_string(),
+            })
+            .unwrap();
+
+        // 2609 prepublished while the clock is at T0: must NOT be
+        // active yet.
+        store
+            .apply_publication(&PublicationPlan {
+                namespace: "faa".to_string(),
+                kind: UpdateKind::FullSnapshot,
+                ils_associations: vec![],
+                valid_from: eff_2609,
+                payloads: EntityPayloads {
+                    waypoints: vec![s7_wp("faa:WP1", 1.5, eff_2609, "snap-next")],
+                    ..Default::default()
+                },
+                tombstones: vec![],
+                masked_tables: Default::default(),
+                publication_id: "pub-2609".to_string(),
+            })
+            .unwrap();
+
+        let lat_at = |store: &WorldStore, t: DateTime<Utc>| -> f64 {
+            store
+                .query_waypoints_at(t)
+                .unwrap()
+                .iter()
+                .find(|w| w.object_id.0 == "faa:WP1")
+                .map(|w| w.latitude)
+                .unwrap()
+        };
+
+        // Just before the boundary: 2608 still active, 2609 staged
+        // but not visible.
+        assert_eq!(lat_at(&store, t0), 1.0);
+        // EXACT boundary: 2609 becomes eligible at the documented
+        // inclusive instant (valid_from <= t).
+        assert_eq!(lat_at(&store, t1), 1.5);
+        // Safely after: 2609 active.
+        assert_eq!(lat_at(&store, t2), 1.5);
+        // A restart/requery at T0 still sees 2608 (no hidden state).
+        assert_eq!(lat_at(&store, t0), 1.0);
+    }
+
+    #[test]
     fn test_cross_provider_publication_id_collision_fails_loud() {
         let store = WorldStore::open_in_memory().unwrap();
         store.insert_source_snapshot(&snapshot("snap-x")).unwrap();

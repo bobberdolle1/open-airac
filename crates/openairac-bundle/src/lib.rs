@@ -1424,6 +1424,78 @@ mod tests {
     }
 
     #[test]
+    fn test_channel_future_cycle_never_active_early() {
+        // The channel may prepublish 2609 as the latest artifact with
+        // a FUTURE effective instant; decide_update must return
+        // Preload (not Activate) until the boundary, and Activate at
+        // and after it. Explicit instants only - never the wall clock.
+        let dir = unique_dir("chan_future");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let t0 = DateTime::parse_from_rfc3339("2026-09-03T09:00:59Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let t1 = DateTime::parse_from_rfc3339("2026-09-03T09:01:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let t2 = DateTime::parse_from_rfc3339("2026-09-04T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let eff = DateTime::parse_from_rfc3339("2026-09-03T09:01:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let index = ChannelIndex {
+            channel: "test".to_string(),
+            generated_at: t0.to_rfc3339(),
+            latest: ChannelArtifact {
+                bundle_hash: "b".repeat(64),
+                path: "bundle-b".to_string(),
+                schema_version: 9,
+                effective_from: eff.to_rfc3339(),
+                airac_cycle: Some("2609".to_string()),
+            },
+        };
+        write_channel(&dir, &index).unwrap();
+        // The candidate bundle must exist for a non-Reject decision.
+        let (store, dir2) = fixture_store();
+        let out = dir2.join("bundles");
+        let (_, bundle_dir) = build_bundle(&store, &out, eff).unwrap();
+        let candidate = dir.join("bundle-b");
+        let _ = std::fs::remove_dir_all(&candidate);
+        copy_dir(&bundle_dir, &candidate);
+        // Rebuild the index with the real hash.
+        let manifest = inspect_bundle(&candidate).unwrap();
+        let index = ChannelIndex {
+            latest: ChannelArtifact {
+                bundle_hash: manifest.bundle_hash.clone(),
+                ..index.latest.clone()
+            },
+            ..index.clone()
+        };
+        write_channel(&dir, &index).unwrap();
+
+        let installed = InstalledState {
+            current: None,
+            next: None,
+        };
+        // Just before the boundary: preload, never activate.
+        assert_eq!(
+            decide_update(&installed, &index, &dir, 9, t0),
+            UpdateDecision::Preload
+        );
+        // Exact boundary: eligible to activate.
+        assert_eq!(
+            decide_update(&installed, &index, &dir, 9, t1),
+            UpdateDecision::Activate
+        );
+        // After: still activate.
+        assert_eq!(
+            decide_update(&installed, &index, &dir, 9, t2),
+            UpdateDecision::Activate
+        );
+    }
+
+    #[test]
     fn test_update_decisions() {
         let dir = unique_dir("chan");
         let _ = std::fs::remove_dir_all(&dir);
