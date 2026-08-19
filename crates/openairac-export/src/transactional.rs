@@ -115,9 +115,11 @@ fn rollback_target(target_root: &Path, journal: &InstallJournal) -> Result<FileI
     })
 }
 
-/// Recover from an interrupted install: roll back using the journal;
-/// a stale lock without journal is cleared (crash between lock and
-/// journal write modified nothing).
+/// Recover from an interrupted install. A Committed journal is a
+/// feature (undo-last-install), not a crash - it is left in place.
+///
+/// Undo the last install (any journaled phase) or fail when there is
+/// no journal.
 pub fn rollback_last_install(target_root: &Path) -> Result<FileInstallReport> {
     match read_journal(target_root)? {
         Some(j) => rollback_target(target_root, &j),
@@ -127,7 +129,10 @@ pub fn rollback_last_install(target_root: &Path) -> Result<FileInstallReport> {
 
 pub fn recover_file_install(target_root: &Path) -> Result<Option<FileInstallReport>> {
     match read_journal(target_root)? {
-        Some(j) => Ok(Some(rollback_target(target_root, &j)?)),
+        Some(j) if j.phase != InstallPhase::Committed => {
+            Ok(Some(rollback_target(target_root, &j)?))
+        }
+        Some(_committed) => Ok(None),
         None => {
             let lock = target_root.join(INSTALL_LOCK);
             if lock.exists() {
@@ -150,6 +155,14 @@ pub fn install_files_transactionally(
     std::fs::create_dir_all(target_root)
         .with_context(|| format!("creating target {:?}", target_root))?;
     recover_file_install(target_root)?;
+    // A previous successful install's journal is superseded: the new
+    // install becomes the only undoable state.
+    if let Some(prev) = read_journal(target_root)?
+        && prev.phase == InstallPhase::Committed
+    {
+        let _ = std::fs::remove_dir_all(&prev.backup_dir);
+        let _ = std::fs::remove_file(target_root.join(INSTALL_JOURNAL));
+    }
 
     let operation_id = format!(
         "op-{}-{}",

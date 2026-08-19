@@ -1533,7 +1533,7 @@ fn main() -> Result<()> {
                 path,
                 date,
             } => {
-                let desc = openairac_export::target(&target).ok_or_else(|| {
+                let desc = openairac_export::target(target).ok_or_else(|| {
                     anyhow::anyhow!("unknown target '{}'; use 'target list'", target)
                 })?;
                 let target_dir = match path.clone() {
@@ -1545,7 +1545,7 @@ fn main() -> Result<()> {
                         )
                     })?,
                 };
-                let export_date = parse_export_date(&date)?;
+                let export_date = parse_export_date(date)?;
                 let store = WorldStore::open(db)?;
 
                 println!(
@@ -1595,7 +1595,7 @@ fn main() -> Result<()> {
                 let _ = std::fs::remove_dir_all(&staging);
             }
             TargetCmd::Rollback { target, path } => {
-                let desc = openairac_export::target(&target).ok_or_else(|| {
+                let desc = openairac_export::target(target).ok_or_else(|| {
                     anyhow::anyhow!("unknown target '{}'; use 'target list'", target)
                 })?;
                 let target_dir = match path.clone() {
@@ -1627,7 +1627,7 @@ fn main() -> Result<()> {
                 min_state,
             } => {
                 let min_rank = support_rank(parse_support_state(min_state)?);
-                let export_date = parse_export_date(&date)?;
+                let export_date = parse_export_date(date)?;
                 let store = WorldStore::open(db)?;
                 println!(
                     "Multi-target update (as-of {}):",

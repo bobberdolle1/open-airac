@@ -1059,7 +1059,7 @@ impl TargetInstaller for MsfsTargetInstaller {
             other => bail!("unsupported install strategy {other:?} for MSFS"),
         };
         let pkg_root = target_root.join(&rel_subdir);
-        let report = openairac_export::recover_file_install(&pkg_root)?.unwrap_or_else(|| {
+        let report = openairac_export::rollback_last_install(&pkg_root).unwrap_or_else(|_| {
             openairac_export::FileInstallReport {
                 operation_id: "none".to_string(),
                 installed: Vec::new(),

@@ -239,10 +239,10 @@ pub struct TargetDescriptor {
 /// Expand environment variables and home directory in paths.
 pub fn expand_path(raw: &str) -> PathBuf {
     let mut s = raw.to_string();
-    if s.starts_with('~') {
-        if let Ok(home) = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")) {
-            s = s.replacen('~', &home, 1);
-        }
+    if s.starts_with('~')
+        && let Ok(home) = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME"))
+    {
+        s = s.replacen('~', &home, 1);
     }
     // Expand %VAR%
     while let Some(start) = s.find('%') {
@@ -415,7 +415,7 @@ impl TargetInstaller for GenericTargetInstaller {
                 }
             }
         };
-        let rep = transactional::recover_file_install(&dest)?.unwrap_or_else(|| {
+        let rep = transactional::rollback_last_install(&dest).unwrap_or_else(|_| {
             transactional::FileInstallReport {
                 operation_id: "none".to_string(),
                 installed: Vec::new(),

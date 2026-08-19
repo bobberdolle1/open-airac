@@ -1342,13 +1342,14 @@ fn rollback_target(target_dir: &Path, journal: &InstallJournal) -> Result<LayerI
     })
 }
 
-/// Recover from an interrupted install: if a journal exists, roll the
-/// target back; a stale lock without journal is removed. Returns the
-/// rollback report when recovery happened.
+/// See the function body for the exact recovery contract.
+/// NOT Committed represents a crash. A Committed journal is a feature
+/// (undo-last-install) and is left in place.
 pub fn recover_interrupted(target_dir: &Path) -> Result<Option<LayerInstallReport>> {
     let journal = read_journal(target_dir)?;
     match journal {
-        Some(j) => Ok(Some(rollback_target(target_dir, &j)?)),
+        Some(j) if j.phase != InstallPhase::Committed => Ok(Some(rollback_target(target_dir, &j)?)),
+        Some(_committed) => Ok(None),
         None => {
             let lock = target_dir.join(INSTALL_LOCK);
             if lock.exists() {
@@ -1358,6 +1359,16 @@ pub fn recover_interrupted(target_dir: &Path) -> Result<Option<LayerInstallRepor
             }
             Ok(None)
         }
+    }
+}
+
+/// Undo the last successful install (Committed journal) or roll back
+/// any interrupted one. Returns None when there is nothing to undo.
+pub fn undo_last_install(target_dir: &Path) -> Result<Option<LayerInstallReport>> {
+    let journal = read_journal(target_dir)?;
+    match journal {
+        Some(j) => Ok(Some(rollback_target(target_dir, &j)?)),
+        None => Ok(None),
     }
 }
 
@@ -1406,10 +1417,17 @@ pub fn install_layer_with_failpoints(
     // 0. Any interrupted previous install must be resolved first.
     recover_interrupted(target_dir)?;
 
-    // 1. Validate the staged layer completely before touching the target.
-    let manifest = validate_staged_layer(staging_dir)?;
+    // 0b. A previous SUCCESSFUL install's journal is a feature for
+    if let Some(prev) = read_journal(target_dir)?
+        && prev.phase == InstallPhase::Committed
+    {
+        let _ = std::fs::remove_dir_all(&prev.backup_dir);
+        let _ = std::fs::remove_file(target_dir.join(INSTALL_JOURNAL));
+    }
 
-    // 2. Exclusive lock.
+    // 1. Validate the staged layer completely before touching the
+    // target.
+    let manifest = validate_staged_layer(staging_dir)?;
     let operation_id = format!(
         "op-{}-{}",
         std::process::id(),

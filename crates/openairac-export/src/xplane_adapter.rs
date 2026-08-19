@@ -97,9 +97,7 @@ impl TargetInstaller for XPlaneTargetInstaller {
 
     fn rollback(&self, target_root: &Path) -> Result<TargetInstallReport> {
         let report =
-            openairac_export_xplane::recover_interrupted(target_root)?.unwrap_or_else(|| {
-                // No journal: nothing to roll back. Return an
-                // empty report rather than failing - idempotent.
+            openairac_export_xplane::undo_last_install(target_root)?.unwrap_or_else(|| {
                 openairac_export_xplane::LayerInstallReport {
                     operation_id: "none".to_string(),
                     cycle: String::new(),
