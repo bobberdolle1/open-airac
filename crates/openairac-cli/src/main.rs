@@ -143,6 +143,12 @@ enum Commands {
         out: PathBuf,
     },
 
+    /// Manage simulator targets (list, detect, install, rollback)
+    Target {
+        #[command(subcommand)]
+        cmd: TargetCmd,
+    },
+
     /// Local update channel: check and apply
     Update {
         #[command(subcommand)]
@@ -313,11 +319,67 @@ enum CycleCmd {
 }
 
 #[derive(Subcommand)]
+enum TargetCmd {
+    /// List all registered simulator targets with support states
+    List {},
+    /// Detect installed simulator targets on this workstation
+    Detect {},
+    /// Install navigation data into a target simulator
+    Install {
+        /// Target ID (e.g. xplane12, little-navmap, msfs2024, msfs2020, pmdg-legacy)
+        target: String,
+        /// Path to source world database
+        #[arg(short, long, default_value = "./data/world.openairac.sqlite")]
+        db: PathBuf,
+        /// Destination directory override (defaults to detected path)
+        #[arg(short, long)]
+        path: Option<PathBuf>,
+        /// Export date in ISO 8601 / RFC 3339 format
+        #[arg(long)]
+        date: Option<String>,
+    },
+    /// Rollback the last navigation data installation for a target
+    Rollback {
+        /// Target ID
+        target: String,
+        /// Target directory override
+        #[arg(short, long)]
+        path: Option<PathBuf>,
+    },
+    /// Export the world once and update every detected target
+    /// transactionally (one family export per target, per-target
+    /// rollback on failure; never mixes worlds).
+    UpdateAll {
+        /// Path to source world database
+        #[arg(short, long, default_value = "./data/world.openairac.sqlite")]
+        db: PathBuf,
+        /// Export date in ISO 8601 / RFC 3339 format
+        #[arg(long)]
+        date: Option<String>,
+        /// Minimum support state to touch
+        /// (supported|experimental|research|unsupported)
+        #[arg(long, default_value = "experimental")]
+        min_state: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum ExportTarget {
     /// Detect installed simulator targets and report their navdata status
     Detect {},
     /// List registered simulator/format targets with support states
     Targets {},
+    /// Export PMDG classic FMC text navigation data (wpNav*.txt)
+    Pmdg {
+        #[arg(short, long, default_value = "./data/world.openairac.sqlite")]
+        db: PathBuf,
+        #[arg(short, long, default_value = "./output/pmdg")]
+        out: PathBuf,
+        #[arg(short, long)]
+        date: Option<String>,
+        #[arg(long)]
+        install_to: Option<PathBuf>,
+    },
     /// Export a Little Navmap nav database (open-source schema)
     Lnm {
         #[arg(short, long, default_value = "./data/world.openairac.sqlite")]
@@ -382,6 +444,105 @@ fn parse_iso_date_to_year_decimal(date_str: &str) -> Result<f64> {
     let days_in_year = if d.leap_year() { 366.0 } else { 365.0 };
 
     Ok(year + (day_of_year - 1.0) / days_in_year)
+}
+
+/// Numeric ranking of support states for --min-state filtering.
+fn support_rank(state: openairac_export::SupportState) -> u8 {
+    match state {
+        openairac_export::SupportState::Unsupported => 0,
+        openairac_export::SupportState::Research => 1,
+        openairac_export::SupportState::Experimental => 2,
+        openairac_export::SupportState::Supported => 3,
+    }
+}
+
+fn parse_support_state(s: &str) -> Result<openairac_export::SupportState> {
+    use openairac_export::SupportState;
+    match s {
+        "supported" => Ok(SupportState::Supported),
+        "experimental" => Ok(SupportState::Experimental),
+        "research" => Ok(SupportState::Research),
+        "unsupported" => Ok(SupportState::Unsupported),
+        other => anyhow::bail!(
+            "unknown support state '{other}' (supported|experimental|research|unsupported)"
+        ),
+    }
+}
+
+/// Registry-driven family dispatch: one export per format family.
+fn export_for_family(
+    store: &WorldStore,
+    family: &str,
+    export_date: chrono::DateTime<Utc>,
+    staging: &std::path::Path,
+) -> Result<openairac_export::GeneratedArtifactSet> {
+    use openairac_export::FormatExporter;
+    match family {
+        "xplane-dat" => FormatExporter::export(
+            &openairac_export::XPlaneDatExporter,
+            store,
+            export_date,
+            staging,
+        ),
+        "little-navmap-sqlite" => FormatExporter::export(
+            &openairac_export_lnm::LnmNavdataExporter,
+            store,
+            export_date,
+            staging,
+        ),
+        "msfs-bgl" => FormatExporter::export(
+            &openairac_export_msfs::MsfsNavdataExporter,
+            store,
+            export_date,
+            staging,
+        ),
+        "pmdg-text" => FormatExporter::export(
+            &openairac_export_pmdg::PmdgNavdataExporter,
+            store,
+            export_date,
+            staging,
+        ),
+        other => anyhow::bail!("unsupported format family '{other}'"),
+    }
+}
+
+/// Installer dispatch: MSFS targets use the SDK-aware installer,
+/// X-Plane targets the dedicated layer installer (correct identity
+/// schema), everything else the generic transactional installer.
+fn installer_for(
+    desc: &openairac_export::TargetDescriptor,
+) -> Box<dyn openairac_export::TargetInstaller> {
+    match desc.format_family.as_str() {
+        "msfs-bgl" => Box::new(openairac_export_msfs::MsfsTargetInstaller::new(
+            desc.clone(),
+        )),
+        "xplane-dat" => Box::new(openairac_export::XPlaneTargetInstaller::new(desc.clone())),
+        _ => Box::new(openairac_export::GenericTargetInstaller::new(desc.clone())),
+    }
+}
+
+/// Post-install semantic validation for targets that declare
+/// HashAndSemantic (X-Plane layers): resolve the sim world and require
+/// a Consistent verdict, otherwise fail closed and roll back.
+fn verify_semantic(
+    desc: &openairac_export::TargetDescriptor,
+    target_dir: &std::path::Path,
+) -> Result<()> {
+    if desc.validation_strategy != openairac_export::ValidationStrategy::HashAndSemantic {
+        return Ok(());
+    }
+    if desc.format_family.as_str() != "xplane-dat" {
+        return Ok(());
+    }
+    let report = openairac_export::resolve_xplane_target(target_dir)?;
+    if report.verdict != openairac_export_xplane::SimWorldVerdict::Consistent {
+        anyhow::bail!(
+            "semantic validation failed for target '{}': {:?}",
+            desc.id,
+            report.verdict
+        );
+    }
+    Ok(())
 }
 
 fn parse_export_date(date: &Option<String>) -> Result<chrono::DateTime<Utc>> {
@@ -1235,6 +1396,208 @@ fn main() -> Result<()> {
                 println!("Rolled back to previous artifact: {hash}");
             }
         },
+        Commands::Target { cmd } => match cmd {
+            TargetCmd::List {} => {
+                println!("Registered Simulator & Ecosystem Targets:");
+                for t in openairac_export::target_registry() {
+                    println!(
+                        "  {:<16} [{:<12}] {} (family: {})",
+                        t.id,
+                        t.support_state.as_str(),
+                        t.display_name,
+                        t.format_family.as_str()
+                    );
+                }
+            }
+            TargetCmd::Detect {} => {
+                println!("Scanning for installed simulator targets:");
+                let mut found_count = 0;
+                for t in openairac_export::target_registry() {
+                    if let Some(path) = openairac_export::detect_install_root(t) {
+                        found_count += 1;
+                        println!(
+                            "  [FOUND] {:<14} -> {:?} ({})",
+                            t.id,
+                            path,
+                            t.support_state.as_str()
+                        );
+                    } else {
+                        println!("  [--]    {:<14} (not detected)", t.id);
+                    }
+                }
+                println!("Detected {found_count} target(s).");
+            }
+            TargetCmd::Install {
+                target,
+                db,
+                path,
+                date,
+            } => {
+                let desc = openairac_export::target(&target).ok_or_else(|| {
+                    anyhow::anyhow!("unknown target '{}'; use 'target list'", target)
+                })?;
+                let target_dir = match path.clone() {
+                    Some(p) => p,
+                    None => openairac_export::detect_install_root(desc).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "could not auto-detect install root for '{}'; specify with --path",
+                            target
+                        )
+                    })?,
+                };
+                let export_date = parse_export_date(&date)?;
+                let store = WorldStore::open(db)?;
+
+                println!(
+                    "Installing navigation data into target '{}' ({})",
+                    desc.display_name,
+                    desc.support_state.as_str()
+                );
+                println!("  Target directory: {:?}", target_dir);
+
+                // Stage into a temporary directory
+                let staging = std::env::temp_dir().join(format!(
+                    "oa_target_stage_{}_{}",
+                    target,
+                    std::process::id()
+                ));
+                let _ = std::fs::remove_dir_all(&staging);
+                std::fs::create_dir_all(&staging)?;
+
+                let set =
+                    export_for_family(&store, desc.format_family.as_str(), export_date, &staging)?;
+
+                let installer = installer_for(desc);
+                let report = openairac_export::TargetInstaller::install(
+                    installer.as_ref(),
+                    &staging,
+                    &set,
+                    &target_dir,
+                )?;
+
+                // Fail-closed semantic check for X-Plane layers.
+                if let Err(e) = verify_semantic(desc, &target_dir) {
+                    let _ = openairac_export::TargetInstaller::rollback(
+                        installer.as_ref(),
+                        &target_dir,
+                    );
+                    let _ = std::fs::remove_dir_all(&staging);
+                    return Err(e);
+                }
+
+                println!(
+                    "Successfully installed cycle {} into {:?} (op: {})",
+                    report.cycle, target_dir, report.operation_id
+                );
+                for f in &report.installed {
+                    println!("  installed {f}");
+                }
+                let _ = std::fs::remove_dir_all(&staging);
+            }
+            TargetCmd::Rollback { target, path } => {
+                let desc = openairac_export::target(&target).ok_or_else(|| {
+                    anyhow::anyhow!("unknown target '{}'; use 'target list'", target)
+                })?;
+                let target_dir = match path.clone() {
+                    Some(p) => p,
+                    None => openairac_export::detect_install_root(desc).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "could not auto-detect install root for '{}'; specify with --path",
+                            target
+                        )
+                    })?,
+                };
+                let installer = openairac_export::GenericTargetInstaller::new(desc.clone());
+                let report = openairac_export::TargetInstaller::rollback(&installer, &target_dir)?;
+                println!(
+                    "Rollback complete for target '{}' in {:?} (op: {})",
+                    target, target_dir, report.operation_id
+                );
+                for f in &report.restored {
+                    println!("  restored {f}");
+                }
+                for f in &report.removed {
+                    println!("  removed {f}");
+                }
+            }
+            TargetCmd::UpdateAll {
+                db,
+                date,
+                min_state,
+            } => {
+                let min_rank = support_rank(parse_support_state(min_state)?);
+                let export_date = parse_export_date(&date)?;
+                let store = WorldStore::open(db)?;
+                println!(
+                    "Multi-target update (as-of {}):",
+                    export_date.format("%Y-%m-%d %H:%M UTC")
+                );
+
+                let mut updated = 0usize;
+                let mut skipped = 0usize;
+                let mut failed = 0usize;
+                for t in openairac_export::target_registry() {
+                    if support_rank(t.support_state) < min_rank {
+                        continue;
+                    }
+                    let Some(target_dir) = openairac_export::detect_install_root(t) else {
+                        println!("  [SKIP] {:<16} not detected", t.id);
+                        skipped += 1;
+                        continue;
+                    };
+
+                    let staging = std::env::temp_dir().join(format!(
+                        "oa_update_stage_{}_{}",
+                        t.id,
+                        std::process::id()
+                    ));
+                    let _ = std::fs::remove_dir_all(&staging);
+                    std::fs::create_dir_all(&staging)?;
+
+                    let result =
+                        export_for_family(&store, t.format_family.as_str(), export_date, &staging)
+                            .and_then(|set| {
+                                let installer = installer_for(t);
+                                let report = openairac_export::TargetInstaller::install(
+                                    installer.as_ref(),
+                                    &staging,
+                                    &set,
+                                    &target_dir,
+                                )?;
+                                if let Err(e) = verify_semantic(t, &target_dir) {
+                                    let _ = openairac_export::TargetInstaller::rollback(
+                                        installer.as_ref(),
+                                        &target_dir,
+                                    );
+                                    return Err(e);
+                                }
+                                Ok(report)
+                            });
+
+                    match result {
+                        Ok(report) => {
+                            println!(
+                                "  [OK]   {:<16} cycle {} -> {:?} ({} files)",
+                                t.id,
+                                report.cycle,
+                                target_dir,
+                                report.installed.len()
+                            );
+                            updated += 1;
+                        }
+                        Err(e) => {
+                            println!("  [FAIL] {:<16} {:?}: {}", t.id, target_dir, e);
+                            failed += 1;
+                        }
+                    }
+                    let _ = std::fs::remove_dir_all(&staging);
+                }
+                println!("Updated {updated} target(s), skipped {skipped}, failed {failed}.");
+                if failed > 0 {
+                    anyhow::bail!("{failed} target(s) failed; no worlds were mixed");
+                }
+            }
+        },
         Commands::Update { cmd } => match cmd {
             UpdateCmd::Check { root, channel } => {
                 let index = openairac_bundle::read_channel(channel)?;
@@ -1433,6 +1796,42 @@ fn main() -> Result<()> {
                 println!("Exported Little Navmap database (cycle {}):", set.cycle);
                 for a in &set.artifacts {
                     println!("  {} ({} bytes)", a.path, a.size);
+                }
+            }
+            ExportTarget::Pmdg {
+                db,
+                out,
+                date,
+                install_to,
+            } => {
+                let export_date = parse_export_date(date)?;
+                let store = WorldStore::open(db)?;
+                let set = openairac_export::FormatExporter::export(
+                    &openairac_export_pmdg::PmdgNavdataExporter,
+                    &store,
+                    export_date,
+                    out,
+                )?;
+                println!(
+                    "Exported PMDG classic navigation files (cycle {}):",
+                    set.cycle
+                );
+                for a in &set.artifacts {
+                    println!("  {} ({} bytes, {})", a.path, a.size, a.kind);
+                }
+                if let Some(target_dir) = install_to {
+                    let desc = openairac_export::target("pmdg-legacy")
+                        .expect("registered")
+                        .clone();
+                    let installer = openairac_export::GenericTargetInstaller::new(desc);
+                    let report = openairac_export::TargetInstaller::install(
+                        &installer, out, &set, target_dir,
+                    )?;
+                    println!(
+                        "Installed {} files into {:?}",
+                        report.installed.len(),
+                        target_dir
+                    );
                 }
             }
             ExportTarget::Msfs {

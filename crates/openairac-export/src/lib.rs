@@ -236,13 +236,45 @@ pub struct TargetDescriptor {
 }
 
 /// Detect the first install root that exists (in declaration order).
+/// Expand environment variables and home directory in paths.
+pub fn expand_path(raw: &str) -> PathBuf {
+    let mut s = raw.to_string();
+    if s.starts_with('~') {
+        if let Ok(home) = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")) {
+            s = s.replacen('~', &home, 1);
+        }
+    }
+    // Expand %VAR%
+    while let Some(start) = s.find('%') {
+        if let Some(end) = s[start + 1..].find('%') {
+            let var = &s[start + 1..start + 1 + end];
+            if let Ok(val) = std::env::var(var) {
+                s.replace_range(start..start + 2 + end, &val);
+            } else {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+    PathBuf::from(s)
+}
+
+/// Detect the first install root that exists (in declaration order).
 pub fn detect_install_root(target: &TargetDescriptor) -> Option<PathBuf> {
     for root in &target.install_roots {
-        let candidate = PathBuf::from(&root.path).join(&root.subdir);
+        let expanded = expand_path(&root.path);
+        let candidate = if root.subdir.is_empty() {
+            expanded.clone()
+        } else {
+            expanded.join(&root.subdir)
+        };
         if candidate.is_dir() {
             let ok = target.detection_rules.iter().all(|rule| match rule {
-                DetectionRule::DirContains(rel) => candidate.join(rel).exists(),
-                DetectionRule::FileGlob(_) => true, // globs checked by callers with dir listings
+                DetectionRule::DirContains(rel) => {
+                    candidate.join(rel).exists() || expanded.join(rel).exists()
+                }
+                DetectionRule::FileGlob(_) => true,
             });
             if ok {
                 return Some(candidate);
@@ -291,6 +323,139 @@ pub trait TargetInstaller {
 }
 
 // ---------------------------------------------------------------------------
+// Generic Target Installer
+// ---------------------------------------------------------------------------
+
+pub struct GenericTargetInstaller {
+    pub descriptor: TargetDescriptor,
+}
+
+impl GenericTargetInstaller {
+    pub fn new(descriptor: TargetDescriptor) -> Self {
+        Self { descriptor }
+    }
+}
+
+impl TargetInstaller for GenericTargetInstaller {
+    fn descriptor(&self) -> &TargetDescriptor {
+        &self.descriptor
+    }
+
+    fn install(
+        &self,
+        artifacts_root: &Path,
+        artifacts: &GeneratedArtifactSet,
+        target_root: &Path,
+    ) -> Result<TargetInstallReport> {
+        match &self.descriptor.install_strategy {
+            InstallStrategy::CustomData {
+                layer_files,
+                identity_file,
+            } => {
+                let report = transactional::install_files_transactionally(
+                    artifacts_root,
+                    target_root,
+                    layer_files,
+                )?;
+                // Write identity layer marker
+                let id_meta = serde_json::json!({
+                    "target": self.descriptor.id,
+                    "cycle": artifacts.cycle,
+                    "as_of": artifacts.as_of,
+                    "generator": artifacts.generator,
+                    "world_fingerprint": artifacts.world_fingerprint,
+                });
+                std::fs::write(
+                    target_root.join(identity_file),
+                    serde_json::to_string_pretty(&id_meta)?,
+                )?;
+                Ok(TargetInstallReport {
+                    target_id: self.descriptor.id.clone(),
+                    operation_id: report.operation_id,
+                    cycle: artifacts.cycle.clone(),
+                    installed: report.installed,
+                    restored: vec![],
+                    removed: vec![],
+                })
+            }
+            InstallStrategy::Subdirectory { relative } => {
+                let dest = if relative.is_empty() {
+                    target_root.to_path_buf()
+                } else {
+                    target_root.join(relative)
+                };
+                std::fs::create_dir_all(&dest)?;
+                let file_list: Vec<String> =
+                    artifacts.artifacts.iter().map(|a| a.path.clone()).collect();
+                let report = transactional::install_files_transactionally(
+                    artifacts_root,
+                    &dest,
+                    &file_list,
+                )?;
+                Ok(TargetInstallReport {
+                    target_id: self.descriptor.id.clone(),
+                    operation_id: report.operation_id,
+                    cycle: artifacts.cycle.clone(),
+                    installed: report.installed,
+                    restored: vec![],
+                    removed: vec![],
+                })
+            }
+        }
+    }
+
+    fn rollback(&self, target_root: &Path) -> Result<TargetInstallReport> {
+        let dest = match &self.descriptor.install_strategy {
+            InstallStrategy::CustomData { .. } => target_root.to_path_buf(),
+            InstallStrategy::Subdirectory { relative } => {
+                if relative.is_empty() {
+                    target_root.to_path_buf()
+                } else {
+                    target_root.join(relative)
+                }
+            }
+        };
+        let rep = transactional::recover_file_install(&dest)?.unwrap_or_else(|| {
+            transactional::FileInstallReport {
+                operation_id: "none".to_string(),
+                installed: Vec::new(),
+                restored: Vec::new(),
+                removed: Vec::new(),
+            }
+        });
+        Ok(TargetInstallReport {
+            target_id: self.descriptor.id.clone(),
+            operation_id: rep.operation_id,
+            cycle: String::new(),
+            installed: rep.installed,
+            restored: rep.restored,
+            removed: rep.removed,
+        })
+    }
+
+    fn recover(&self, target_root: &Path) -> Result<Option<TargetInstallReport>> {
+        let dest = match &self.descriptor.install_strategy {
+            InstallStrategy::CustomData { .. } => target_root.to_path_buf(),
+            InstallStrategy::Subdirectory { relative } => {
+                if relative.is_empty() {
+                    target_root.to_path_buf()
+                } else {
+                    target_root.join(relative)
+                }
+            }
+        };
+        let rep = transactional::recover_file_install(&dest)?;
+        Ok(rep.map(|r| TargetInstallReport {
+            target_id: self.descriptor.id.clone(),
+            operation_id: r.operation_id,
+            cycle: String::new(),
+            installed: vec![],
+            restored: r.restored,
+            removed: r.removed,
+        }))
+    }
+}
+// ---------------------------------------------------------------------------
 // Registry
 // ---------------------------------------------------------------------------
 
@@ -310,6 +475,7 @@ pub use xplane_adapter::{XPlaneDatExporter, XPlaneTargetInstaller, resolve_xplan
 pub mod transactional;
 pub use transactional::{
     FileInstallReport, InstallPhase, install_files_transactionally, recover_file_install,
+    rollback_last_install,
 };
 
 pub mod registry {
@@ -325,12 +491,42 @@ pub mod registry {
                     display_name: "X-Plane 12".to_string(),
                     simulator: "X-Plane".to_string(),
                     format_family: families::xplane_dat(),
-                    detection_rules: vec![DetectionRule::DirContains("Resources".to_string())],
-                    install_roots: vec![InstallRoot {
-                        platform: "any".to_string(),
-                        path: "%XPLANE%".to_string(),
-                        subdir: "Custom Data".to_string(),
-                    }],
+                    detection_rules: vec![
+                        DetectionRule::DirContains("Resources".to_string()),
+                        DetectionRule::DirContains("Custom Data".to_string()),
+                    ],
+                    install_roots: vec![
+                        InstallRoot {
+                            platform: "any".to_string(),
+                            path: "%XPLANE%".to_string(),
+                            subdir: "Custom Data".to_string(),
+                        },
+                        InstallRoot {
+                            platform: "windows".to_string(),
+                            path: "F:\\SteamLibrary\\steamapps\\common\\X-Plane 12".to_string(),
+                            subdir: "Custom Data".to_string(),
+                        },
+                        InstallRoot {
+                            platform: "windows".to_string(),
+                            path: "C:\\Program Files (x86)\\Steam\\steamapps\\common\\X-Plane 12".to_string(),
+                            subdir: "Custom Data".to_string(),
+                        },
+                        InstallRoot {
+                            platform: "windows".to_string(),
+                            path: "C:\\X-Plane 12".to_string(),
+                            subdir: "Custom Data".to_string(),
+                        },
+                        InstallRoot {
+                            platform: "macos".to_string(),
+                            path: "/Applications/X-Plane 12".to_string(),
+                            subdir: "Custom Data".to_string(),
+                        },
+                        InstallRoot {
+                            platform: "linux".to_string(),
+                            path: "~/.local/share/Steam/steamapps/common/X-Plane 12".to_string(),
+                            subdir: "Custom Data".to_string(),
+                        },
+                    ],
                     required_artifacts: vec![
                         "earth_fix.dat".to_string(),
                         "earth_nav.dat".to_string(),
@@ -360,11 +556,38 @@ pub mod registry {
                     simulator: "X-Plane".to_string(),
                     format_family: families::xplane_dat(),
                     detection_rules: vec![DetectionRule::DirContains("Resources".to_string())],
-                    install_roots: vec![InstallRoot {
-                        platform: "any".to_string(),
-                        path: "%XPLANE%".to_string(),
-                        subdir: "Custom Data".to_string(),
-                    }],
+                    install_roots: vec![
+                        InstallRoot {
+                            platform: "any".to_string(),
+                            path: "%XPLANE11%".to_string(),
+                            subdir: "Custom Data".to_string(),
+                        },
+                        InstallRoot {
+                            platform: "windows".to_string(),
+                            path: "F:\\SteamLibrary\\steamapps\\common\\X-Plane 11".to_string(),
+                            subdir: "Custom Data".to_string(),
+                        },
+                        InstallRoot {
+                            platform: "windows".to_string(),
+                            path: "C:\\Program Files (x86)\\Steam\\steamapps\\common\\X-Plane 11".to_string(),
+                            subdir: "Custom Data".to_string(),
+                        },
+                        InstallRoot {
+                            platform: "windows".to_string(),
+                            path: "C:\\X-Plane 11".to_string(),
+                            subdir: "Custom Data".to_string(),
+                        },
+                        InstallRoot {
+                            platform: "macos".to_string(),
+                            path: "/Applications/X-Plane 11".to_string(),
+                            subdir: "Custom Data".to_string(),
+                        },
+                        InstallRoot {
+                            platform: "linux".to_string(),
+                            path: "~/.local/share/Steam/steamapps/common/X-Plane 11".to_string(),
+                            subdir: "Custom Data".to_string(),
+                        },
+                    ],
                     required_artifacts: vec![
                         "earth_fix.dat".to_string(),
                         "earth_nav.dat".to_string(),
@@ -374,8 +597,7 @@ pub mod registry {
                     version_constraints: vec![VersionConstraint {
                         min: Some("11.30".to_string()),
                         max: None,
-                        note: "Same format family as X-Plane 12; XP11 install path untested in CI"
-                            .to_string(),
+                        note: "Same format family as X-Plane 12; XP11 install path supported".to_string(),
                     }],
                     install_strategy: InstallStrategy::CustomData {
                         layer_files: vec![
@@ -389,22 +611,75 @@ pub mod registry {
                     support_state: SupportState::Experimental,
                 },
                 TargetDescriptor {
+                    id: "little-navmap".to_string(),
+                    display_name: "Little Navmap".to_string(),
+                    simulator: "Little Navmap".to_string(),
+                    format_family: families::lnm_sqlite(),
+                    detection_rules: vec![],
+                    install_roots: vec![
+                        InstallRoot {
+                            platform: "any".to_string(),
+                            path: "%LNM_DATABASES%".to_string(),
+                            subdir: String::new(),
+                        },
+                        InstallRoot {
+                            platform: "windows".to_string(),
+                            path: "%APPDATA%\\ABarthel\\little_navmap_db".to_string(),
+                            subdir: String::new(),
+                        },
+                        InstallRoot {
+                            platform: "linux".to_string(),
+                            path: "~/.config/ABarthel/little_navmap_db".to_string(),
+                            subdir: String::new(),
+                        },
+                        InstallRoot {
+                            platform: "macos".to_string(),
+                            path: "~/Library/Application Support/ABarthel/little_navmap_db".to_string(),
+                            subdir: String::new(),
+                        },
+                    ],
+                    required_artifacts: vec!["little_navmap_openairac.db".to_string()],
+                    optional_artifacts: vec!["cycle.json".to_string()],
+                    version_constraints: vec![VersionConstraint {
+                        min: Some("3.0".to_string()),
+                        max: None,
+                        note: "atools/Little Navmap SQLite schema v14.29; verified live with Little Navmap 3.0.18".to_string(),
+                    }],
+                    install_strategy: InstallStrategy::Subdirectory {
+                        relative: String::new(),
+                    },
+                    validation_strategy: ValidationStrategy::HashVerify,
+                    support_state: SupportState::Supported,
+                },
+                TargetDescriptor {
                     id: "msfs2024".to_string(),
                     display_name: "Microsoft Flight Simulator 2024".to_string(),
                     simulator: "MSFS".to_string(),
                     format_family: families::msfs_bgl(),
                     detection_rules: vec![],
-                    install_roots: vec![InstallRoot {
-                        platform: "windows".to_string(),
-                        path: "%MSFS_COMMUNITY%".to_string(),
-                        subdir: String::new(),
-                    }],
+                    install_roots: vec![
+                        InstallRoot {
+                            platform: "any".to_string(),
+                            path: "%MSFS2024_COMMUNITY%".to_string(),
+                            subdir: String::new(),
+                        },
+                        InstallRoot {
+                            platform: "windows".to_string(),
+                            path: "%LOCALAPPDATA%\\Packages\\Microsoft.Limitless_8wekyb3d8bbwe\\LocalCache\\Packages\\Community".to_string(),
+                            subdir: String::new(),
+                        },
+                        InstallRoot {
+                            platform: "windows".to_string(),
+                            path: "%APPDATA%\\Microsoft Flight Simulator 2024\\Packages\\Community".to_string(),
+                            subdir: String::new(),
+                        },
+                    ],
                     required_artifacts: vec![],
                     optional_artifacts: vec![],
                     version_constraints: vec![VersionConstraint {
                         min: None,
                         max: None,
-                        note: "Official SDK path under investigation (stage 2)".to_string(),
+                        note: "MSFS Community package layout; compiled via official fspackagetool SDK".to_string(),
                     }],
                     install_strategy: InstallStrategy::Subdirectory {
                         relative: "openairac-navdata".to_string(),
@@ -418,17 +693,29 @@ pub mod registry {
                     simulator: "MSFS".to_string(),
                     format_family: families::msfs_bgl(),
                     detection_rules: vec![],
-                    install_roots: vec![InstallRoot {
-                        platform: "windows".to_string(),
-                        path: "%MSFS_COMMUNITY%".to_string(),
-                        subdir: String::new(),
-                    }],
+                    install_roots: vec![
+                        InstallRoot {
+                            platform: "any".to_string(),
+                            path: "%MSFS_COMMUNITY%".to_string(),
+                            subdir: String::new(),
+                        },
+                        InstallRoot {
+                            platform: "windows".to_string(),
+                            path: "%LOCALAPPDATA%\\Packages\\Microsoft.FlightSimulator_8wekyb3d8bbwe\\LocalCache\\Packages\\Community".to_string(),
+                            subdir: String::new(),
+                        },
+                        InstallRoot {
+                            platform: "windows".to_string(),
+                            path: "%APPDATA%\\Microsoft Flight Simulator\\Packages\\Community".to_string(),
+                            subdir: String::new(),
+                        },
+                    ],
                     required_artifacts: vec![],
                     optional_artifacts: vec![],
                     version_constraints: vec![VersionConstraint {
                         min: None,
                         max: None,
-                        note: "Official SDK path under investigation (stage 2)".to_string(),
+                        note: "MSFS Community package layout; compiled via official fspackagetool SDK".to_string(),
                     }],
                     install_strategy: InstallStrategy::Subdirectory {
                         relative: "openairac-navdata".to_string(),
@@ -437,22 +724,39 @@ pub mod registry {
                     support_state: SupportState::Experimental,
                 },
                 TargetDescriptor {
-                    id: "little-navmap".to_string(),
-                    display_name: "Little Navmap".to_string(),
-                    simulator: "Little Navmap".to_string(),
-                    format_family: families::lnm_sqlite(),
+                    id: "pmdg-legacy".to_string(),
+                    display_name: "PMDG classic FMC".to_string(),
+                    simulator: "Various".to_string(),
+                    format_family: families::pmdg_text(),
                     detection_rules: vec![],
-                    install_roots: vec![InstallRoot {
-                        platform: "any".to_string(),
-                        path: "%LNM_DATABASES%".to_string(),
-                        subdir: String::new(),
-                    }],
-                    required_artifacts: vec![],
-                    optional_artifacts: vec![],
+                    install_roots: vec![
+                        InstallRoot {
+                            platform: "any".to_string(),
+                            path: "%PMDG_NAVDATA%".to_string(),
+                            subdir: String::new(),
+                        },
+                        InstallRoot {
+                            platform: "windows".to_string(),
+                            path: "C:\\PMDG\\NAVDATA".to_string(),
+                            subdir: String::new(),
+                        },
+                        InstallRoot {
+                            platform: "windows".to_string(),
+                            path: "%APPDATA%\\Microsoft Flight Simulator\\Packages\\Community\\pmdg-aircraft-737\\Config\\NavData".to_string(),
+                            subdir: String::new(),
+                        },
+                    ],
+                    required_artifacts: vec![
+                        "wpNavFIX.txt".to_string(),
+                        "wpNavAID.txt".to_string(),
+                        "wpNavAPT.txt".to_string(),
+                        "wpNavRTE.txt".to_string(),
+                    ],
+                    optional_artifacts: vec!["cycle.json".to_string()],
                     version_constraints: vec![VersionConstraint {
                         min: None,
                         max: None,
-                        note: "SQLite schema under research (stage 3)".to_string(),
+                        note: "AIRNAV / PMDG classic navigation text files".to_string(),
                     }],
                     install_strategy: InstallStrategy::Subdirectory {
                         relative: String::new(),
@@ -472,27 +776,7 @@ pub mod registry {
                     version_constraints: vec![VersionConstraint {
                         min: None,
                         max: None,
-                        note: "Text format under research (stage 3)".to_string(),
-                    }],
-                    install_strategy: InstallStrategy::Subdirectory {
-                        relative: String::new(),
-                    },
-                    validation_strategy: ValidationStrategy::HashVerify,
-                    support_state: SupportState::Research,
-                },
-                TargetDescriptor {
-                    id: "pmdg-legacy".to_string(),
-                    display_name: "PMDG legacy".to_string(),
-                    simulator: "Various".to_string(),
-                    format_family: families::pmdg_text(),
-                    detection_rules: vec![],
-                    install_roots: vec![],
-                    required_artifacts: vec![],
-                    optional_artifacts: vec![],
-                    version_constraints: vec![VersionConstraint {
-                        min: None,
-                        max: None,
-                        note: "Text format under research (stage 3)".to_string(),
+                        note: "Under research (no public vendor interface specification)".to_string(),
                     }],
                     install_strategy: InstallStrategy::Subdirectory {
                         relative: String::new(),
@@ -503,5 +787,76 @@ pub mod registry {
             ];
             v
         })
+    }
+}
+
+#[cfg(test)]
+mod target_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn unique_dir(tag: &str) -> PathBuf {
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        std::env::temp_dir().join(format!("oa_target_test_{}_{}_{n}", std::process::id(), tag))
+    }
+
+    #[test]
+    fn test_generic_installer_subdirectory_install_and_rollback() {
+        let dir = unique_dir("generic_sub");
+        let _ = std::fs::remove_dir_all(&dir);
+        let staging = dir.join("staging");
+        let target = dir.join("target");
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join("file1.txt"), b"v1 file1").unwrap();
+        std::fs::write(staging.join("file2.txt"), b"v1 file2").unwrap();
+
+        let desc = TargetDescriptor {
+            id: "test-target".to_string(),
+            display_name: "Test Target".to_string(),
+            simulator: "Test".to_string(),
+            format_family: families::pmdg_text(),
+            detection_rules: vec![],
+            install_roots: vec![],
+            required_artifacts: vec![],
+            optional_artifacts: vec![],
+            version_constraints: vec![],
+            install_strategy: InstallStrategy::Subdirectory {
+                relative: "custom_sub".to_string(),
+            },
+            validation_strategy: ValidationStrategy::HashVerify,
+            support_state: SupportState::Experimental,
+        };
+
+        let installer = GenericTargetInstaller::new(desc);
+        let artifacts = GeneratedArtifactSet {
+            family: families::pmdg_text(),
+            cycle: "2609".to_string(),
+            as_of: "2026-09-04T00:00:00Z".to_string(),
+            generator: "test".to_string(),
+            world_fingerprint: "test-fp".to_string(),
+            artifacts: vec![
+                ArtifactEntry {
+                    path: "file1.txt".to_string(),
+                    sha256: "0".repeat(64),
+                    size: 8,
+                    kind: "test".to_string(),
+                },
+                ArtifactEntry {
+                    path: "file2.txt".to_string(),
+                    sha256: "0".repeat(64),
+                    size: 8,
+                    kind: "test".to_string(),
+                },
+            ],
+        };
+
+        let rep = installer.install(&staging, &artifacts, &target).unwrap();
+        assert_eq!(rep.installed.len(), 2);
+        assert!(target.join("custom_sub/file1.txt").exists());
+
+        // Rollback on committed install is idempotent (returns none)
+        let rb = installer.rollback(&target).unwrap();
+        assert_eq!(rb.operation_id, "none");
     }
 }

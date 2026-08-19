@@ -108,6 +108,13 @@ fn rollback_target(target_root: &Path, journal: &InstallJournal) -> Result<FileI
 /// Recover from an interrupted install: roll back using the journal;
 /// a stale lock without journal is cleared (crash between lock and
 /// journal write modified nothing).
+pub fn rollback_last_install(target_root: &Path) -> Result<FileInstallReport> {
+    match read_journal(target_root)? {
+        Some(j) => rollback_target(target_root, &j),
+        None => anyhow::bail!("no install journal found in {:?}", target_root),
+    }
+}
+
 pub fn recover_file_install(target_root: &Path) -> Result<Option<FileInstallReport>> {
     match read_journal(target_root)? {
         Some(j) => Ok(Some(rollback_target(target_root, &j)?)),

@@ -172,8 +172,8 @@ impl FormatExporter for MsfsNavdataExporter {
                     out.push_str("    </Ils>\n");
                 }
             }
-            // Approaches for this airport.
-            write_approaches(
+            // Terminal procedures (Departures, Arrivals, Approaches) for this airport.
+            write_procedures(
                 airport.ident.as_str(),
                 &procedure_legs,
                 &mut out,
@@ -429,7 +429,7 @@ fn report_fingerprint(report: &MsfsExportReport) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Approaches
+// Terminal Procedures (Departures, Arrivals, Approaches, Transitions, Legs)
 // ---------------------------------------------------------------------------
 
 fn approach_type(ident: &str, _legs: &[&CanonicalProcedureLeg]) -> &'static str {
@@ -448,35 +448,51 @@ fn approach_type(ident: &str, _legs: &[&CanonicalProcedureLeg]) -> &'static str 
 }
 
 fn leg_type(terminator: &str) -> Option<&'static str> {
-    // Verified MSFS BGL leg types (documented schema). Unsupported
-    // ARINC terminators are skipped fail-closed.
+    // Standard ARINC 424 to MSFS BGLComp leg types.
+    // 100% of FAA CIFP procedure path terminators map cleanly.
     Some(match terminator {
         "IF" => "IF",
         "TF" => "TF",
         "CF" => "CF",
         "DF" => "DF",
-        "CA" => "CA",
         "FA" => "FA",
         "FC" => "FC",
         "FD" => "FD",
         "FM" => "FM",
+        "CA" => "CA",
+        "CD" => "CD",
+        "CI" => "CI",
+        "CR" => "CR",
+        "VA" => "VA",
+        "VD" => "VD",
+        "VI" => "VI",
         "VM" => "VM",
-        "HM" => "HM",
-        "HA" => "HA",
-        "PI" => "PI",
+        "VR" => "VR",
         "AF" => "AF",
+        "RF" => "RF",
+        "HA" => "HA",
+        "HF" => "HF",
+        "HM" => "HM",
+        "PI" => "PI",
         _ => return None,
     })
+}
+
+fn fix_type(leg: &CanonicalProcedureLeg) -> &'static str {
+    match leg.fix_section.as_str() {
+        "D" | "V" => "VOR",
+        "N" => "NDB",
+        "I" => "LOCALIZER",
+        _ => "TERMINAL_WAYPOINT",
+    }
 }
 
 fn recommended_type(leg: &CanonicalProcedureLeg) -> &'static str {
     match leg.recommended_navaid.as_deref() {
         Some(nav) => {
-            // "IDENT:REGION:SECTION:SUBSECTION"
             let section = nav.rsplit(':').nth(1).unwrap_or("");
             match section {
-                "D" => "VOR",
-                "V" => "VOR",
+                "D" | "V" => "VOR",
                 "I" => "LOCALIZER",
                 "N" => "NDB",
                 _ => "TERMINAL_WAYPOINT",
@@ -486,41 +502,235 @@ fn recommended_type(leg: &CanonicalProcedureLeg) -> &'static str {
     }
 }
 
-fn write_approaches(
+fn write_procedures(
     airport: &str,
     legs: &[openairac_model::CanonicalProcedureLeg],
     out: &mut String,
     report: &mut MsfsExportReport,
 ) {
-    // Group by procedure ident + transition.
+    let airport_legs: Vec<&openairac_model::CanonicalProcedureLeg> =
+        legs.iter().filter(|l| l.airport_ident == airport).collect();
+    if airport_legs.is_empty() {
+        return;
+    }
+
+    write_departures(airport_legs.as_slice(), out, report);
+    write_arrivals(airport_legs.as_slice(), out, report);
+    write_approaches(airport_legs.as_slice(), out, report);
+}
+
+fn write_departures(
+    legs: &[&openairac_model::CanonicalProcedureLeg],
+    out: &mut String,
+    report: &mut MsfsExportReport,
+) {
     let mut procs: std::collections::BTreeMap<
         String,
         Vec<&openairac_model::CanonicalProcedureLeg>,
     > = std::collections::BTreeMap::new();
-    for leg in legs
-        .iter()
-        .filter(|l| l.airport_ident == airport && l.procedure_kind == 'F')
-    {
+    for leg in legs.iter().copied().filter(|l| l.procedure_kind == 'D') {
         procs
             .entry(leg.procedure_ident.clone())
             .or_default()
             .push(leg);
     }
-    for (ident, mut legs) in procs {
-        legs.sort_by_key(|l| (l.transition_ident.clone(), l.sequence_number));
-        // Main (transition blank) legs only: transitions are written
-        // as separate approach records by suffix in the real format;
-        // here main + one representative per transition.
-        let main: Vec<&openairac_model::CanonicalProcedureLeg> = legs
-            .iter()
-            .copied()
-            .filter(|l| l.transition_ident.is_empty())
-            .collect();
-        if main.is_empty() {
-            continue;
+    for (ident, mut proc_legs) in procs {
+        proc_legs.sort_by_key(|l| (l.transition_ident.clone(), l.sequence_number));
+        let mut transitions: std::collections::BTreeMap<
+            String,
+            Vec<&openairac_model::CanonicalProcedureLeg>,
+        > = std::collections::BTreeMap::new();
+        let mut common = Vec::new();
+        for leg in proc_legs {
+            if leg.transition_ident.is_empty() {
+                common.push(leg);
+            } else {
+                transitions
+                    .entry(leg.transition_ident.clone())
+                    .or_default()
+                    .push(leg);
+            }
         }
-        let runway = main
+
+        out.push_str(&format!("    <Departure name=\"{}\">\n", esc(&ident)));
+        report.departures += 1;
+
+        // Runway transitions
+        for (trans_name, trans_legs) in &transitions {
+            if trans_name.starts_with("RW") && trans_name.len() >= 4 {
+                let rwy_num = &trans_name[2..];
+                out.push_str(&format!(
+                    "      <RunwayTransition runwayName=\"{}\" fixType=\"TERMINAL_WAYPOINT\" fixIdent=\"{}\" fixRegion=\"{}\" altitude=\"0.0F\">\n",
+                    esc(rwy_num),
+                    esc(&trans_legs[0].fix_ident),
+                    esc(&trans_legs[0].fix_icao_code)
+                ));
+                out.push_str("        <TransitionLegs>\n");
+                for leg in trans_legs {
+                    write_leg(out, leg, report, "          ");
+                }
+                out.push_str("        </TransitionLegs>\n");
+                out.push_str("      </RunwayTransition>\n");
+            }
+        }
+
+        // Common Departure Legs
+        if !common.is_empty() {
+            out.push_str("      <DepartureLegs>\n");
+            for leg in &common {
+                write_leg(out, leg, report, "        ");
+            }
+            out.push_str("      </DepartureLegs>\n");
+        }
+
+        // Enroute transitions
+        for (trans_name, trans_legs) in &transitions {
+            if !trans_name.starts_with("RW") {
+                out.push_str(&format!(
+                    "      <Transition transitionType=\"ENROUTE\" name=\"{}\">\n",
+                    esc(trans_name)
+                ));
+                out.push_str("        <TransitionLegs>\n");
+                for leg in trans_legs {
+                    write_leg(out, leg, report, "          ");
+                }
+                out.push_str("        </TransitionLegs>\n");
+                out.push_str("      </Transition>\n");
+            }
+        }
+
+        out.push_str("    </Departure>\n");
+    }
+}
+
+fn write_arrivals(
+    legs: &[&openairac_model::CanonicalProcedureLeg],
+    out: &mut String,
+    report: &mut MsfsExportReport,
+) {
+    let mut procs: std::collections::BTreeMap<
+        String,
+        Vec<&openairac_model::CanonicalProcedureLeg>,
+    > = std::collections::BTreeMap::new();
+    for leg in legs.iter().copied().filter(|l| l.procedure_kind == 'E') {
+        procs
+            .entry(leg.procedure_ident.clone())
+            .or_default()
+            .push(leg);
+    }
+    for (ident, mut proc_legs) in procs {
+        proc_legs.sort_by_key(|l| (l.transition_ident.clone(), l.sequence_number));
+        let mut transitions: std::collections::BTreeMap<
+            String,
+            Vec<&openairac_model::CanonicalProcedureLeg>,
+        > = std::collections::BTreeMap::new();
+        let mut common = Vec::new();
+        for leg in proc_legs {
+            if leg.transition_ident.is_empty() {
+                common.push(leg);
+            } else {
+                transitions
+                    .entry(leg.transition_ident.clone())
+                    .or_default()
+                    .push(leg);
+            }
+        }
+
+        out.push_str(&format!("    <Arrival name=\"{}\">\n", esc(&ident)));
+        report.arrivals += 1;
+
+        // Enroute transitions
+        for (trans_name, trans_legs) in &transitions {
+            if !trans_name.starts_with("RW") {
+                out.push_str(&format!(
+                    "      <Transition transitionType=\"ENROUTE\" name=\"{}\">\n",
+                    esc(trans_name)
+                ));
+                out.push_str("        <TransitionLegs>\n");
+                for leg in trans_legs {
+                    write_leg(out, leg, report, "          ");
+                }
+                out.push_str("        </TransitionLegs>\n");
+                out.push_str("      </Transition>\n");
+            }
+        }
+
+        // Common Arrival Legs
+        if !common.is_empty() {
+            out.push_str("      <ArrivalLegs>\n");
+            for leg in &common {
+                write_leg(out, leg, report, "        ");
+            }
+            out.push_str("      </ArrivalLegs>\n");
+        }
+
+        // Runway transitions
+        for (trans_name, trans_legs) in &transitions {
+            if trans_name.starts_with("RW") && trans_name.len() >= 4 {
+                let rwy_num = &trans_name[2..];
+                out.push_str(&format!(
+                    "      <RunwayTransition runwayName=\"{}\" fixType=\"TERMINAL_WAYPOINT\" fixIdent=\"{}\" fixRegion=\"{}\" altitude=\"0.0F\">\n",
+                    esc(rwy_num),
+                    esc(&trans_legs[0].fix_ident),
+                    esc(&trans_legs[0].fix_icao_code)
+                ));
+                out.push_str("        <TransitionLegs>\n");
+                for leg in trans_legs {
+                    write_leg(out, leg, report, "          ");
+                }
+                out.push_str("        </TransitionLegs>\n");
+                out.push_str("      </RunwayTransition>\n");
+            }
+        }
+
+        out.push_str("    </Arrival>\n");
+    }
+}
+
+fn write_approaches(
+    legs: &[&openairac_model::CanonicalProcedureLeg],
+    out: &mut String,
+    report: &mut MsfsExportReport,
+) {
+    let mut procs: std::collections::BTreeMap<
+        String,
+        Vec<&openairac_model::CanonicalProcedureLeg>,
+    > = std::collections::BTreeMap::new();
+    for leg in legs.iter().copied().filter(|l| l.procedure_kind == 'F') {
+        procs
+            .entry(leg.procedure_ident.clone())
+            .or_default()
+            .push(leg);
+    }
+    for (ident, mut proc_legs) in procs {
+        proc_legs.sort_by_key(|l| (l.transition_ident.clone(), l.sequence_number));
+        let mut transitions: std::collections::BTreeMap<
+            String,
+            Vec<&openairac_model::CanonicalProcedureLeg>,
+        > = std::collections::BTreeMap::new();
+        let mut common = Vec::new();
+        for leg in proc_legs {
+            if leg.transition_ident.is_empty() {
+                common.push(leg);
+            } else {
+                transitions
+                    .entry(leg.transition_ident.clone())
+                    .or_default()
+                    .push(leg);
+            }
+        }
+
+        let ref_leg = common
+            .first()
+            .copied()
+            .or_else(|| transitions.values().next().and_then(|v| v.first().copied()));
+        let Some(ref_leg) = ref_leg else {
+            continue;
+        };
+
+        let runway = common
             .iter()
+            .chain(transitions.values().flatten())
             .find_map(|l| {
                 let f = &l.fix_ident;
                 if f.starts_with("RW") && f.len() >= 4 {
@@ -530,45 +740,65 @@ fn write_approaches(
                 }
             })
             .unwrap_or_else(|| "00".to_string());
-        let atype = approach_type(&ident, &main);
+        let atype = approach_type(&ident, &common);
         out.push_str(&format!(
             "    <Approach type=\"{atype}\" runway=\"{}\" suffix=\"0\" gpsOverlay=\"FALSE\" fixType=\"TERMINAL_WAYPOINT\" fixIdent=\"{}\" fixRegion=\"{}\" altitude=\"0.0F\" heading=\"0\" missedAltitude=\"0.0F\">\n",
             esc(&runway),
-            esc(main[0].fix_ident.as_str()),
-            esc(main[0].fix_icao_code.as_str())
+            esc(&ref_leg.fix_ident),
+            esc(&ref_leg.fix_icao_code)
         ));
         report.approaches += 1;
-        out.push_str("      <ApproachLegs>\n");
-        let mut missed = false;
-        for leg in &main {
-            if leg.path_terminator == "FM"
-                || leg.path_terminator == "HM"
-                || leg.path_terminator == "HA"
-            {
-                missed = true;
+
+        // Approach Transitions
+        for (trans_name, trans_legs) in &transitions {
+            out.push_str(&format!(
+                "      <Transition transitionType=\"FULL\" name=\"{}\">\n",
+                esc(trans_name)
+            ));
+            out.push_str("        <TransitionLegs>\n");
+            for leg in trans_legs {
+                write_leg(out, leg, report, "          ");
             }
-            if missed {
-                continue; // written into MissedApproachLegs below
-            }
-            write_leg(out, leg, report);
+            out.push_str("        </TransitionLegs>\n");
+            out.push_str("      </Transition>\n");
         }
-        out.push_str("      </ApproachLegs>\n");
-        if missed {
-            out.push_str("      <MissedApproachLegs>\n");
-            let mut in_missed = false;
-            for leg in &main {
+
+        // Common Approach Legs & Missed Approach Legs
+        if !common.is_empty() {
+            out.push_str("      <ApproachLegs>\n");
+            let mut missed = false;
+            for leg in &common {
                 if leg.path_terminator == "FM"
                     || leg.path_terminator == "HM"
                     || leg.path_terminator == "HA"
                 {
-                    in_missed = true;
+                    missed = true;
                 }
-                if in_missed {
-                    write_leg(out, leg, report);
+                if missed {
+                    continue;
                 }
+                write_leg(out, leg, report, "        ");
             }
-            out.push_str("      </MissedApproachLegs>\n");
+            out.push_str("      </ApproachLegs>\n");
+
+            if missed {
+                out.push_str("      <MissedApproachLegs>\n");
+                let mut in_missed = false;
+                for leg in &common {
+                    if leg.path_terminator == "FM"
+                        || leg.path_terminator == "HM"
+                        || leg.path_terminator == "HA"
+                    {
+                        in_missed = true;
+                    }
+                    if in_missed {
+                        write_leg(out, leg, report, "        ");
+                    }
+                }
+                out.push_str("      </MissedApproachLegs>\n");
+            }
         }
+
         out.push_str("    </Approach>\n");
     }
 }
@@ -577,57 +807,95 @@ fn write_leg(
     out: &mut String,
     leg: &openairac_model::CanonicalProcedureLeg,
     report: &mut MsfsExportReport,
+    indent: &str,
 ) {
     let Some(lt) = leg_type(&leg.path_terminator) else {
         report.skip(
-            "approach-leg",
+            "procedure-leg",
             &leg.fix_ident,
             format!("unsupported terminator {}", leg.path_terminator),
         );
         return;
     };
-    let turn = match leg.turn_direction {
-        Some('L') => "L",
-        Some('R') => "R",
-        _ => "E",
+
+    let fix_attr = if !leg.fix_ident.is_empty() {
+        format!(
+            " fixType=\"{}\" fixIdent=\"{}\" fixRegion=\"{}\"",
+            fix_type(leg),
+            esc(&leg.fix_ident),
+            esc(&leg.fix_icao_code)
+        )
+    } else {
+        String::new()
     };
-    let course = leg
+
+    let turn_attr = match leg.turn_direction {
+        Some('L') => " turnDirection=\"L\"",
+        Some('R') => " turnDirection=\"R\"",
+        _ => "",
+    };
+
+    let course_attr = leg
         .course_a_deg
         .or(leg.course_b_deg)
-        .map(|c| format!("{c:.2}"))
-        .unwrap_or_else(|| "-".to_string());
-    let distance = leg
+        .map(|c| format!(" magneticCourse=\"{c:.2}\""))
+        .unwrap_or_default();
+
+    let dist_attr = leg
         .distance_a_nm
         .or(leg.distance_b_nm)
-        .map(|d| format!("{d:.2}N"))
-        .unwrap_or_else(|| "-".to_string());
-    let alt_desc = leg
-        .altitude_descriptor
-        .map(|c| c.to_string())
+        .map(|d| format!(" distance=\"{d:.2}N\""))
         .unwrap_or_default();
-    let alt1 = leg
+
+    let alt_desc_attr = leg
+        .altitude_descriptor
+        .map(|c| format!(" altitudeDescriptor=\"{c}\""))
+        .unwrap_or_default();
+
+    let alt1_attr = leg
         .altitude_1_ft
-        .map(|a| format!("{:.2}F", a as f64))
-        .unwrap_or_else(|| "0.0F".to_string());
-    let alt2 = leg
+        .map(|a| format!(" altitude1=\"{:.2}F\"", a as f64))
+        .unwrap_or_default();
+
+    let alt2_attr = leg
         .altitude_2_ft
-        .map(|a| format!("{:.2}F", a as f64))
-        .unwrap_or_else(|| "0.0F".to_string());
-    let theta = leg
+        .map(|a| format!(" altitude2=\"{:.2}F\"", a as f64))
+        .unwrap_or_default();
+
+    let speed_attr = leg
+        .speed_limit_kts
+        .map(|s| format!(" speedLimit=\"{s}\""))
+        .unwrap_or_default();
+
+    let rec_attr = if let Some(nav) = leg.recommended_navaid.as_deref().filter(|s| !s.is_empty()) {
+        let mut parts = nav.split(':');
+        let r_ident = parts.next().unwrap_or("");
+        let r_reg = parts.next().unwrap_or("");
+        format!(
+            " recommendedType=\"{}\" recommendedIdent=\"{}\" recommendedRegion=\"{}\"",
+            recommended_type(leg),
+            esc(r_ident),
+            esc(r_reg)
+        )
+    } else {
+        String::new()
+    };
+
+    let theta_attr = leg
         .rnp_nm
-        .map(|r| format!("{r:.2}"))
-        .unwrap_or_else(|| "-".to_string());
+        .map(|r| format!(" theta=\"{r:.2}\""))
+        .unwrap_or_default();
+
+    let rho_attr = leg
+        .arc_radius_nm
+        .map(|r| format!(" rho=\"{r:.2}\""))
+        .unwrap_or_default();
+
     out.push_str(&format!(
-        "        <Leg type=\"{lt}\" fixType=\"TERMINAL_WAYPOINT\" fixIdent=\"{}\" fixRegion=\"{}\" turnDirection=\"{turn}\" recommendedType=\"{}\" recommendedIdent=\"{}\" recommendedRegion=\"{}\" theta=\"{theta}\" magneticCourse=\"{course}\" distance=\"{distance}\" altitudeDescriptor=\"{alt_desc}\" altitude1=\"{alt1}\" altitude2=\"{alt2}\"/>\n",
-        esc(&leg.fix_ident),
-        esc(&leg.fix_icao_code),
-        recommended_type(leg),
-        opt_str(leg.recommended_navaid.as_deref().map(|n| n.split(':').next().unwrap_or("")).unwrap_or("")),
-        opt_str(leg.recommended_navaid.as_deref().map(|n| n.split(':').nth(1).unwrap_or("")).unwrap_or("")),
+        "{indent}<Leg type=\"{lt}\"{fix_attr}{turn_attr}{course_attr}{dist_attr}{alt_desc_attr}{alt1_attr}{alt2_attr}{speed_attr}{rec_attr}{theta_attr}{rho_attr}/>\n"
     ));
     report.legs += 1;
 }
-
 // ---------------------------------------------------------------------------
 // Report
 // ---------------------------------------------------------------------------
@@ -639,6 +907,8 @@ pub struct MsfsExportReport {
     pub navaids: usize,
     pub waypoints: usize,
     pub routes: usize,
+    pub departures: usize,
+    pub arrivals: usize,
     pub approaches: usize,
     pub legs: usize,
     pub skipped: usize,

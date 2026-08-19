@@ -17,6 +17,7 @@ openairac-export-xplane = { path = "../openairac-export-xplane" }
 openairac-export = { path = "../openairac-export" }
 openairac-export-msfs = { path = "../openairac-export-msfs" }
 openairac-export-lnm = { path = "../openairac-export-lnm" }
+openairac-export-pmdg = { path = "../openairac-export-pmdg" }
 openairac-reconcile = { path = "../openairac-reconcile" }
 openairac-bundle = { path = "../openairac-bundle" }
 openairac-service = { path = "../openairac-service" }

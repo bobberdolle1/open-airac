@@ -1423,6 +1423,7 @@ dependencies = [
  "openairac-export",
  "openairac-export-lnm",
  "openairac-export-msfs",
+ "openairac-export-pmdg",
  "openairac-export-xplane",
  "openairac-ingest",
  "openairac-magnetic",
@@ -1471,6 +1472,21 @@ dependencies = [
 
 [[package]]
 name = "openairac-export-msfs"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "openairac-export",
+ "openairac-export-xplane",
+ "openairac-model",
+ "openairac-store",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "openairac-export-pmdg"
 version = "1.0.0"
 dependencies = [
  "anyhow",
