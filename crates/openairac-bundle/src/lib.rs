@@ -224,6 +224,22 @@ pub fn key_id(trust: &TrustRoot) -> String {
     format!("{:x}", digest)[..16].to_string()
 }
 
+/// The embedded OpenAIRAC production trust root (public key only;
+/// committed intentionally - it is not secret material).
+///
+/// Key id: a8f2ca4e06872bf4 (created 2026-08-19 via `keygen generate`;
+/// private key held off-repo, ceremony in docs/SECURITY.md).
+pub const PRODUCTION_TRUST_ROOT_B64: &str = "ZMMhZQ72lH6V7RWxmtjwdEzwxjJz9UOu5g+lFUt1dL4=";
+
+/// Parse the embedded production trust roots (rotation: the list may
+/// grow; old roots stay until their signed bundles leave support).
+pub fn production_trust_roots() -> Vec<TrustRoot> {
+    vec![
+        TrustRoot::from_base64(PRODUCTION_TRUST_ROOT_B64)
+            .expect("embedded production trust root must be valid"),
+    ]
+}
+
 /// Sign an unsigned bundle in place: flips authenticity to
 /// SignedTrusted, recomputes the content hash, and writes
 /// `manifest.sig` (Ed25519 over the exact manifest.json bytes).
@@ -995,6 +1011,19 @@ mod tests {
         std::env::temp_dir().join(format!("oa_bundle_test_{}_{}_{n}", std::process::id(), tag))
     }
 
+    fn copy_dir(src: &Path, dst: &Path) {
+        std::fs::create_dir_all(dst).unwrap();
+        for entry in std::fs::read_dir(src).unwrap() {
+            let entry = entry.unwrap();
+            let to = dst.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy_dir(&entry.path(), &to);
+            } else {
+                std::fs::copy(entry.path(), &to).unwrap();
+            }
+        }
+    }
+
     fn fixture_store() -> (WorldStore, PathBuf) {
         let dir = unique_dir("fixture");
         let _ = std::fs::remove_dir_all(&dir);
@@ -1245,6 +1274,62 @@ mod tests {
         assert!(id1.chars().all(|c| c.is_ascii_hexdigit()));
         // Wrong-length seeds fail.
         assert!(SigningKeyPair::from_seed_base64("QUJD").is_err());
+    }
+
+    #[test]
+    fn test_production_trust_root_bootstrap() {
+        // The embedded production root must parse and be stable.
+        let roots = production_trust_roots();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(key_id(&roots[0]), "a8f2ca4e06872bf4");
+
+        let (store, dir) = fixture_store();
+        let out = dir.join("bundles");
+        let (_, bundle_dir) = build_bundle(&store, &out, Utc::now()).unwrap();
+
+        // 1. Unsigned bundle: development verify only; the production
+        //    install path rejects it (CLI policy, tested in the CLI).
+        assert!(verify_bundle(&bundle_dir).is_ok());
+        // 2. Signed with a WRONG key: rejected by the production root.
+        let wrong = SigningKeyPair::generate();
+        let signed_copy = dir.join("signed-wrong");
+        let _ = std::fs::remove_dir_all(&signed_copy);
+        copy_dir(&bundle_dir, &signed_copy);
+        sign_bundle(&signed_copy, &wrong).unwrap();
+        assert!(verify_bundle_with_trust_any(&signed_copy, &roots).is_err());
+        // 3-6. With the REAL production seed (off-repo, ceremony
+        //      provided via env): accept, then reject tampered
+        //      payload / tampered manifest / missing signature.
+        if let Ok(seed) = std::env::var("OPENAIRAC_PROD_SEED") {
+            let prod = SigningKeyPair::from_seed_base64(&seed).unwrap();
+            assert_eq!(prod.public_key().to_base64(), PRODUCTION_TRUST_ROOT_B64);
+            let signed_prod = dir.join("signed-prod");
+            let _ = std::fs::remove_dir_all(&signed_prod);
+            copy_dir(&bundle_dir, &signed_prod);
+            sign_bundle(&signed_prod, &prod).unwrap();
+            assert!(verify_bundle_with_trust_any(&signed_prod, &roots).is_ok());
+            let payload = signed_prod.join("world.sqlite");
+            let mut data = std::fs::read(&payload).unwrap();
+            data[0] ^= 0xFF;
+            std::fs::write(&payload, &data).unwrap();
+            assert!(verify_bundle_with_trust_any(&signed_prod, &roots).is_err());
+            let _ = std::fs::remove_dir_all(&signed_prod);
+            copy_dir(&bundle_dir, &signed_prod);
+            sign_bundle(&signed_prod, &prod).unwrap();
+            let manifest_path = signed_prod.join("manifest.json");
+            let original = std::fs::read_to_string(&manifest_path).unwrap();
+            std::fs::write(
+                &manifest_path,
+                original.replacen("\"generated_at\": \"", "\"generated_at\": \"X", 1),
+            )
+            .unwrap();
+            assert!(verify_bundle_with_trust_any(&signed_prod, &roots).is_err());
+            let _ = std::fs::remove_dir_all(&signed_prod);
+            copy_dir(&bundle_dir, &signed_prod);
+            sign_bundle(&signed_prod, &prod).unwrap();
+            std::fs::remove_file(signed_prod.join(SIGNATURE_FILE)).unwrap();
+            assert!(verify_bundle_with_trust_any(&signed_prod, &roots).is_err());
+        }
     }
 
     #[test]

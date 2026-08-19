@@ -19,3 +19,6 @@ prompt.md
 *.key
 *.sig
 __pycache__/
+
+# Third-party app distributions placed locally (never tracked)
+tools/littlenavmap-app/

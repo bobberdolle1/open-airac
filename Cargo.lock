@@ -1397,7 +1397,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "openairac-bundle"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -1414,7 +1414,7 @@ dependencies = [
 
 [[package]]
 name = "openairac-cli"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1441,7 +1441,7 @@ dependencies = [
 
 [[package]]
 name = "openairac-export"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1455,7 +1455,7 @@ dependencies = [
 
 [[package]]
 name = "openairac-export-lnm"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1471,7 +1471,7 @@ dependencies = [
 
 [[package]]
 name = "openairac-export-msfs"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1486,7 +1486,7 @@ dependencies = [
 
 [[package]]
 name = "openairac-export-xplane"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1501,7 +1501,7 @@ dependencies = [
 
 [[package]]
 name = "openairac-ingest"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1521,7 +1521,7 @@ dependencies = [
 
 [[package]]
 name = "openairac-integration"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1534,7 +1534,7 @@ dependencies = [
 
 [[package]]
 name = "openairac-magnetic"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1544,7 +1544,7 @@ dependencies = [
 
 [[package]]
 name = "openairac-model"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1553,7 +1553,7 @@ dependencies = [
 
 [[package]]
 name = "openairac-plugin"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "openairac-export-xplane",
@@ -1563,7 +1563,7 @@ dependencies = [
 
 [[package]]
 name = "openairac-procedures"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1573,7 +1573,7 @@ dependencies = [
 
 [[package]]
 name = "openairac-reconcile"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1588,7 +1588,7 @@ dependencies = [
 
 [[package]]
 name = "openairac-routing"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1600,7 +1600,7 @@ dependencies = [
 
 [[package]]
 name = "openairac-service"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1615,7 +1615,7 @@ dependencies = [
 
 [[package]]
 name = "openairac-store"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2885,7 +2885,7 @@ checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
 
 [[package]]
 name = "xplane-reference-audit"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "chrono",

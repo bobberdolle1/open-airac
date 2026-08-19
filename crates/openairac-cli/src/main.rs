@@ -190,9 +190,13 @@ enum BundleCmd {
         root: PathBuf,
         #[arg(short, long)]
         bundle: PathBuf,
-        /// Trust root file(s); required for SignedTrusted bundles
+        /// Trust root file(s); default: embedded production root
         #[arg(long)]
         trust: Vec<PathBuf>,
+        /// Allow UnsignedDevelopment bundles (development only;
+        /// production install paths reject them by default)
+        #[arg(long)]
+        allow_unsigned: bool,
     },
     /// Sign an unsigned bundle in place (Ed25519). Use the offline
     /// private key; the bundle flips to SignedTrusted.
@@ -1108,19 +1112,8 @@ fn main() -> Result<()> {
                 }
             }
             BundleCmd::Verify { bundle, trust } => {
-                let roots: Vec<openairac_bundle::TrustRoot> = trust
-                    .iter()
-                    .map(|p| {
-                        let encoded = std::fs::read_to_string(p)
-                            .with_context(|| format!("reading trust root {:?}", p))?;
-                        openairac_bundle::TrustRoot::from_base64(encoded.trim())
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                let report = if roots.is_empty() {
-                    openairac_bundle::verify_bundle(bundle)?
-                } else {
-                    openairac_bundle::verify_bundle_with_trust_any(bundle, &roots)?
-                };
+                let roots = effective_trust_roots(trust)?;
+                let report = openairac_bundle::verify_bundle_with_trust_any(bundle, &roots)?;
                 println!(
                     "Bundle verified: {} ({} file(s), {})",
                     report.bundle_hash,
@@ -1144,33 +1137,31 @@ fn main() -> Result<()> {
                 root,
                 bundle,
                 trust,
+                allow_unsigned,
             } => {
-                let roots: Vec<openairac_bundle::TrustRoot> = trust
-                    .iter()
-                    .map(|p| {
-                        let encoded = std::fs::read_to_string(p)
-                            .with_context(|| format!("reading trust root {:?}", p))?;
-                        openairac_bundle::TrustRoot::from_base64(encoded.trim())
-                    })
-                    .collect::<Result<Vec<_>>>()?;
+                if *allow_unsigned {
+                    // Development escape hatch: unsigned bundles only.
+                    let report =
+                        openairac_bundle::install_bundle(root, bundle, chrono::Utc::now())?;
+                    print_install_report(&report);
+                    return Ok(());
+                }
+                // Production policy: unsigned bundles are rejected.
+                let manifest = openairac_bundle::inspect_bundle(bundle)?;
+                if manifest.core.authenticity != "SignedTrusted" {
+                    anyhow::bail!(
+                        "refusing to install an unsigned bundle through the production path; \
+                         development installs require --allow-unsigned"
+                    );
+                }
+                let roots = effective_trust_roots(trust)?;
                 let report = openairac_bundle::install_bundle_with_trust(
                     root,
                     bundle,
                     chrono::Utc::now(),
                     &roots,
                 )?;
-                if report.preloaded {
-                    println!(
-                        "Bundle preloaded as NEXT (effective {})",
-                        report.effective_from
-                    );
-                } else {
-                    println!(
-                        "Bundle installed as CURRENT (effective {})",
-                        report.effective_from
-                    );
-                }
-                println!("  bundle hash: {}", report.bundle_hash);
+                print_install_report(&report);
             }
             BundleCmd::List { root } => match openairac_bundle::load_installed(root) {
                 Ok(state) => {
@@ -1475,6 +1466,37 @@ fn main() -> Result<()> {
 
     Ok(())
 }
+/// Effective trust roots: explicit --trust files when given, else the
+/// embedded production root (release policy; never empty in the CLI).
+fn effective_trust_roots(explicit: &[PathBuf]) -> anyhow::Result<Vec<openairac_bundle::TrustRoot>> {
+    if explicit.is_empty() {
+        return Ok(openairac_bundle::production_trust_roots());
+    }
+    explicit
+        .iter()
+        .map(|p| {
+            let encoded = std::fs::read_to_string(p)
+                .with_context(|| format!("reading trust root {:?}", p))?;
+            openairac_bundle::TrustRoot::from_base64(encoded.trim())
+        })
+        .collect()
+}
+
+fn print_install_report(report: &openairac_bundle::InstallReport) {
+    if report.preloaded {
+        println!(
+            "Bundle preloaded as NEXT (effective {})",
+            report.effective_from
+        );
+    } else {
+        println!(
+            "Bundle installed as CURRENT (effective {})",
+            report.effective_from
+        );
+    }
+    println!("  bundle hash: {}", report.bundle_hash);
+}
+
 fn copy_dir(src: &std::path::Path, dst: &std::path::Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
