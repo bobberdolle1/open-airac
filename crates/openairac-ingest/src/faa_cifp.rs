@@ -431,6 +431,13 @@ pub enum CifpRecord {
         sectors: Vec<MsaSector>,
         raw: String,
     },
+    GridMora {
+        record_type: String,
+        start_latitude: String,
+        start_longitude: String,
+        mora_values: Vec<u32>,
+        raw: String,
+    },
     Unsupported {
         record_type: String,
         section: char,
@@ -461,6 +468,46 @@ pub fn decode_line(line: &str) -> Result<CifpRecord> {
     };
 
     match (section, subsection) {
+        ('A', 'S') => {
+            // AS Grid MORA record (ARINC 424 §4.1.19.1).
+            let lat_raw = cifp.field(14, 16);
+            let lon_raw = cifp.field(17, 20);
+            let start_latitude = format!(
+                "{}{}",
+                if lat_raw.starts_with('N') { "+" } else { "-" },
+                if lat_raw.len() > 1 {
+                    &lat_raw[1..]
+                } else {
+                    "00"
+                }
+            );
+            let start_longitude = format!(
+                "{}{}",
+                if lon_raw.starts_with('E') { "+" } else { "-" },
+                if lon_raw.len() > 1 {
+                    &lon_raw[1..]
+                } else {
+                    "000"
+                }
+            );
+
+            let mut mora_values = Vec::with_capacity(30);
+            let mut pos = 31; // 1-based col 31
+            for _ in 0..30 {
+                let val_str = cifp.field(pos, pos + 2).trim();
+                let val: u32 = val_str.parse().unwrap_or(0);
+                mora_values.push(val);
+                pos += 3;
+            }
+
+            Ok(CifpRecord::GridMora {
+                record_type,
+                start_latitude,
+                start_longitude,
+                mora_values,
+                raw: line.to_string(),
+            })
+        }
         ('E', 'A') => {
             let (latitude_deg, longitude_deg) =
                 parse_coord_pair(cifp.field(33, 41), cifp.field(42, 51))?
@@ -1038,7 +1085,7 @@ pub fn decode_line(line: &str) -> Result<CifpRecord> {
         ('H', ' ') => unsupported("heliport record"),
         ('U', 'C') => unsupported("controlled airspace record"),
         ('U', 'R') => unsupported("special use airspace record"),
-        ('S', ' ') | ('A', 'S') => unsupported("MSA / grid MORA record"),
+        ('S', ' ') => unsupported("legacy MSA record"),
         _ => unsupported("unrecognized section/subsection"),
     }
 }
@@ -1108,6 +1155,7 @@ pub enum CifpInterpretation {
     Airport(CanonicalAirport),
     RunwayEnd(CifpRunwayEnd),
     Msa(CanonicalMsa),
+    Mora(CanonicalMora),
     Unsupported {
         reason: String,
         raw: String,
@@ -1591,6 +1639,21 @@ pub fn interpret(
             sectors: sectors.clone(),
             temporal,
         })],
+        CifpRecord::GridMora {
+            record_type,
+            start_latitude,
+            start_longitude,
+            mora_values,
+            ..
+        } => vec![CifpInterpretation::Mora(CanonicalMora {
+            object_id: MoraId(format!(
+                "faa:{record_type}:{start_latitude}:{start_longitude}"
+            )),
+            start_latitude: start_latitude.clone(),
+            start_longitude: start_longitude.clone(),
+            mora_values: mora_values.clone(),
+            temporal,
+        })],
         CifpRecord::Unsupported {
             reason,
             raw,
@@ -1618,6 +1681,7 @@ fn record_to_raw(record: &CifpRecord) -> String {
         | CifpRecord::ProcedureLeg { raw, .. }
         | CifpRecord::PathPoint { raw, .. }
         | CifpRecord::Msa { raw, .. }
+        | CifpRecord::GridMora { raw, .. }
         | CifpRecord::Unsupported { raw, .. } => raw.clone(),
         CifpRecord::Airport { .. } | CifpRecord::Runway { .. } => String::new(),
     }
@@ -1644,6 +1708,7 @@ pub struct CifpScanReport {
     pub unpaired_runway_ends: usize,
     pub lpv_fas_decoded: usize,
     pub msa_decoded: usize,
+    pub mora_decoded: usize,
     pub unsupported_records: usize,
     pub decode_errors: usize,
     /// Duplicate object ids whose payloads CONFLICT (first occurrence
@@ -1681,6 +1746,7 @@ impl FaaCifpAdapter {
         Vec<IlsAssociation>,
         Vec<CanonicalLpvFas>,
         Vec<CanonicalMsa>,
+        Vec<CanonicalMora>,
         CifpScanReport,
     ) {
         let mut waypoints = Vec::new();
@@ -1690,6 +1756,7 @@ impl FaaCifpAdapter {
         let mut airports = Vec::new();
         let mut runway_ends = Vec::new();
         let mut msa = Vec::new();
+        let mut mora = Vec::new();
         let mut pp_primaries: std::collections::HashMap<(String, String, String), CifpRecord> =
             std::collections::HashMap::new();
         let mut pp_conts: std::collections::HashMap<(String, String, String), CifpRecord> =
@@ -1860,6 +1927,11 @@ impl FaaCifpAdapter {
                                 report.records_decoded += 1;
                                 report.msa_decoded += 1;
                                 msa.push(record);
+                            }
+                            CifpInterpretation::Mora(record) => {
+                                report.records_decoded += 1;
+                                report.mora_decoded += 1;
+                                mora.push(record);
                             }
                             CifpInterpretation::Unsupported {
                                 reason,
@@ -2305,6 +2377,7 @@ impl FaaCifpAdapter {
                 ils_associations,
                 lpv_fas,
                 msa,
+                mora,
                 report,
             )
         }
@@ -2328,6 +2401,7 @@ impl FaaCifpAdapter {
             ils_associations,
             lpv_fas,
             msa,
+            mora,
             report,
         ) = Self::parse_cifp_content(content, snapshot_id, valid_from);
 
@@ -2347,6 +2421,9 @@ impl FaaCifpAdapter {
             }
             for record in &msa {
                 openairac_store::insert_msa_conn(conn, record)?;
+            }
+            for record in &mora {
+                openairac_store::insert_mora_conn(conn, record)?;
             }
             Ok(())
         })?;
@@ -2632,6 +2709,7 @@ impl crate::provider::DataProvider for CifpProvider {
             ils_associations,
             lpv_fas,
             msa,
+            mora,
             scan,
         ) = FaaCifpAdapter::parse_cifp_content(&dataset.raw_content, &snapshot_id, valid_from);
 
@@ -2669,6 +2747,10 @@ impl crate::provider::DataProvider for CifpProvider {
         push(
             openairac_store::EntityTable::Msa,
             msa.iter().map(|m| m.object_id.0.clone()).collect(),
+        );
+        push(
+            openairac_store::EntityTable::Mora,
+            mora.iter().map(|m| m.object_id.0.clone()).collect(),
         );
 
         let start = std::time::Instant::now();
@@ -2713,6 +2795,7 @@ impl crate::provider::DataProvider for CifpProvider {
                 procedure_legs: procedure_legs.clone(),
                 lpv_fas: lpv_fas.clone(),
                 msa: msa.clone(),
+                mora: mora.clone(),
             },
             tombstones: Vec::new(),
             ils_associations: ils_associations.clone(),
@@ -3251,8 +3334,19 @@ mod tests {
     fn test_parse_cifp_content_chains_airway_legs() {
         let content = format!("{ER_A315_1}\n{ER_A315_2}\n{ER_A315_3}\n{EA_AAARG}\n");
         let snapshot_id = SourceSnapshotId("snap-faa".to_string());
-        let (waypoints, _navaids, legs, _procedures, _airports, _runways, _ils, _lpv, _msa, report) =
-            FaaCifpAdapter::parse_cifp_content(&content, &snapshot_id, Utc::now());
+        let (
+            waypoints,
+            _navaids,
+            legs,
+            _procedures,
+            _airports,
+            _runways,
+            _ils,
+            _lpv,
+            _msa,
+            _mora,
+            report,
+        ) = FaaCifpAdapter::parse_cifp_content(&content, &snapshot_id, Utc::now());
 
         assert_eq!(waypoints.len(), 1);
         assert_eq!(legs.len(), 2);
@@ -3279,7 +3373,7 @@ mod tests {
     fn test_pi_merges_over_d_localizer() {
         let content = format!("{D_IAAD}\n{PI_IAAD}\n");
         let snapshot_id = SourceSnapshotId("snap-pi-merge".to_string());
-        let (_wp, navaids, _legs, _proc, _ap, _rwy, _ils, _lpv, _msa, _report) =
+        let (_wp, navaids, _legs, _proc, _ap, _rwy, _ils, _lpv, _msa, _mora, _report) =
             FaaCifpAdapter::parse_cifp_content(&content, &snapshot_id, Utc::now());
         let loc: Vec<&CanonicalNavaid> = navaids
             .iter()
@@ -3311,7 +3405,7 @@ mod tests {
     fn test_pi_only_localizer_survives_merge() {
         let content = PI_IAAD.to_string();
         let snapshot_id = SourceSnapshotId("snap-pi-only".to_string());
-        let (_wp, navaids, _legs, _proc, _ap, _rwy, _ils, _lpv, _msa, _report) =
+        let (_wp, navaids, _legs, _proc, _ap, _rwy, _ils, _lpv, _msa, _mora, _report) =
             FaaCifpAdapter::parse_cifp_content(&content, &snapshot_id, Utc::now());
         let loc: Vec<&CanonicalNavaid> = navaids
             .iter()
@@ -3945,7 +4039,7 @@ mod tests {
         ]
         .join("\n");
         let snapshot = SourceSnapshotId("snap-t".to_string());
-        let (_wp, _nav, _legs, _proc, _airports, runways, _ils, _lpv, _msa, report) =
+        let (_wp, _nav, _legs, _proc, _airports, runways, _ils, _lpv, _msa, _mora, report) =
             FaaCifpAdapter::parse_cifp_content(&content, &snapshot, Utc::now());
         assert_eq!(report.runway_ends_decoded, 2);
         assert_eq!(report.runways_decoded, 1);
@@ -3972,7 +4066,7 @@ mod tests {
         ]
         .join("\n");
         let snapshot = SourceSnapshotId("snap-t".to_string());
-        let (_wp, _nav, _legs, _proc, _airports, runways, _ils, _lpv, _msa, report) =
+        let (_wp, _nav, _legs, _proc, _airports, runways, _ils, _lpv, _msa, _mora, report) =
             FaaCifpAdapter::parse_cifp_content(&content, &snapshot, Utc::now());
         assert_eq!(report.runways_decoded, 1);
         assert_eq!(report.unpaired_runway_ends, 0);
@@ -3985,7 +4079,7 @@ mod tests {
         // Only one end of 10L/28R: fail closed, no half-runway.
         let content = "SUSAP KSFOK2GRW10L   0118701040 N37374346W122233621         -0030900006000055200R                                          146341707\n";
         let snapshot = SourceSnapshotId("snap-t".to_string());
-        let (_wp, _nav, _legs, _proc, _airports, runways, _ils, _lpv, _msa, report) =
+        let (_wp, _nav, _legs, _proc, _airports, runways, _ils, _lpv, _msa, _mora, report) =
             FaaCifpAdapter::parse_cifp_content(content, &snapshot, Utc::now());
         assert_eq!(report.runways_decoded, 0);
         assert_eq!(report.unpaired_runway_ends, 1);
@@ -4003,7 +4097,7 @@ mod tests {
         ]
         .join("\n");
         let snapshot = SourceSnapshotId("snap-t".to_string());
-        let (_wp, navaids, _legs, proc_legs, _ap, _rwy, assocs, _lpv, _msa, report) =
+        let (_wp, navaids, _legs, proc_legs, _ap, _rwy, assocs, _lpv, _msa, _mora, report) =
             FaaCifpAdapter::parse_cifp_content(&content, &snapshot, Utc::now());
         assert_eq!(report.procedure_legs_decoded, 3);
         assert_eq!(assocs.len(), 1);
@@ -4097,6 +4191,7 @@ mod tests {
             _ils,
             lpv_fas,
             _msa,
+            _mora,
             report,
         ) = FaaCifpAdapter::parse_cifp_content(&content, &snapshot_id, Utc::now());
 
@@ -4168,6 +4263,27 @@ mod tests {
                 assert_eq!(sectors[2].altitude_hundreds_ft, 28);
             }
             other => panic!("expected Msa, got {other:?}"),
+        }
+    }
+
+    const AS_N04E150: &str = "S   AS       N04E150          UNKUNKUNKUNKUNKUNKUNKUNKUNKUNKUNKUNKUNKUNKUNKUNKUNKUNKUNKUNKUNKUNKUNKUNKUNKUNKUNKUNKUNKUNK   000011703";
+
+    #[test]
+    fn test_decode_grid_mora() {
+        let rec = decode_line(AS_N04E150).unwrap();
+        match rec {
+            CifpRecord::GridMora {
+                start_latitude,
+                start_longitude,
+                mora_values,
+                ..
+            } => {
+                assert_eq!(start_latitude, "+04");
+                assert_eq!(start_longitude, "+150");
+                assert_eq!(mora_values.len(), 30);
+                assert!(mora_values.iter().all(|&v| v == 0));
+            }
+            other => panic!("expected GridMora, got {other:?}"),
         }
     }
 }

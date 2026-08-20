@@ -232,7 +232,12 @@ impl WorldStore {
                 .execute_batch(include_str!("../migrations/v12_msa.sql"))
                 .context("Failed to execute database migration v12_msa.sql")?;
         }
-        self.conn.pragma_update(None, "user_version", 12)?;
+        if version < 13 {
+            self.conn
+                .execute_batch(include_str!("../migrations/v13_mora.sql"))
+                .context("Failed to execute database migration v13_mora.sql")?;
+        }
+        self.conn.pragma_update(None, "user_version", 13)?;
         Ok(())
     }
 
@@ -315,6 +320,15 @@ impl WorldStore {
     /// Query MSA records valid at a given UTC instant.
     pub fn query_msa_at(&self, date: DateTime<Utc>) -> Result<Vec<CanonicalMsa>> {
         query_msa_at_conn(&self.conn, date)
+    }
+
+    pub fn insert_mora(&self, record: &CanonicalMora) -> Result<EntityWrite> {
+        insert_mora_conn(&self.conn, record)
+    }
+
+    /// Query Grid MORA records valid at a given UTC instant.
+    pub fn query_mora_at(&self, date: DateTime<Utc>) -> Result<Vec<CanonicalMora>> {
+        query_mora_at_conn(&self.conn, date)
     }
 }
 
@@ -1984,6 +1998,9 @@ impl WorldStore {
             total_msa: self
                 .conn
                 .query_row("SELECT COUNT(*) FROM msa;", [], |r| r.get(0))?,
+            total_mora: self
+                .conn
+                .query_row("SELECT COUNT(*) FROM mora;", [], |r| r.get(0))?,
         })
     }
 }
@@ -3356,6 +3373,128 @@ pub fn query_msa_at_conn(conn: &Connection, date: DateTime<Utc>) -> Result<Vec<C
     Ok(out)
 }
 
+pub fn insert_mora_conn(conn: &Connection, record: &CanonicalMora) -> Result<EntityWrite> {
+    validate_temporal(&record.temporal)?;
+    let id = &record.object_id.0;
+    let vf = rfc3339(record.temporal.valid_from);
+    let vu = record.temporal.valid_until.map(rfc3339);
+
+    let existing = conn
+        .query_row(
+            "SELECT start_latitude, start_longitude, mora_values_json,
+                    source_snapshot_id, valid_from
+             FROM mora WHERE id = ?1 ORDER BY valid_from DESC LIMIT 1",
+            params![id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            },
+        )
+        .optional()?;
+
+    let write = if let Some((
+        start_latitude,
+        start_longitude,
+        mora_values_json,
+        source_snapshot_id,
+        prev_vf,
+    )) = existing
+    {
+        let new_mora_json = serde_json::to_string(&record.mora_values).unwrap_or_default();
+        let unchanged = start_latitude == record.start_latitude
+            && start_longitude == record.start_longitude
+            && mora_values_json == new_mora_json
+            && source_snapshot_id == record.temporal.source_snapshot_id.0;
+
+        if unchanged {
+            EntityWrite::Unchanged
+        } else {
+            close_open_revision(conn, "mora", id, &prev_vf, &vf)?;
+            insert_mora_row(conn, record, &vf, &vu)?;
+            EntityWrite::Updated
+        }
+    } else {
+        insert_mora_row(conn, record, &vf, &vu)?;
+        EntityWrite::Created
+    };
+
+    record_observation(conn, "mora", id, &record.temporal.source_snapshot_id.0, &vf)?;
+
+    Ok(write)
+}
+
+fn insert_mora_row(
+    conn: &Connection,
+    record: &CanonicalMora,
+    vf: &str,
+    vu: &Option<String>,
+) -> Result<()> {
+    let mora_json = serde_json::to_string(&record.mora_values)?;
+    conn.execute(
+        "INSERT INTO mora (
+            id, start_latitude, start_longitude, mora_values_json,
+            source_snapshot_id, valid_from, valid_until
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            record.object_id.0,
+            record.start_latitude,
+            record.start_longitude,
+            mora_json,
+            record.temporal.source_snapshot_id.0,
+            vf,
+            vu,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Query Grid MORA records valid at a given UTC instant.
+pub fn query_mora_at_conn(conn: &Connection, date: DateTime<Utc>) -> Result<Vec<CanonicalMora>> {
+    let date_str = rfc3339(date);
+    let mut stmt = conn.prepare(&format!(
+        "SELECT id, start_latitude, start_longitude, mora_values_json,
+                source_snapshot_id, valid_from, valid_until
+         FROM mora WHERE {VALID_FROM_LE} AND {VALID_UNTIL_GT}
+         ORDER BY start_latitude, start_longitude;"
+    ))?;
+
+    let rows = stmt.query_and_then(params![date_str], |row| -> Result<CanonicalMora> {
+        let id: String = row.get(0).context("mora.id")?;
+        let mora_json: String = row.get(3).context("mora.mora_values_json")?;
+        let mora_values: Vec<u32> = serde_json::from_str(&mora_json).unwrap_or_default();
+
+        Ok(CanonicalMora {
+            object_id: MoraId(id),
+            start_latitude: row.get(1).context("start_latitude")?,
+            start_longitude: row.get(2).context("start_longitude")?,
+            mora_values,
+            temporal: TemporalValidity {
+                valid_from: parse_utc(
+                    &row.get::<_, String>(5).context("valid_from")?,
+                    "valid_from",
+                )?,
+                valid_until: row
+                    .get::<_, Option<String>>(6)
+                    .context("valid_until")?
+                    .map(|s| parse_utc(&s, "valid_until"))
+                    .transpose()?,
+                source_snapshot_id: SourceSnapshotId(row.get(4).context("source_snapshot_id")?),
+            },
+        })
+    })?;
+
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
 // ---------------------------------------------------------------------------
 // AIRAC lifecycle (v5) — connection-level implementation
 // ---------------------------------------------------------------------------
@@ -3696,6 +3835,7 @@ pub enum EntityTable {
     ProcedureLegs,
     LpvFas,
     Msa,
+    Mora,
 }
 
 impl EntityTable {
@@ -3709,6 +3849,7 @@ impl EntityTable {
             EntityTable::ProcedureLegs => "procedure_legs",
             EntityTable::LpvFas => "lpv_fas",
             EntityTable::Msa => "msa",
+            EntityTable::Mora => "mora",
         }
     }
 
@@ -3722,6 +3863,7 @@ impl EntityTable {
             "procedure_legs" => Some(EntityTable::ProcedureLegs),
             "lpv_fas" => Some(EntityTable::LpvFas),
             "msa" => Some(EntityTable::Msa),
+            "mora" => Some(EntityTable::Mora),
             _ => None,
         }
     }
@@ -3736,6 +3878,7 @@ impl EntityTable {
             EntityTable::ProcedureLegs,
             EntityTable::LpvFas,
             EntityTable::Msa,
+            EntityTable::Mora,
         ]
     }
 }
@@ -4031,6 +4174,7 @@ pub struct EntityPayloads {
     pub procedure_legs: Vec<CanonicalProcedureLeg>,
     pub lpv_fas: Vec<CanonicalLpvFas>,
     pub msa: Vec<CanonicalMsa>,
+    pub mora: Vec<CanonicalMora>,
 }
 
 /// A complete publication plan: what a provider published for one
@@ -4237,6 +4381,17 @@ fn apply_publication_payloads_conn(
             EntityWrite::Unchanged => report.unchanged += 1,
         }
     }
+    for record in &plan.payloads.mora {
+        let write =
+            insert_with_future_correction(conn, "mora", &record.object_id.0, vf, now, |c| {
+                insert_mora_conn(c, record)
+            })?;
+        match write {
+            EntityWrite::Created => report.created += 1,
+            EntityWrite::Updated => report.updated += 1,
+            EntityWrite::Unchanged => report.unchanged += 1,
+        }
+    }
 
     if failpoints.during_apply {
         anyhow::bail!("failpoint: during_apply");
@@ -4262,6 +4417,7 @@ fn apply_publication_payloads_conn(
             EntityTable::ProcedureLegs,
             EntityTable::LpvFas,
             EntityTable::Msa,
+            EntityTable::Mora,
         ];
         for table in tables {
             if plan.masked_tables.contains(&table) {
@@ -4313,6 +4469,12 @@ fn apply_publication_payloads_conn(
                 EntityTable::Msa => plan
                     .payloads
                     .msa
+                    .iter()
+                    .map(|e| e.object_id.0.clone())
+                    .collect(),
+                EntityTable::Mora => plan
+                    .payloads
+                    .mora
                     .iter()
                     .map(|e| e.object_id.0.clone())
                     .collect(),
@@ -5134,6 +5296,25 @@ pub fn rollback_cycle_conn(
                 },
                 insert_msa_row,
             )?,
+            EntityTable::Mora => rollback_table(
+                conn,
+                *table,
+                namespace,
+                eff,
+                at,
+                pre_instant,
+                cur_instant,
+                query_mora_at_conn,
+                |record: &CanonicalMora| record.object_id.0.clone(),
+                |record: &CanonicalMora| record.temporal.valid_from,
+                |record: &CanonicalMora, vf: DateTime<Utc>| {
+                    let mut c = record.clone();
+                    c.temporal.valid_from = vf;
+                    c.temporal.valid_until = None;
+                    c
+                },
+                insert_mora_row,
+            )?,
         };
         added += a;
         changed += c;
@@ -5493,6 +5674,36 @@ pub fn query_airway_legs_at(
 mod tests {
 
     #[test]
+    fn test_mora_temporal_lifecycle() {
+        let store = WorldStore::open_in_memory().unwrap();
+        let snap = snapshot("snap-001");
+        store.insert_source_snapshot(&snap).unwrap();
+
+        let t0 = Utc::now();
+        let record = CanonicalMora {
+            object_id: MoraId("faa:AS:N04:E150".to_string()),
+            start_latitude: "+04".to_string(),
+            start_longitude: "+150".to_string(),
+            mora_values: vec![0; 30],
+            temporal: TemporalValidity {
+                valid_from: t0,
+                valid_until: None,
+                source_snapshot_id: SourceSnapshotId("snap-001".to_string()),
+            },
+        };
+
+        assert_eq!(store.insert_mora(&record).unwrap(), EntityWrite::Created);
+        let queried = store.query_mora_at(t0).unwrap();
+        assert_eq!(queried.len(), 1);
+        assert_eq!(queried[0].start_latitude, "+04");
+        assert_eq!(queried[0].start_longitude, "+150");
+        assert_eq!(queried[0].mora_values.len(), 30);
+
+        let status = store.status().unwrap();
+        assert_eq!(status.total_mora, 1);
+    }
+
+    #[test]
     fn test_msa_temporal_lifecycle() {
         let store = WorldStore::open_in_memory().unwrap();
         let snap = snapshot("snap-001");
@@ -5647,7 +5858,7 @@ mod tests {
         let store = WorldStore::open_in_memory().unwrap();
         let status = store.status().unwrap();
         assert!(status.integrity_ok);
-        assert_eq!(status.migration_version, 12);
+        assert_eq!(status.migration_version, 13);
         assert_eq!(status.total_airports, 0);
 
         let snap = snapshot("snap-001");
@@ -6085,7 +6296,7 @@ mod tests {
 
         // Opening with the current code must migrate v1 -> v3 in place.
         let store = WorldStore::open(&path).unwrap();
-        assert_eq!(store.migration_version().unwrap(), 12);
+        assert_eq!(store.migration_version().unwrap(), 13);
         let at = store.query_airports_at(Utc::now()).unwrap();
         assert_eq!(at.len(), 1);
         assert_eq!(at[0].ident, "KSFO");

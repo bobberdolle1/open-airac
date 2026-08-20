@@ -103,10 +103,10 @@ TOTAL CONVERTER-ONLY ROWS: 1,459
 ### 3.6. Grid Minimum Off-Route Altitudes (`earth_mora.dat`)
 - **Source Semantics:** 1° $\times$ 1° lat/lon terrain clearance grid altitudes (in hundreds of feet).
 - **X-Plane Representation:** `MORAXP1150` grid matrix of 30 integer values per 30° latitude block.
-- **OpenAIRAC Current Status:** Not modeled.
+- **OpenAIRAC Current Status:** **IMPLEMENTED (v1.1.5+)**. Decoded from FAA CIFP `AS` records (241 blocks), modeled in `CanonicalMora` with temporal migration `v13_mora.sql`, and serialized to `earth_mora.dat` (`MORAXP1150` format) with 100% agreement across all 241 golden MORA blocks.
 - **Importance for 1.0:** **Low**. Informational display only.
-- **Source Available from Open Data:** **Derived from public digital elevation models (SRTM/COPERNICUS)**.
-- **Action Recommendation:** **POST-1.0**.
+- **Source Available from Open Data:** **Yes (100% in FAA CIFP `AS` records)**.
+- **Action Recommendation:** **SHIPPED**.
 
 ---
 
@@ -138,4 +138,4 @@ TOTAL CONVERTER-ONLY ROWS: 1,459
 | **Airport Meta / Transitions**| `earth_aptmeta.dat` | **SHIPPED (v1.1.3+)** | Low | OurAirports / FAA |
 | **Minimum Sector Altitudes** | `earth_msa.dat` | **SHIPPED (v1.1.4+)** | Medium | FAA CIFP `PS` |
 | **GLS / GBAS Stations** | `earth_nav.dat` Row 15 | Post-1.0 (v1.2) | Medium | Open-AIP / NASR |
-| **Grid MORA Matrix** | `earth_mora.dat` | Post-1.0 (v1.2) | Low | DEM Calculation |
+| **Grid MORA Matrix** | `earth_mora.dat` | **SHIPPED (v1.1.5+)** | Low | FAA CIFP `AS` |

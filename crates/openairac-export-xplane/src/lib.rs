@@ -45,6 +45,7 @@ pub struct ExportReport {
     pub holds_written: usize,
     pub airports_meta_written: usize,
     pub msa_written: usize,
+    pub mora_written: usize,
     /// Airway LEGS accepted for the layer (before merging).
     pub airway_legs_accepted: usize,
     /// Physical merged segment rows written to `earth_awy.dat`. This is the
@@ -848,7 +849,41 @@ impl XPlane12Exporter {
         Ok(())
     }
 
-    /// Full export from the temporal store: query at `date`, stage the six
+    /// Export Grid MORA terrain clearance into `earth_mora.dat` (MORAXP1150).
+    ///
+    /// Row format:
+    /// `StartLat StartLon [MORA_1 ... MORA_30]`
+    /// e.g. `+04 +150 000 000 000 000 ...`
+    pub fn export_earth_mora<W: Write>(
+        mora_blocks: &[CanonicalMora],
+        cycle: &str,
+        build_date: &str,
+        mut writer: W,
+        report: &mut ExportReport,
+    ) -> Result<()> {
+        write_header(&mut writer, "1150", "MORAXP1150.", cycle, build_date)?;
+
+        let mut sorted: Vec<&CanonicalMora> = mora_blocks.iter().collect();
+        sorted.sort_by_key(|m| (m.start_latitude.clone(), m.start_longitude.clone()));
+
+        for block in sorted {
+            write!(
+                writer,
+                "{:>3} {:>4}",
+                block.start_latitude, block.start_longitude
+            )?;
+            for val in &block.mora_values {
+                write!(writer, " {:>03}", val)?;
+            }
+            writeln!(writer)?;
+            report.mora_written += 1;
+        }
+
+        writeln!(writer, "99")?;
+        Ok(())
+    }
+
+    /// Full export from the temporal store: query at `date`, stage the seven
     /// dat files plus a manifest next to `out_dir`, validate, swap in.
     pub fn export_from_db<P: AsRef<Path>>(
         store: &WorldStore,
@@ -871,6 +906,7 @@ impl XPlane12Exporter {
         let procedure_legs = store.query_procedure_legs_at(date).unwrap_or_default();
         let lpv_fas = store.query_lpv_fas_at(date).unwrap_or_default();
         let msa = store.query_msa_at(date).unwrap_or_default();
+        let mora = store.query_mora_at(date).unwrap_or_default();
 
         let mut report = ExportReport::default();
         let mut index = ExportedEntityIndex::default();
@@ -885,6 +921,7 @@ impl XPlane12Exporter {
         let staged_hold = staging.join("earth_hold.dat");
         let staged_aptmeta = staging.join("earth_aptmeta.dat");
         let staged_msa = staging.join("earth_msa.dat");
+        let staged_mora = staging.join("earth_mora.dat");
         let staged_manifest = staging.join("manifest.json");
 
         let fix_file = std::fs::File::create(&staged_fix)
@@ -928,6 +965,9 @@ impl XPlane12Exporter {
         let msa_file = std::fs::File::create(&staged_msa)
             .with_context(|| format!("creating staged {:?}", staged_msa))?;
         Self::export_earth_msa(&msa, &cycle, &build_date, msa_file, &mut report)?;
+        let mora_file = std::fs::File::create(&staged_mora)
+            .with_context(|| format!("creating staged {:?}", staged_mora))?;
+        Self::export_earth_mora(&mora, &cycle, &build_date, mora_file, &mut report)?;
 
         // X-Plane loads the layer as a unit: an incomplete layer (missing
         // or empty file) destroys referential integrity on install.
@@ -969,6 +1009,7 @@ impl XPlane12Exporter {
                 manifest_file_entry(&staged_hold, report.holds_written)?,
                 manifest_file_entry(&staged_aptmeta, report.airports_meta_written)?,
                 manifest_file_entry(&staged_msa, report.msa_written)?,
+                manifest_file_entry(&staged_mora, report.mora_written)?,
             ],
             allow_empty,
             world_fingerprint: Some(world_fingerprint),
@@ -982,6 +1023,7 @@ impl XPlane12Exporter {
         swap_file(&staged_hold, &dir.join("earth_hold.dat"))?;
         swap_file(&staged_aptmeta, &dir.join("earth_aptmeta.dat"))?;
         swap_file(&staged_msa, &dir.join("earth_msa.dat"))?;
+        swap_file(&staged_mora, &dir.join("earth_mora.dat"))?;
         swap_file(&staged_manifest, &dir.join("manifest.json"))?;
         let _ = std::fs::remove_dir_all(&staging);
 
@@ -3450,6 +3492,67 @@ I
                 "0", "036", "000", "0", "090", "000", "0", "028", "000", "0"
             ]
         );
+        assert_eq!(lines[5], "99");
+    }
+
+    #[test]
+    fn test_export_earth_mora_golden() {
+        let mora1 = CanonicalMora {
+            object_id: MoraId("faa:AS:+04:+150".to_string()),
+            start_latitude: "+04".to_string(),
+            start_longitude: "+150".to_string(),
+            mora_values: vec![0; 30],
+            temporal: TemporalValidity {
+                valid_from: Utc::now(),
+                valid_until: None,
+                source_snapshot_id: SourceSnapshotId("snap-1".to_string()),
+            },
+        };
+
+        let mut values2 = vec![0; 30];
+        values2[0] = 25;
+        values2[1] = 45;
+        let mora2 = CanonicalMora {
+            object_id: MoraId("faa:AS:+05:+150".to_string()),
+            start_latitude: "+05".to_string(),
+            start_longitude: "+150".to_string(),
+            mora_values: values2,
+            temporal: TemporalValidity {
+                valid_from: Utc::now(),
+                valid_until: None,
+                source_snapshot_id: SourceSnapshotId("snap-1".to_string()),
+            },
+        };
+
+        let mut report = ExportReport::default();
+        let mut buf = Vec::new();
+        XPlane12Exporter::export_earth_mora(
+            &[mora1, mora2],
+            "2609",
+            "20260903",
+            &mut buf,
+            &mut report,
+        )
+        .unwrap();
+
+        assert_eq!(report.mora_written, 2);
+
+        let text = String::from_utf8(buf).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines[0], "I");
+        assert!(lines[1].starts_with("1150 Version"));
+
+        let tok1: Vec<&str> = lines[3].split_whitespace().collect();
+        assert_eq!(tok1[0], "+04");
+        assert_eq!(tok1[1], "+150");
+        assert_eq!(tok1.len(), 32);
+        assert_eq!(tok1[2], "000");
+
+        let tok2: Vec<&str> = lines[4].split_whitespace().collect();
+        assert_eq!(tok2[0], "+05");
+        assert_eq!(tok2[1], "+150");
+        assert_eq!(tok2[2], "025");
+        assert_eq!(tok2[3], "045");
         assert_eq!(lines[5], "99");
     }
 }

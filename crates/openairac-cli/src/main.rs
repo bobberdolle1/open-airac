@@ -2029,6 +2029,10 @@ fn main() -> Result<()> {
                     report.msa_written
                 );
                 println!(
+                    "  Exported {} Grid MORA blocks to earth_mora.dat",
+                    report.mora_written
+                );
+                println!(
                     "  Skipped {} fixes, {} navaids",
                     report.fixes_skipped, report.navaids_skipped
                 );

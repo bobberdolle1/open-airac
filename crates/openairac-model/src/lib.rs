@@ -29,6 +29,9 @@ pub struct LpvFasId(pub String);
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MsaId(pub String);
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct MoraId(pub String);
+
 /// Frequency wrapper with explicit units (kHz)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrequencyKhz(pub u32);
@@ -140,6 +143,16 @@ pub struct CanonicalMsa {
     pub fix_type: u8,
     pub magnetic_true_indicator: char,
     pub sectors: Vec<MsaSector>,
+    pub temporal: TemporalValidity,
+}
+
+/// Canonical Grid MORA block (ARINC 424 AS records)
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CanonicalMora {
+    pub object_id: MoraId,
+    pub start_latitude: String,
+    pub start_longitude: String,
+    pub mora_values: Vec<u32>,
     pub temporal: TemporalValidity,
 }
 
@@ -364,6 +377,7 @@ pub struct StoreStatus {
     pub total_procedure_legs: usize,
     pub total_lpv_fas: usize,
     pub total_msa: usize,
+    pub total_mora: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -722,6 +736,7 @@ pub const PROVIDER_MANIFESTS: &[ProviderManifest] = &[
                 "procedure_legs",
                 "lpv_fas",
                 "msa",
+                "mora",
             ],
         }],
     },
