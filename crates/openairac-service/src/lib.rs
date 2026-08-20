@@ -750,6 +750,125 @@ impl WorldQuery {
     }
 }
 
+pub const OPENAIRAC_CORE_VERSION: &str = "2.0.0";
+pub const OPENAIRAC_PROTOCOL_VERSION: u32 = 2;
+
+/// Handshake result for client application compatibility.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompatibilityReport {
+    pub is_compatible: bool,
+    pub core_version: String,
+    pub protocol_version: u32,
+    pub client_name: String,
+    pub client_version: String,
+    pub message: String,
+}
+
+pub fn check_client_compatibility(
+    client_name: &str,
+    client_version: &str,
+    client_protocol: u32,
+) -> CompatibilityReport {
+    let is_compatible = client_protocol == OPENAIRAC_PROTOCOL_VERSION;
+    let message = if is_compatible {
+        format!(
+            "{client_name} v{client_version} is fully compatible with OpenAIRAC Core v{OPENAIRAC_CORE_VERSION} (Protocol v{OPENAIRAC_PROTOCOL_VERSION})"
+        )
+    } else {
+        format!(
+            "Incompatible protocol: {client_name} requested Protocol v{client_protocol}, but OpenAIRAC Core v{OPENAIRAC_CORE_VERSION} requires Protocol v{OPENAIRAC_PROTOCOL_VERSION}"
+        )
+    };
+
+    CompatibilityReport {
+        is_compatible,
+        core_version: OPENAIRAC_CORE_VERSION.to_string(),
+        protocol_version: OPENAIRAC_PROTOCOL_VERSION,
+        client_name: client_name.to_string(),
+        client_version: client_version.to_string(),
+        message,
+    }
+}
+
+/// A published downloadable data bundle entry for initial setup / updates.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BootstrapBundleEntry {
+    pub id: String,
+    pub title: String,
+    pub airac_cycle: String,
+    pub approximate_size_bytes: u64,
+    pub sha256_hash: String,
+    pub download_url: String,
+    pub is_recommended: bool,
+    pub description: String,
+}
+
+/// Index of available official OpenAIRAC data packages.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BootstrapIndex {
+    pub latest_airac: String,
+    pub updated_at: DateTime<Utc>,
+    pub bundles: Vec<BootstrapBundleEntry>,
+}
+
+impl Default for BootstrapIndex {
+    fn default() -> Self {
+        Self::default_index()
+    }
+}
+
+impl BootstrapIndex {
+    pub fn default_index() -> Self {
+        Self {
+            latest_airac: "2608".to_string(),
+            updated_at: Utc::now(),
+            bundles: vec![
+                BootstrapBundleEntry {
+                    id: "world-open".to_string(),
+                    title: "World Open Navdata Bundle".to_string(),
+                    airac_cycle: "2608".to_string(),
+                    approximate_size_bytes: 42_000_000,
+                    sha256_hash: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string(),
+                    download_url: "https://github.com/bobberdolle1/open-airac/releases/download/v2.0.0/openairac-bundle-world-open-2608.tar.gz".to_string(),
+                    is_recommended: true,
+                    description: "Worldwide airports, runways, enroute fixes, navaids, airways, and official FAA/France SIA procedures.".to_string(),
+                },
+                BootstrapBundleEntry {
+                    id: "us".to_string(),
+                    title: "United States (FAA CIFP & AIXM)".to_string(),
+                    airac_cycle: "2608".to_string(),
+                    approximate_size_bytes: 28_000_000,
+                    sha256_hash: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string(),
+                    download_url: "https://github.com/bobberdolle1/open-airac/releases/download/v2.0.0/openairac-bundle-us-2608.tar.gz".to_string(),
+                    is_recommended: false,
+                    description: "Complete US nationwide coverage with full terminal SIDs, STARs, and IAPs.".to_string(),
+                },
+                BootstrapBundleEntry {
+                    id: "europe-open".to_string(),
+                    title: "Europe Open (DFS, SIA, OFM)".to_string(),
+                    airac_cycle: "2608".to_string(),
+                    approximate_size_bytes: 18_000_000,
+                    sha256_hash: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string(),
+                    download_url: "https://github.com/bobberdolle1/open-airac/releases/download/v2.0.0/openairac-bundle-europe-open-2608.tar.gz".to_string(),
+                    is_recommended: false,
+                    description: "European airports, runways, navaids, routes, and open geodata under open government licences.".to_string(),
+                },
+            ],
+        }
+    }
+}
+
+/// Sanitized path string for reports (replaces user home path components).
+pub fn sanitize_path_for_report(path: &std::path::Path) -> String {
+    let p_str = path.to_string_lossy().to_string();
+    if let Ok(home) = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME"))
+        && !home.is_empty()
+        && p_str.starts_with(&home)
+    {
+        return format!("~{}", &p_str[home.len()..]);
+    }
+    p_str
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1040,5 +1159,35 @@ mod tests {
         let doc_unknown = service.doctor_airport("Z999", t).unwrap();
         assert_eq!(doc_unknown.status, "AIRPORT_MISSING");
         assert!(!doc_unknown.has_airport_record);
+    }
+
+    #[test]
+    fn test_compatibility_handshake() {
+        let ok = check_client_compatibility("OpenAIRAC Map", "1.0.0", 2);
+        assert!(ok.is_compatible);
+        assert_eq!(ok.core_version, "2.0.0");
+        assert_eq!(ok.protocol_version, 2);
+        assert!(ok.message.contains("fully compatible"));
+
+        let fail = check_client_compatibility("Legacy Client", "0.2.0", 1);
+        assert!(!fail.is_compatible);
+        assert!(fail.message.contains("Incompatible protocol"));
+    }
+
+    #[test]
+    fn test_bootstrap_index() {
+        let idx = BootstrapIndex::default_index();
+        assert_eq!(idx.latest_airac, "2608");
+        assert_eq!(idx.bundles.len(), 3);
+        assert!(
+            idx.bundles
+                .iter()
+                .any(|b| b.id == "world-open" && b.is_recommended)
+        );
+        assert!(
+            idx.bundles
+                .iter()
+                .all(|b| b.download_url.starts_with("https://"))
+        );
     }
 }

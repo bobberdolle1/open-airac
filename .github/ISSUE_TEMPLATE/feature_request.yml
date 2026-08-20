@@ -1,0 +1,21 @@
+name: Feature Request
+description: Suggest an enhancement or new capability for OpenAIRAC
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: Thank you for suggesting improvements to OpenAIRAC!
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem Statement
+      placeholder: What problem does this feature solve?
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed Solution
+      placeholder: Describe the desired capability or workflow.
+    validations:
+      required: true

@@ -427,8 +427,7 @@ impl ChartCatalog {
         }
         Ok(out)
     }
-
-    pub fn chart_count(&self) -> Result<usize> {
+    pub fn total_charts(&self) -> Result<usize> {
         let cnt: i64 = self
             .conn
             .query_row("SELECT COUNT(*) FROM chart_documents", [], |r| r.get(0))?;

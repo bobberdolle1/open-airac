@@ -201,6 +201,35 @@ enum Commands {
         #[command(subcommand)]
         cmd: OnlineCmd,
     },
+    /// Check client/Map compatibility handshake with OpenAIRAC Core
+    Handshake {
+        #[arg(long, default_value = "OpenAIRAC Map")]
+        client_name: String,
+        #[arg(long, default_value = "1.0.0")]
+        client_version: String,
+        #[arg(long, default_value_t = 2)]
+        protocol: u32,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Inspect available downloadable data bundles for setup/updater
+    BootstrapIndex {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Comprehensive system diagnostics report for issue triage
+    Diagnostics {
+        #[arg(short, long, default_value = "./data/world.openairac.sqlite")]
+        db: PathBuf,
+        #[arg(long, default_value = "./data/charts.sqlite")]
+        charts_db: PathBuf,
+        #[arg(long, default_value = "./data/weather.sqlite")]
+        weather_db: PathBuf,
+        #[arg(long, default_value = "./data/online.sqlite")]
+        online_db: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -3810,6 +3839,211 @@ fn main() -> Result<()> {
                 }
             },
         },
+        Commands::Handshake {
+            client_name,
+            client_version,
+            protocol,
+            json,
+        } => {
+            let report = openairac_service::check_client_compatibility(
+                client_name,
+                client_version,
+                *protocol,
+            );
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!("OpenAIRAC Core Handshake:");
+                println!(
+                    "  Status:           {}",
+                    if report.is_compatible {
+                        "COMPATIBLE"
+                    } else {
+                        "INCOMPATIBLE"
+                    }
+                );
+                println!("  Core Version:     {}", report.core_version);
+                println!("  Protocol Version: {}", report.protocol_version);
+                println!(
+                    "  Client:           {} v{}",
+                    report.client_name, report.client_version
+                );
+                println!("  Message:          {}", report.message);
+            }
+        }
+        Commands::BootstrapIndex { json } => {
+            let index = openairac_service::BootstrapIndex::default_index();
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&index)?);
+            } else {
+                println!("OpenAIRAC Data Packages (Bootstrap Index):");
+                println!("  Latest Cycle: {}", index.latest_airac);
+                println!(
+                    "  Updated At:   {}",
+                    index.updated_at.format("%Y-%m-%d %H:%M:%SZ")
+                );
+                println!();
+                for b in &index.bundles {
+                    let rec_tag = if b.is_recommended {
+                        " [RECOMMENDED]"
+                    } else {
+                        ""
+                    };
+                    println!("  - {}{}:", b.title, rec_tag);
+                    println!("      Bundle ID:   {}", b.id);
+                    println!("      AIRAC:       {}", b.airac_cycle);
+                    println!(
+                        "      Size:        {:.1} MB",
+                        b.approximate_size_bytes as f64 / 1_000_000.0
+                    );
+                    println!("      SHA-256:     {}", b.sha256_hash);
+                    println!("      URL:         {}", b.download_url);
+                    println!("      Description: {}", b.description);
+                    println!();
+                }
+            }
+        }
+        Commands::Diagnostics {
+            db,
+            charts_db,
+            weather_db,
+            online_db,
+            json,
+        } => {
+            let mut navdata_ok = false;
+            let mut navdata_airports = 0;
+            let mut navdata_navaids = 0;
+            let mut navdata_version = 0;
+            if db.exists()
+                && let Ok(store) = WorldStore::open(db)
+                && let Ok(st) = store.status()
+            {
+                navdata_ok = true;
+                navdata_airports = st.total_airports;
+                navdata_navaids = st.total_navaids;
+                navdata_version = st.migration_version;
+            }
+
+            let mut charts_count = 0;
+            if charts_db.exists()
+                && let Ok(cat) = openairac_charts::ChartCatalog::open(charts_db)
+            {
+                charts_count = cat.total_charts().unwrap_or(0);
+            }
+
+            let mut weather_metars = 0;
+            if weather_db.exists()
+                && let Ok(w_cache) = openairac_weather::cache::WeatherCache::open(weather_db)
+                && let Ok(st) = w_cache.cache_status()
+            {
+                weather_metars = st.cached_metars;
+            }
+
+            let mut online_clients = 0;
+            let mut online_freshness = "OFFLINE".to_string();
+            if online_db.exists()
+                && let Ok(on_cache) = openairac_online::OnlineCache::open(online_db)
+                && let Ok(Some(snap)) = on_cache.get_snapshot("VATSIM")
+            {
+                online_clients = snap.connected_clients;
+                online_freshness = snap.freshness.as_str().to_string();
+            }
+
+            if *json {
+                let rep = serde_json::json!({
+                    "core_version": openairac_service::OPENAIRAC_CORE_VERSION,
+                    "protocol_version": openairac_service::OPENAIRAC_PROTOCOL_VERSION,
+                    "navdata": {
+                        "database_path": openairac_service::sanitize_path_for_report(db),
+                        "exists": db.exists(),
+                        "integrity_ok": navdata_ok,
+                        "schema_version": navdata_version,
+                        "total_airports": navdata_airports,
+                        "total_navaids": navdata_navaids,
+                    },
+                    "charts": {
+                        "catalog_path": openairac_service::sanitize_path_for_report(charts_db),
+                        "exists": charts_db.exists(),
+                        "total_charts_indexed": charts_count,
+                    },
+                    "weather": {
+                        "cache_path": openairac_service::sanitize_path_for_report(weather_db),
+                        "exists": weather_db.exists(),
+                        "cached_metars": weather_metars,
+                    },
+                    "online": {
+                        "cache_path": openairac_service::sanitize_path_for_report(online_db),
+                        "exists": online_db.exists(),
+                        "connected_clients": online_clients,
+                        "freshness": online_freshness,
+                    }
+                });
+                println!("{}", serde_json::to_string_pretty(&rep)?);
+            } else {
+                println!(
+                    "================================================================================"
+                );
+                println!("OpenAIRAC System Diagnostics Report");
+                println!(
+                    "================================================================================"
+                );
+                println!("1. CORE & COMPATIBILITY");
+                println!(
+                    "   Core Version:     v{}",
+                    openairac_service::OPENAIRAC_CORE_VERSION
+                );
+                println!(
+                    "   Protocol Version: v{}",
+                    openairac_service::OPENAIRAC_PROTOCOL_VERSION
+                );
+                println!();
+                println!("2. NAVIGATION DATA SUBSYSTEM");
+                println!(
+                    "   Database Path:    {}",
+                    openairac_service::sanitize_path_for_report(db)
+                );
+                println!(
+                    "   Database Status:  {}",
+                    if navdata_ok {
+                        "ONLINE / HEALTHY"
+                    } else if db.exists() {
+                        "CORRUPTED / UNREADABLE"
+                    } else {
+                        "NOT INSTALLED (Clean State)"
+                    }
+                );
+                println!("   Schema Version:   v{}", navdata_version);
+                println!("   Total Airports:   {}", navdata_airports);
+                println!("   Total Navaids:    {}", navdata_navaids);
+                println!();
+                println!("3. CHARTS SUBSYSTEM");
+                println!(
+                    "   Catalog Path:     {}",
+                    openairac_service::sanitize_path_for_report(charts_db)
+                );
+                println!("   Indexed Charts:   {}", charts_count);
+                println!();
+                println!("4. WEATHER SUBSYSTEM");
+                println!(
+                    "   Cache Path:       {}",
+                    openairac_service::sanitize_path_for_report(weather_db)
+                );
+                println!("   Cached METARs:    {}", weather_metars);
+                println!();
+                println!("5. ONLINE SIMULATION NETWORK");
+                println!(
+                    "   Cache Path:       {}",
+                    openairac_service::sanitize_path_for_report(online_db)
+                );
+                println!(
+                    "   VATSIM Status:    {} ({} clients)",
+                    online_freshness, online_clients
+                );
+                println!(
+                    "================================================================================"
+                );
+            }
+        }
     }
 
     Ok(())

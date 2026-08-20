@@ -1,0 +1,34 @@
+name: Bug Report
+description: Report an issue, crash, or unexpected behavior in OpenAIRAC
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: Thank you for reporting an issue with OpenAIRAC!
+  - type: input
+    id: version
+    attributes:
+      label: OpenAIRAC Version
+      placeholder: e.g. v2.0.0
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating System
+      placeholder: e.g. Windows 11 x64, Ubuntu 24.04
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Description of the Issue
+      placeholder: Clear and concise description of what happened.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: OpenAIRAC Diagnostic Report
+      description: Run `openairac diagnostics` and paste the sanitized output here.
+      render: text

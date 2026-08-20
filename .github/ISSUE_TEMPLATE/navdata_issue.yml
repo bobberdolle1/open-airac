@@ -1,0 +1,35 @@
+name: Navigation Data / Procedure Issue
+description: Report a data discrepancy or procedure defect in OpenAIRAC
+labels: ["navdata"]
+body:
+  - type: markdown
+    attributes:
+      value: Report an issue regarding airports, runways, navaids, airways, or terminal procedures.
+  - type: input
+    id: airport
+    attributes:
+      label: Airport ICAO / Procedure Name
+      placeholder: e.g. KJFK / ILS 04L or EGLL / DVR1G
+    validations:
+      required: true
+  - type: input
+    id: airac
+    attributes:
+      label: AIRAC Cycle
+      placeholder: e.g. 2608
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed Behavior / Data Output
+      placeholder: Describe the discrepancy or missing procedure leg.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior per Official AIP / Chart
+      placeholder: Reference official published public aeronautical publications (do not upload proprietary datasets).
+    validations:
+      required: true
