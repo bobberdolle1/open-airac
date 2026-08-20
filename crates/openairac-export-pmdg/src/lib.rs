@@ -136,7 +136,7 @@ impl FormatExporter for PmdgNavdataExporter {
                 } else {
                     ("0.00".to_string(), 0, "NONE")
                 };
-                let hdg = rwy.true_heading_deg.unwrap_or(0.0).round() as i32;
+                let hdg = rwy.true_heading().round() as i32;
                 writeln!(
                     apt_buf,
                     "{:<24} {:<4} {:<4} {:>5} {:>3} {:>10.6} {:>11.6} {:>5} {:>6} {:>3} {:<4}",

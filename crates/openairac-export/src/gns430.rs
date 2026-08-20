@@ -69,7 +69,7 @@ impl FormatExporter for Gns430Exporter {
             for rwy in &apt.runways {
                 let length = rwy.length_ft;
                 let width = rwy.width_ft.unwrap_or(150);
-                let hdg = rwy.true_heading_deg.unwrap_or(0.0).round() as i32;
+                let hdg = rwy.true_heading().round() as i32;
                 airports_txt.push_str(&format!(
                     "R,{},{},{},{},0,0.0,0,{:.6},{:.6},{},3.00,50,{}\n",
                     rwy.official_designator,

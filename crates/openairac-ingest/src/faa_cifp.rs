@@ -2142,7 +2142,9 @@ impl FaaCifpAdapter {
                         airport_ident: airport.clone(),
                         official_designator: le.designator.clone(),
                         computed_magnetic_designator: None,
-                        true_heading_deg: None,
+                        true_heading_deg: Some(geodesic_bearing_deg(
+                            le.le_lat, le.le_lon, he.le_lat, he.le_lon,
+                        )),
                         length_ft: le.length_ft,
                         width_ft: None,
                         surface: None,
@@ -4055,9 +4057,10 @@ mod tests {
         assert!((runway.le_lat - 37.62873889).abs() < 1e-5);
         assert!((runway.le_lon - (-122.39339167)).abs() < 1e-5);
         assert_eq!(runway.he_ident, "28R");
-        assert!(runway.true_heading_deg.is_none());
+        assert!(runway.true_heading_deg.is_some());
+        let hdg = runway.true_heading_deg.unwrap();
+        assert!((hdg - 166.23).abs() < 1.0);
     }
-
     #[test]
     fn test_decode_pg_runway_pair_kden_16r() {
         let content = [

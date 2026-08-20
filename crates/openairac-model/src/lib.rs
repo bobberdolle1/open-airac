@@ -298,6 +298,69 @@ pub struct CanonicalRunway {
     pub temporal: TemporalValidity,
 }
 
+impl CanonicalRunway {
+    /// Authoritative true heading in degrees [0, 360) from Low-End (primary) to High-End (secondary).
+    /// Uses published true heading if present, otherwise computes geodesic bearing between endpoints,
+    /// falling back to nominal heading derived from the runway designator.
+    pub fn true_heading(&self) -> f64 {
+        if let Some(h) = self
+            .true_heading_deg
+            .filter(|h| h.is_finite() && (0.0..=360.0).contains(h))
+        {
+            return h;
+        }
+        if (self.le_lat - self.he_lat).abs() > 1e-6 || (self.le_lon - self.he_lon).abs() > 1e-6 {
+            return geodesic_bearing_deg(self.le_lat, self.le_lon, self.he_lat, self.he_lon);
+        }
+        nominal_heading_from_designator(&self.le_ident).unwrap_or(0.0)
+    }
+
+    /// Reciprocal true heading in degrees [0, 360) for High-End (secondary) threshold.
+    pub fn reciprocal_true_heading(&self) -> f64 {
+        (self.true_heading() + 180.0).rem_euclid(360.0)
+    }
+}
+
+/// Initial geodesic bearing from point 1 (lat1, lon1) to point 2 (lat2, lon2) in true degrees [0, 360).
+pub fn geodesic_bearing_deg(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
+    let phi1 = lat1.to_radians();
+    let phi2 = lat2.to_radians();
+    let delta_lambda = (lon2 - lon1).to_radians();
+    let y = delta_lambda.sin() * phi2.cos();
+    let x = phi1.cos() * phi2.sin() - phi1.sin() * phi2.cos() * delta_lambda.cos();
+    let theta = y.atan2(x);
+    (theta.to_degrees() + 360.0).rem_euclid(360.0)
+}
+
+/// Calculate endpoint at distance (meters) along bearing (true degrees) from (lat, lon).
+pub fn geodesic_endpoint(lat: f64, lon: f64, dist_m: f64, bearing_deg: f64) -> (f64, f64) {
+    const EARTH_RADIUS_M: f64 = 6_371_000.0;
+    let d_r = dist_m / EARTH_RADIUS_M;
+    let brng = bearing_deg.to_radians();
+    let phi1 = lat.to_radians();
+    let lam1 = lon.to_radians();
+
+    let phi2 = (phi1.sin() * d_r.cos() + phi1.cos() * d_r.sin() * brng.cos()).asin();
+    let lam2 =
+        lam1 + (brng.sin() * d_r.sin() * phi1.cos()).atan2(d_r.cos() - phi1.sin() * phi2.sin());
+    let lon2 = (lam2.to_degrees() + 540.0).rem_euclid(360.0) - 180.0;
+    (phi2.to_degrees(), lon2)
+}
+
+/// Extracts the nominal magnetic heading (e.g. "03" -> 30°, "28R" -> 280°) from a runway designator.
+pub fn nominal_heading_from_designator(designator: &str) -> Option<f64> {
+    let clean = designator
+        .trim()
+        .trim_start_matches("RW")
+        .trim_start_matches('R');
+    let digits: String = clean.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if let Some(num) = digits.parse::<u32>().ok().filter(|n| (1..=36).contains(n)) {
+        let hdg = (num * 10) as f64;
+        return Some(if hdg == 360.0 { 360.0 } else { hdg });
+    }
+    None
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CanonicalAirport {
     pub id: AirportId,

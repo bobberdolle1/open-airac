@@ -131,7 +131,7 @@ impl FormatExporter for LnmNavdataExporter {
                 let longest_hdg = airport
                     .runways
                     .first()
-                    .and_then(|r| r.true_heading_deg)
+                    .map(|r| r.true_heading())
                     .unwrap_or(0.0);
                 let longest_surf = airport
                     .runways
@@ -202,8 +202,8 @@ impl FormatExporter for LnmNavdataExporter {
                     runway_end_map.insert((airport.ident.clone(), rwy.le_ident.clone()), end1);
                     runway_end_map.insert((airport.ident.clone(), rwy.he_ident.clone()), end2);
 
-                    let hdg1 = rwy.true_heading_deg.unwrap_or(0.0);
-                    let hdg2 = (hdg1 + 180.0).rem_euclid(360.0);
+                    let hdg1 = rwy.true_heading();
+                    let hdg2 = rwy.reciprocal_true_heading();
                     let alt = airport.elevation_ft.unwrap_or(0.0) as i64;
 
                     tx.execute(
@@ -380,6 +380,37 @@ impl FormatExporter for LnmNavdataExporter {
                         .and_then(|rwy| runway_end_map.get(&(apt.clone(), rwy.clone())).copied())
                 });
 
+                let loc_heading_true = nav
+                    .localizer_bearing_true_deg
+                    .or_else(|| {
+                        nav.localizer_bearing_mag_deg.map(|mag| {
+                            (mag + nav.magnetic_variation_deg.unwrap_or(0.0)).rem_euclid(360.0)
+                        })
+                    })
+                    .unwrap_or(0.0);
+
+                let loc_width: f64 = 5.0; // Standard 5° localizer feather width
+                let feather_len_m = 10.0 * 1852.0; // 10 NM standard display feather length
+                let opp_hdg = (loc_heading_true + 180.0).rem_euclid(360.0);
+                let (p1_lat, p1_lon) = openairac_model::geodesic_endpoint(
+                    nav.latitude,
+                    nav.longitude,
+                    feather_len_m,
+                    (opp_hdg - loc_width / 2.0).rem_euclid(360.0),
+                );
+                let (p2_lat, p2_lon) = openairac_model::geodesic_endpoint(
+                    nav.latitude,
+                    nav.longitude,
+                    feather_len_m,
+                    (opp_hdg + loc_width / 2.0).rem_euclid(360.0),
+                );
+                let (mid_lat, mid_lon) = openairac_model::geodesic_endpoint(
+                    nav.latitude,
+                    nav.longitude,
+                    feather_len_m * 0.9,
+                    opp_hdg,
+                );
+
                 tx.execute(
                     "INSERT INTO ils (ils_id, ident, name, region, type, perf_indicator,
                         provider, frequency, range, mag_var, has_backcourse,
@@ -391,8 +422,8 @@ impl FormatExporter for LnmNavdataExporter {
                         altitude, lonx, laty)
                      VALUES (?1, ?2, ?3, NULL, 'I', NULL, NULL, ?4, 27, ?5, 0,
                         NULL, NULL, NULL, NULL, NULL, ?6, NULL, ?7, ?8,
-                        ?9, ?10, ?11, ?12, NULL,
-                        NULL, NULL, NULL, NULL, NULL, NULL, ?13, ?14, ?15)",
+                        ?9, ?10, ?11, ?12, ?13,
+                        ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
                     rusqlite::params![
                         ils_id_counter as i64 + 1,
                         nav.ident,
@@ -405,16 +436,20 @@ impl FormatExporter for LnmNavdataExporter {
                         rwy_end_id,
                         nav.associated_airport,
                         nav.associated_runway,
-                        nav.localizer_bearing_true_deg
-                            .or(nav.localizer_bearing_mag_deg)
-                            .unwrap_or(0.0),
+                        loc_heading_true,
+                        loc_width,
+                        p1_lon,
+                        p1_lat,
+                        mid_lon,
+                        mid_lat,
+                        p2_lon,
+                        p2_lat,
                         nav.elevation_ft.unwrap_or(0),
                         nav.longitude,
                         nav.latitude,
                     ],
                 )?;
             }
-
             // Airways.
             let mut airway_id_counter = 0i64;
             let mut routes: BTreeMap<String, Vec<_>> = Default::default();

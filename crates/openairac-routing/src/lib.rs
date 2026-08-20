@@ -29,7 +29,7 @@ use openairac_model::{CanonicalAirwayLeg, CanonicalNavaid, CanonicalWaypoint};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, VecDeque};
-
+pub mod random_flight;
 /// Geographic Coordinate (WGS84)
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Coordinate {

@@ -127,10 +127,7 @@ impl FormatExporter for MsfsNavdataExporter {
             // Runways (attached to the airport by the store query).
             for rwy in &airport.runways {
                 report.runways += 1;
-                let heading = rwy
-                    .true_heading_deg
-                    .map(|h| format!("{h:.2}"))
-                    .unwrap_or_else(|| "-".to_string());
+                let heading = format!("{:.2}", rwy.true_heading());
                 let length = rwy.length_ft as f64 * 0.3048;
                 let width = rwy.width_ft.map(|w| w as f64 * 0.3048).unwrap_or(0.0);
                 out.push_str(&format!(

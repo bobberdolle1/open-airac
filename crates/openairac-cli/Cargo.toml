@@ -32,3 +32,12 @@ tokio.workspace = true
 reqwest.workspace = true
 chrono.workspace = true
 serde_json.workspace = true
+serde = { workspace = true, features = ["derive"] }
+
+[[bin]]
+name = "openairac-cli"
+path = "src/main.rs"
+
+[[bin]]
+name = "openairac-map-cli"
+path = "src/bin/map_cli.rs"

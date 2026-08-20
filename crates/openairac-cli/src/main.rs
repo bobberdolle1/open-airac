@@ -182,6 +182,38 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    /// Detailed runway and ILS geometry diagnostics for an airport
+    DoctorGeometry {
+        icao: String,
+        #[arg(short, long, default_value = "./data/world.openairac.sqlite")]
+        db: PathBuf,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// Global navigation data coverage diagnostics across world regions
+    DoctorWorldCoverage {
+        #[arg(short, long, default_value = "./data/world.openairac.sqlite")]
+        db: PathBuf,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// Compare airport geometry against local proprietary Navigraph reference dataset (read-only diagnostic)
+    DebugCompareAirport {
+        icao: String,
+        #[arg(long)]
+        reference_navigraph: PathBuf,
+        #[arg(short, long, default_value = "./data/world.openairac.sqlite")]
+        db: PathBuf,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// Comprehensive scan of all runway geometries in the world store for bearing anomalies
+    DebugScanGeometry {
+        #[arg(short, long, default_value = "./data/world.openairac.sqlite")]
+        db: PathBuf,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
     Export {
         #[command(subcommand)]
         target: ExportTarget,
@@ -1002,8 +1034,17 @@ fn sync_fixture(store: &mut WorldStore) -> Result<()> {
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
-    let cli = Cli::parse();
+    let builder = std::thread::Builder::new().stack_size(16 * 1024 * 1024);
+    let handler = builder.spawn(|| -> Result<()> {
+        let cli = Cli::parse();
+        run_cli(cli)
+    })?;
+    handler
+        .join()
+        .map_err(|e| anyhow::anyhow!("Thread panicked: {:?}", e))?
+}
 
+fn run_cli(cli: Cli) -> Result<()> {
     match &cli.command {
         Commands::ReleaseGate { db, effective, out } => {
             let effective =
@@ -1889,6 +1930,589 @@ fn main() -> Result<()> {
                         "  All airport terminal procedures, runways, and legs passed structural and geometric validation."
                     );
                 }
+            }
+        }
+        Commands::DoctorGeometry { icao, db, json } => {
+            use serde::Serialize;
+            let store = WorldStore::open(db)?;
+            let conn = store.raw_conn();
+            let clean_icao = icao.trim().to_uppercase();
+
+            let apt_name: String = match conn.query_row(
+                "SELECT name FROM airports WHERE ident = ?1",
+                [&clean_icao],
+                |r| r.get(0),
+            ) {
+                Ok(n) => n,
+                Err(_) => {
+                    eprintln!("Airport '{}' not found in store.", clean_icao);
+                    std::process::exit(1);
+                }
+            };
+
+            #[derive(Serialize)]
+            struct RwyGeomDiag {
+                designator: String,
+                le_ident: String,
+                he_ident: String,
+                length_ft: u32,
+                width_ft: Option<u32>,
+                le_lat: f64,
+                le_lon: f64,
+                he_lat: f64,
+                he_lon: f64,
+                stored_true_heading_deg: Option<f64>,
+                computed_true_bearing_deg: f64,
+                computed_reciprocal_bearing_deg: f64,
+                bearing_delta_deg: f64,
+                associated_ils: Vec<IlsGeomDiag>,
+            }
+
+            #[derive(Serialize)]
+            struct IlsGeomDiag {
+                ident: String,
+                frequency_mhz: f64,
+                associated_runway: Option<String>,
+                loc_bearing_true_deg: Option<f64>,
+                loc_course_delta_to_rwy_deg: Option<f64>,
+                gs_angle_deg: Option<f64>,
+                classification: String,
+            }
+
+            struct RawIls {
+                ident: String,
+                frequency_khz: u32,
+                associated_runway: Option<String>,
+                loc_bearing_true: Option<f64>,
+                loc_bearing_mag: Option<f64>,
+                mag_var: Option<f64>,
+                gs_angle: Option<f64>,
+            }
+
+            let mut raw_ils_list = Vec::new();
+            let mut ils_stmt = conn.prepare(
+                "SELECT ident, frequency_khz, associated_runway, localizer_bearing_true_deg,
+                        localizer_bearing_mag_deg, magnetic_variation_deg, glideslope_angle_deg
+                 FROM navaids
+                 WHERE associated_airport = ?1 AND (navaid_type LIKE '%ILS%' OR navaid_type LIKE '%LOC%')"
+            )?;
+
+            let mut ils_rows = ils_stmt.query([&clean_icao])?;
+            while let Some(row) = ils_rows.next()? {
+                raw_ils_list.push(RawIls {
+                    ident: row.get(0)?,
+                    frequency_khz: row.get(1)?,
+                    associated_runway: row.get(2)?,
+                    loc_bearing_true: row.get(3)?,
+                    loc_bearing_mag: row.get(4)?,
+                    mag_var: row.get(5)?,
+                    gs_angle: row.get(6)?,
+                });
+            }
+
+            let mut diags = Vec::new();
+            let mut rwy_stmt = conn.prepare(
+                "SELECT official_designator, le_ident, he_ident, length_ft, width_ft,
+                        le_lat, le_lon, he_lat, he_lon, true_heading_deg
+                 FROM runways WHERE airport_ident = ?1",
+            )?;
+
+            let mut rwy_rows = rwy_stmt.query([&clean_icao])?;
+            while let Some(row) = rwy_rows.next()? {
+                let designator: String = row.get(0)?;
+                let le_ident: String = row.get(1)?;
+                let he_ident: String = row.get(2)?;
+                let length_ft: u32 = row.get(3)?;
+                let width_ft: Option<u32> = row.get(4)?;
+                let le_lat: f64 = row.get(5)?;
+                let le_lon: f64 = row.get(6)?;
+                let he_lat: f64 = row.get(7)?;
+                let he_lon: f64 = row.get(8)?;
+                let stored_hdg: Option<f64> = row.get(9)?;
+
+                let computed_true =
+                    if (le_lat - he_lat).abs() > 1e-6 || (le_lon - he_lon).abs() > 1e-6 {
+                        openairac_model::geodesic_bearing_deg(le_lat, le_lon, he_lat, he_lon)
+                    } else {
+                        openairac_model::nominal_heading_from_designator(&le_ident).unwrap_or(0.0)
+                    };
+
+                let computed_recip = (computed_true + 180.0).rem_euclid(360.0);
+                let delta = if let Some(stored) = stored_hdg {
+                    let d = (stored - computed_true).abs().rem_euclid(360.0);
+                    if d > 180.0 { 360.0 - d } else { d }
+                } else {
+                    0.0
+                };
+
+                let mut matching_ils = Vec::new();
+                for ils in &raw_ils_list {
+                    let is_match = ils.associated_runway.as_deref() == Some(le_ident.as_str())
+                        || ils.associated_runway.as_deref() == Some(he_ident.as_str())
+                        || ils.associated_runway.as_deref() == Some(designator.as_str());
+
+                    if is_match {
+                        let loc_true = ils.loc_bearing_true.or_else(|| {
+                            ils.loc_bearing_mag
+                                .map(|mag| (mag + ils.mag_var.unwrap_or(0.0)).rem_euclid(360.0))
+                        });
+
+                        let course_delta = loc_true.map(|c| {
+                            let target_rwy_hdg =
+                                if ils.associated_runway.as_deref() == Some(he_ident.as_str()) {
+                                    computed_recip
+                                } else {
+                                    computed_true
+                                };
+                            let d = (c - target_rwy_hdg).abs().rem_euclid(360.0);
+                            if d > 180.0 { 360.0 - d } else { d }
+                        });
+
+                        let classification = match course_delta {
+                            Some(d) if d < 5.0 => "ALIGNED",
+                            Some(d) if d <= 30.0 => "OFFSET_LOCALIZER",
+                            Some(_) => "SUSPICIOUS",
+                            None => "NO_BEARING_DATA",
+                        };
+
+                        matching_ils.push(IlsGeomDiag {
+                            ident: ils.ident.clone(),
+                            frequency_mhz: ils.frequency_khz as f64 / 1000.0,
+                            associated_runway: ils.associated_runway.clone(),
+                            loc_bearing_true_deg: loc_true,
+                            loc_course_delta_to_rwy_deg: course_delta,
+                            gs_angle_deg: ils.gs_angle,
+                            classification: classification.to_string(),
+                        });
+                    }
+                }
+
+                diags.push(RwyGeomDiag {
+                    designator,
+                    le_ident,
+                    he_ident,
+                    length_ft,
+                    width_ft,
+                    le_lat,
+                    le_lon,
+                    he_lat,
+                    he_lon,
+                    stored_true_heading_deg: stored_hdg,
+                    computed_true_bearing_deg: computed_true,
+                    computed_reciprocal_bearing_deg: computed_recip,
+                    bearing_delta_deg: delta,
+                    associated_ils: matching_ils,
+                });
+            }
+
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&diags)?);
+            } else {
+                println!(
+                    "OpenAIRAC Runway & ILS Geometry Doctor: {} ({})",
+                    clean_icao, apt_name
+                );
+                println!(
+                    "================================================================================"
+                );
+                for d in &diags {
+                    println!(
+                        "\nRunway {}/{} (Length: {} ft, Width: {} ft):",
+                        d.le_ident,
+                        d.he_ident,
+                        d.length_ft,
+                        d.width_ft.unwrap_or(0)
+                    );
+                    println!("  LE Threshold: {:.5}°, {:.5}°", d.le_lat, d.le_lon);
+                    println!("  HE Threshold: {:.5}°, {:.5}°", d.he_lat, d.he_lon);
+                    println!(
+                        "  Stored True Heading:    {}",
+                        d.stored_true_heading_deg
+                            .map(|h| format!("{h:.2}°"))
+                            .unwrap_or_else(|| "None (auto-computed)".to_string())
+                    );
+                    println!(
+                        "  Computed True Bearing:  {:.2}°",
+                        d.computed_true_bearing_deg
+                    );
+                    println!(
+                        "  Reciprocal Bearing:     {:.2}°",
+                        d.computed_reciprocal_bearing_deg
+                    );
+                    println!("  Heading Delta:          {:.2}°", d.bearing_delta_deg);
+
+                    if d.associated_ils.is_empty() {
+                        println!("  Associated ILS: None");
+                    } else {
+                        println!("  Associated ILS ({}):", d.associated_ils.len());
+                        for ils in &d.associated_ils {
+                            println!(
+                                "    - LOC {} ({:.2} MHz, RWY {:?}): LOC True Hdg: {}, Delta: {}, GS: {}, Classification: [{}]",
+                                ils.ident,
+                                ils.frequency_mhz,
+                                ils.associated_runway,
+                                ils.loc_bearing_true_deg
+                                    .map(|b| format!("{b:.2}°"))
+                                    .unwrap_or_else(|| "N/A".to_string()),
+                                ils.loc_course_delta_to_rwy_deg
+                                    .map(|d| format!("{d:.2}°"))
+                                    .unwrap_or_else(|| "N/A".to_string()),
+                                ils.gs_angle_deg
+                                    .map(|g| format!("{g:.2}°"))
+                                    .unwrap_or_else(|| "None".to_string()),
+                                ils.classification
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        Commands::DoctorWorldCoverage { db, json } => {
+            use serde::Serialize;
+            let store = WorldStore::open(db)?;
+            let conn = store.raw_conn();
+
+            #[derive(Serialize)]
+            struct RegionCoverage {
+                region_name: &'static str,
+                icao_prefix: &'static str,
+                airports: i64,
+                runways: i64,
+                vors: i64,
+                ndbs: i64,
+                waypoints: i64,
+                approaches: i64,
+            }
+
+            let regions = [
+                ("United States", "K%"),
+                ("Alaska & Hawaii", "P%"),
+                ("France", "LF%"),
+                ("Germany", "ED%"),
+                ("United Kingdom", "EG%"),
+                ("Spain", "LE%"),
+                ("Italy", "LI%"),
+                ("Japan", "RJ%"),
+                ("Australia", "Y%"),
+                ("Brazil", "SB%"),
+                ("South Africa", "FA%"),
+            ];
+
+            let mut coverage_list = Vec::new();
+            for (name, prefix) in &regions {
+                let apts: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM airports WHERE ident LIKE ?1",
+                        [prefix],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(0);
+                let rwys: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM runways WHERE airport_ident LIKE ?1",
+                        [prefix],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(0);
+                let vors: i64 = conn.query_row("SELECT COUNT(*) FROM navaids WHERE navaid_type = 'VOR' AND (associated_airport LIKE ?1 OR region LIKE ?1)", [prefix], |r| r.get(0)).unwrap_or(0);
+                let ndbs: i64 = conn.query_row("SELECT COUNT(*) FROM navaids WHERE navaid_type = 'NDB' AND (associated_airport LIKE ?1 OR region LIKE ?1)", [prefix], |r| r.get(0)).unwrap_or(0);
+                let wpts: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM waypoints WHERE region LIKE ?1 OR ident LIKE ?1",
+                        [prefix],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(0);
+                let apps: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM procedure_legs WHERE airport_ident LIKE ?1",
+                        [prefix],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(0);
+
+                coverage_list.push(RegionCoverage {
+                    region_name: name,
+                    icao_prefix: prefix,
+                    airports: apts,
+                    runways: rwys,
+                    vors,
+                    ndbs,
+                    waypoints: wpts,
+                    approaches: apps,
+                });
+            }
+
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&coverage_list)?);
+            } else {
+                println!("OpenAIRAC World Navigation Coverage Summary");
+                println!(
+                    "========================================================================================="
+                );
+                println!(
+                    "{:<20} {:<10} {:>10} {:>10} {:>8} {:>8} {:>12} {:>12}",
+                    "Region",
+                    "ICAO Pfx",
+                    "Airports",
+                    "Runways",
+                    "VORs",
+                    "NDBs",
+                    "Waypoints",
+                    "Procedures"
+                );
+                println!(
+                    "-----------------------------------------------------------------------------------------"
+                );
+                for c in &coverage_list {
+                    println!(
+                        "{:<20} {:<10} {:>10} {:>10} {:>8} {:>8} {:>12} {:>12}",
+                        c.region_name,
+                        c.icao_prefix,
+                        c.airports,
+                        c.runways,
+                        c.vors,
+                        c.ndbs,
+                        c.waypoints,
+                        c.approaches
+                    );
+                }
+            }
+        }
+        Commands::DebugCompareAirport {
+            icao,
+            reference_navigraph,
+            db,
+            json,
+        } => {
+            use serde::Serialize;
+            println!(
+                "\n================================================================================"
+            );
+            println!("[PROPRIETARY LOCAL REFERENCE DATA — DIAGNOSTIC ONLY — NEVER REDISTRIBUTED]");
+            println!(
+                "================================================================================"
+            );
+
+            let clean_icao = icao.trim().to_uppercase();
+            let store = WorldStore::open(db)?;
+            let conn = store.raw_conn();
+
+            let ref_db_path = if reference_navigraph.is_dir() {
+                reference_navigraph
+                    .join("little_navmap_db")
+                    .join("little_navmap_navigraph.sqlite")
+            } else {
+                reference_navigraph.clone()
+            };
+
+            let ref_conn = rusqlite::Connection::open(&ref_db_path)?;
+
+            #[derive(Serialize)]
+            struct DiffReport {
+                icao: String,
+                openairac_runway_count: usize,
+                reference_runway_count: usize,
+                runway_comparisons: Vec<RwyDiff>,
+            }
+
+            #[derive(Serialize)]
+            struct RwyDiff {
+                designator: String,
+                openairac_hdg: f64,
+                reference_hdg: f64,
+                hdg_delta: f64,
+                openairac_len: u32,
+                reference_len: u32,
+            }
+
+            let mut diffs = Vec::new();
+            let mut rwy_stmt = conn.prepare(
+                "SELECT official_designator, le_ident, he_ident, length_ft, le_lat, le_lon, he_lat, he_lon, true_heading_deg
+                 FROM runways WHERE airport_ident = ?1"
+            )?;
+
+            let mut rwy_rows = rwy_stmt.query([&clean_icao])?;
+            while let Some(row) = rwy_rows.next()? {
+                let designator: String = row.get(0)?;
+                let le_ident: String = row.get(1)?;
+                let _he_ident: String = row.get(2)?;
+                let length_ft: u32 = row.get(3)?;
+                let le_lat: f64 = row.get(4)?;
+                let le_lon: f64 = row.get(5)?;
+                let he_lat: f64 = row.get(6)?;
+                let he_lon: f64 = row.get(7)?;
+                let stored_hdg: Option<f64> = row.get(8)?;
+
+                let open_hdg = if let Some(h) = stored_hdg {
+                    h
+                } else if (le_lat - he_lat).abs() > 1e-6 || (le_lon - he_lon).abs() > 1e-6 {
+                    openairac_model::geodesic_bearing_deg(le_lat, le_lon, he_lat, he_lon)
+                } else {
+                    openairac_model::nominal_heading_from_designator(&le_ident).unwrap_or(0.0)
+                };
+
+                let ref_rwy: Result<(f64, f64), _> = ref_conn.query_row(
+                    "SELECT r.heading, r.length FROM runway r
+                     JOIN airport a ON r.airport_id = a.airport_id
+                     JOIN runway_end e1 ON r.primary_end_id = e1.runway_end_id
+                     WHERE a.ident = ?1 AND (e1.name = ?2 OR e1.name = ?3)",
+                    rusqlite::params![clean_icao, le_ident, designator],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                );
+
+                if let Ok((ref_hdg, ref_len)) = ref_rwy {
+                    let d = (open_hdg - ref_hdg).abs().rem_euclid(360.0);
+                    let hdg_delta = if d > 180.0 { 360.0 - d } else { d };
+                    diffs.push(RwyDiff {
+                        designator,
+                        openairac_hdg: open_hdg,
+                        reference_hdg: ref_hdg,
+                        hdg_delta,
+                        openairac_len: length_ft,
+                        reference_len: ref_len as u32,
+                    });
+                }
+            }
+            let report = DiffReport {
+                icao: clean_icao.clone(),
+                openairac_runway_count: diffs.len(),
+                reference_runway_count: diffs.len(),
+                runway_comparisons: diffs,
+            };
+
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!("Differential Runway Comparison for {}", report.icao);
+                println!(
+                    "{:<10} {:>15} {:>15} {:>12} {:>15} {:>15}",
+                    "Runway",
+                    "OpenAIRAC Hdg",
+                    "Reference Hdg",
+                    "Delta",
+                    "OpenAIRAC Len",
+                    "Reference Len"
+                );
+                println!(
+                    "-------------------------------------------------------------------------------------------------"
+                );
+                for d in &report.runway_comparisons {
+                    println!(
+                        "{:<10} {:>14.2}° {:>14.2}° {:>11.2}° {:>15} {:>15}",
+                        d.designator,
+                        d.openairac_hdg,
+                        d.reference_hdg,
+                        d.hdg_delta,
+                        d.openairac_len,
+                        d.reference_len
+                    );
+                }
+            }
+        }
+        Commands::DebugScanGeometry { db, json } => {
+            use serde::Serialize;
+            let store = WorldStore::open(db)?;
+            let conn = store.raw_conn();
+
+            let mut stmt = conn.prepare(
+                "SELECT airport_ident, official_designator, le_ident, he_ident, le_lat, le_lon, he_lat, he_lon, true_heading_deg, length_ft FROM runways"
+            )?;
+
+            let mut total_runways = 0;
+            let mut mismatches_5 = 0;
+            let mut mismatches_10 = 0;
+            let mut mismatches_30 = 0;
+            let mut mismatches_60 = 0;
+            let mut invalid_reciprocal = 0;
+
+            let mut rows = stmt.query([])?;
+            while let Some(row) = rows.next()? {
+                total_runways += 1;
+                let _apt: String = row.get(0)?;
+                let _desig: String = row.get(1)?;
+                let _le_id: String = row.get(2)?;
+                let _he_id: String = row.get(3)?;
+                let le_lat: f64 = row.get(4)?;
+                let le_lon: f64 = row.get(5)?;
+                let he_lat: f64 = row.get(6)?;
+                let he_lon: f64 = row.get(7)?;
+                let stored_hdg: Option<f64> = row.get(8)?;
+
+                if (le_lat - he_lat).abs() > 1e-6 || (le_lon - he_lon).abs() > 1e-6 {
+                    let computed_true =
+                        openairac_model::geodesic_bearing_deg(le_lat, le_lon, he_lat, he_lon);
+                    let recip_true =
+                        openairac_model::geodesic_bearing_deg(he_lat, he_lon, le_lat, le_lon);
+                    let recip_diff = ((recip_true - computed_true).abs() - 180.0)
+                        .abs()
+                        .rem_euclid(360.0);
+                    if recip_diff > 2.0 && (360.0 - recip_diff) > 2.0 {
+                        invalid_reciprocal += 1;
+                    }
+
+                    if let Some(stored) = stored_hdg {
+                        let d = (stored - computed_true).abs().rem_euclid(360.0);
+                        let delta = if d > 180.0 { 360.0 - d } else { d };
+                        if delta > 60.0 {
+                            mismatches_60 += 1;
+                        } else if delta > 30.0 {
+                            mismatches_30 += 1;
+                        } else if delta > 10.0 {
+                            mismatches_10 += 1;
+                        } else if delta > 5.0 {
+                            mismatches_5 += 1;
+                        }
+                    }
+                }
+            }
+
+            #[derive(Serialize)]
+            struct ScanResult {
+                total_runways_scanned: i64,
+                mismatches_gt_5_deg: i64,
+                mismatches_gt_10_deg: i64,
+                mismatches_gt_30_deg: i64,
+                mismatches_gt_60_deg: i64,
+                invalid_reciprocals: i64,
+                systemic_status: &'static str,
+            }
+
+            let result = ScanResult {
+                total_runways_scanned: total_runways,
+                mismatches_gt_5_deg: mismatches_5,
+                mismatches_gt_10_deg: mismatches_10,
+                mismatches_gt_30_deg: mismatches_30,
+                mismatches_gt_60_deg: mismatches_60,
+                invalid_reciprocals: invalid_reciprocal,
+                systemic_status: if mismatches_30 == 0 && mismatches_60 == 0 {
+                    "PASS (No systematic anomalies)"
+                } else {
+                    "FAIL (Systematic bearing anomalies detected)"
+                },
+            };
+
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                println!("OpenAIRAC World Runway Geometry Scan Report");
+                println!("============================================");
+                println!("  Total Runways Scanned: {}", result.total_runways_scanned);
+                println!("  Bearing Mismatches > 5°:  {}", result.mismatches_gt_5_deg);
+                println!(
+                    "  Bearing Mismatches > 10°: {}",
+                    result.mismatches_gt_10_deg
+                );
+                println!(
+                    "  Bearing Mismatches > 30°: {}",
+                    result.mismatches_gt_30_deg
+                );
+                println!(
+                    "  Bearing Mismatches > 60°: {}",
+                    result.mismatches_gt_60_deg
+                );
+                println!("  Invalid Reciprocals:      {}", result.invalid_reciprocals);
+                println!("  Systemic Status:          {}", result.systemic_status);
             }
         }
         Commands::Reconcile { db, as_of } => {
