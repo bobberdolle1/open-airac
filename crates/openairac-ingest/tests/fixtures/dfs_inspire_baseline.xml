@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<aixm:AIXMBasicMessage xmlns:aixm="http://www.aixm.aero/schema/5.1" xmlns:gml="http://www.opengis.net/gml/3.2" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+    <aixm:hasMember>
+        <aixm:AirportHeliport gml:id="ah-eddf">
+            <aixm:timeSlice>
+                <aixm:AirportHeliportTimeSlice gml:id="ahts-eddf">
+                    <gml:validTime>
+                        <gml:TimePeriod gml:id="tp-eddf">
+                            <gml:beginPosition>2026-08-12T00:00:00Z</gml:beginPosition>
+                        </gml:TimePeriod>
+                    </gml:validTime>
+                    <aixm:interpretation>BASELINE</aixm:interpretation>
+                    <aixm:designator>EDDF</aixm:designator>
+                    <aixm:name>FRANKFURT MAIN</aixm:name>
+                    <aixm:type>AD</aixm:type>
+                    <aixm:servedCity><aixm:City><aixm:name>Frankfurt</aixm:name></aixm:City></aixm:servedCity>
+                    <aixm:fieldElevation uom="FT">364</aixm:fieldElevation>
+                    <aixm:ARP>
+                        <aixm:ElevatedPoint gml:id="p-eddf" srsName="urn:ogc:def:crs:EPSG::4326">
+                            <gml:pos>50.033333 8.570556</gml:pos>
+                        </aixm:ElevatedPoint>
+                    </aixm:ARP>
+                </aixm:AirportHeliportTimeSlice>
+            </aixm:timeSlice>
+        </aixm:AirportHeliport>
+    </aixm:hasMember>
+    <aixm:hasMember>
+        <aixm:AirportHeliport gml:id="ah-eddm">
+            <aixm:timeSlice>
+                <aixm:AirportHeliportTimeSlice gml:id="ahts-eddm">
+                    <gml:validTime>
+                        <gml:TimePeriod gml:id="tp-eddm">
+                            <gml:beginPosition>2026-08-12T00:00:00Z</gml:beginPosition>
+                        </gml:TimePeriod>
+                    </gml:validTime>
+                    <aixm:interpretation>BASELINE</aixm:interpretation>
+                    <aixm:designator>EDDM</aixm:designator>
+                    <aixm:name>MUNICH</aixm:name>
+                    <aixm:type>AD</aixm:type>
+                    <aixm:servedCity><aixm:City><aixm:name>Munich</aixm:name></aixm:City></aixm:servedCity>
+                    <aixm:fieldElevation uom="FT">1487</aixm:fieldElevation>
+                    <aixm:ARP>
+                        <aixm:ElevatedPoint gml:id="p-eddm" srsName="urn:ogc:def:crs:EPSG::4326">
+                            <gml:pos>48.353783 11.786086</gml:pos>
+                        </aixm:ElevatedPoint>
+                    </aixm:ARP>
+                </aixm:AirportHeliportTimeSlice>
+            </aixm:timeSlice>
+        </aixm:AirportHeliport>
+    </aixm:hasMember>
+</aixm:AIXMBasicMessage>

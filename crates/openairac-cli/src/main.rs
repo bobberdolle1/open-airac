@@ -572,6 +572,18 @@ enum ImportCmd {
 
 #[derive(Subcommand)]
 enum BundleCmd {
+    /// Explain the world-open provider composition and licensing contracts
+    Explain {
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// Fuse all authoritative and public-domain providers into a unified world database
+    ComposeWorldOpen {
+        #[arg(short, long, default_value = "./data/world.openairac.sqlite")]
+        db: PathBuf,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
     /// Build a deterministic bundle from the canonical store
     Build {
         #[arg(short, long, default_value = "./data/world.openairac.sqlite")]
@@ -2569,6 +2581,50 @@ fn run_cli(cli: Cli) -> Result<()> {
         }
 
         Commands::Bundle { cmd } => match cmd {
+            BundleCmd::Explain { json } => {
+                let entries =
+                    openairac_ingest::world_composer::WorldOpenComposer::explain_composition();
+                if *json {
+                    println!("{}", serde_json::to_string_pretty(&entries)?);
+                } else {
+                    println!("OpenAIRAC World Open Provider Composition");
+                    println!(
+                        "================================================================================"
+                    );
+                    for e in &entries {
+                        println!(
+                            "\nProvider: {} (Jurisdiction: {})",
+                            e.provider_id, e.jurisdiction
+                        );
+                        println!("  Authority:    {}", e.authority);
+                        println!("  Dataset:      {}", e.dataset_name);
+                        println!("  Format:       {}", e.format);
+                        println!("  License ID:   {}", e.license_id);
+                        println!("  Quality Tier: {}", e.quality_tier);
+                        println!(
+                            "  Attribution:  {}",
+                            e.attribution_notice.as_deref().unwrap_or("None")
+                        );
+                    }
+                }
+            }
+            BundleCmd::ComposeWorldOpen { db, json } => {
+                let mut store = WorldStore::open(db)?;
+                let manifest =
+                    openairac_ingest::world_composer::WorldOpenComposer::fuse_world_open_data(
+                        &mut store,
+                        chrono::Utc::now(),
+                    )?;
+                if *json {
+                    println!("{}", serde_json::to_string_pretty(&manifest)?);
+                } else {
+                    println!("Successfully composed and fused World-Open database!");
+                    println!("  Bundle ID:        {}", manifest.bundle_id);
+                    println!("  Target AIRAC:     {}", manifest.target_airac);
+                    println!("  Providers Fused:  {}", manifest.providers.len());
+                    println!("  Countries Active: {}", manifest.country_coverage.len());
+                }
+            }
             BundleCmd::Build { db, out } => {
                 let store = WorldStore::open(db)?;
                 let (hash, dir) = openairac_bundle::build_bundle(&store, out, chrono::Utc::now())?;

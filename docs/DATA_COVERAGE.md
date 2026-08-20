@@ -1,24 +1,25 @@
-# OpenAIRAC Data Coverage & Limitations Matrix (v2.0.0)
+# OpenAIRAC World Open Navigation Coverage Truth
 
-## 1. Transparency Principle
+OpenAIRAC World Open provides honest, multi-tiered aeronautical coverage across all global regions:
 
-OpenAIRAC never invents synthetic procedures or conceals missing data. Every dataset is attributed to its authoritative legal source.
+## Coverage Tiers
 
----
+1. **Full Open Procedures & Navigation (Tier 1)**:
+   - **United States**: Comprehensive airport, runway, airway, waypoint, and ARINC 424 procedure coverage from official FAA CIFP.
+   - **France**: Comprehensive aerodromes, runways, navaids, and official structured DATA procedure tables (SIDs, STARs, RNP approaches) from DGAC/SIA France.
 
-## 2. Worldwide Coverage Summary
+2. **Official Open Geodata & Navigation Baseline (Tier 2)**:
+   - **Germany**: Official aerodromes, runways, and air transport network data from DFS INSPIRE.
 
-| Region | Authority / Provider | Airports & Runways | Radio Navaids | Enroute Fixes & Airways | Terminal SIDs/STARs | Approaches (IAP) | Licence / Terms |
-| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :--- |
-| **United States** | FAA Aeronautical Information Services | **YES** | **YES** | **YES** | **YES** (Full CIFP) | **YES** (ILS, RNAV, VOR, NDB) | Public Domain (US Gov) |
-| **France & Over-Seas** | DGAC / SIA France | **YES** | **YES** | **YES** | *Charts available; machine XML unavailable* | *Charts available; machine XML unavailable* | Etalab Licence Ouverte v2.0 |
-| **Germany (Open Geodata)** | DFS Deutsche Flugsicherung | **YES** | **YES** | **YES** | *INSPIRE geodata excludes procedures* | *INSPIRE geodata excludes procedures* | GeoNutzV-OpenData |
-| **Worldwide (Community)** | OurAirports | **YES** (40,000+) | **YES** | --- | --- | --- | CC0 1.0 Universal |
+3. **Global Airport & Navaid Baseline (Tier 3)**:
+   - **Worldwide (200+ Countries)**: Global airport locations, runway threshold coordinates, radio navigation aids (VOR, DME, NDB), and communication frequencies from OurAirports (Public Domain / CC0).
 
----
+## Continental Representative Airports
 
-## 3. Aeronautical Charts Coverage
-
-* **United States**: 100% of FAA Digital Terminal Procedures Publication (d-TPP) — 17,000+ plates nationwide on-demand.
-* **France**: 100% of SIA Section AD 2.24 eAIP plates (LFPG, LFPO, LFMN, LFLL, LFBO, etc.).
-* **Raster GeoTIFFs**: FAA VFR Sectionals, Terminal Area Charts (TAC), and IFR Enroute charts with calibrated 6-parameter affine georeferencing.
+- **North America**: KJFK, KLAX, KORD, KATL, KSFO, CYVR, CYYZ, MMMX
+- **Europe**: LFPG, LFPO, LFMN, EGLL, EDDF, EDDM, LEMD, LIRF, EHAM, EBBR, LSZH, LOWW
+- **Asia**: RJTT, RJAA, RKSI, VIDP, VHHH, WSSS, VTBS
+- **Middle East**: OMDB, OERK, OKBK, OTHH
+- **Oceania**: YSSY, YMML, NZAA, NZWN
+- **Africa**: FAOR, FACT, HECA, HKJK
+- **South America**: SBGR, SBSP, SAEZ, SCEL, SKBO, SPJC

@@ -6,6 +6,7 @@ pub mod ourairports;
 pub mod provider;
 pub mod registry;
 pub mod sia_procedures;
+pub mod world_composer;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};

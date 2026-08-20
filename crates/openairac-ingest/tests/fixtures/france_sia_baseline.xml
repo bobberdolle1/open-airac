@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<AIXM-Snapshot xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" version="4.5">
+    <Ahp>
+        <AhpUid><codeId>LFPG</codeId></AhpUid>
+        <txtName>PARIS CHARLES DE GAULLE</txtName>
+        <codeIcao>LFPG</codeIcao>
+        <codeType>AD</codeType>
+        <geoLat>490035.00N</geoLat>
+        <geoLong>0023252.00E</geoLong>
+        <valElev>392</valElev>
+        <uomDistVer>FT</uomDistVer>
+        <valMagVar>-0.5</valMagVar>
+    </Ahp>
+    <Rwy>
+        <RwyUid>
+            <AhpUid><codeId>LFPG</codeId></AhpUid>
+            <txtDesig>08L/26R</txtDesig>
+        </RwyUid>
+        <valLen>4215</valLen>
+        <valWid>45</valWid>
+        <uomDimRwy>M</uomDimRwy>
+        <codeComposition>ASPH</codeComposition>
+    </Rwy>
+    <Rwy>
+        <RwyUid>
+            <AhpUid><codeId>LFPG</codeId></AhpUid>
+            <txtDesig>08R/26L</txtDesig>
+        </RwyUid>
+        <valLen>2700</valLen>
+        <valWid>60</valWid>
+        <uomDimRwy>M</uomDimRwy>
+        <codeComposition>CONC</codeComposition>
+    </Rwy>
+    <Ahp>
+        <AhpUid><codeId>LFPO</codeId></AhpUid>
+        <txtName>PARIS ORLY</txtName>
+        <codeIcao>LFPO</codeIcao>
+        <codeType>AD</codeType>
+        <geoLat>484324.00N</geoLat>
+        <geoLong>0022246.00E</geoLong>
+        <valElev>291</valElev>
+        <uomDistVer>FT</uomDistVer>
+    </Ahp>
+    <Rwy>
+        <RwyUid>
+            <AhpUid><codeId>LFPO</codeId></AhpUid>
+            <txtDesig>06/24</txtDesig>
+        </RwyUid>
+        <valLen>3650</valLen>
+        <valWid>45</valWid>
+        <uomDimRwy>M</uomDimRwy>
+        <codeComposition>ASPH</codeComposition>
+    </Rwy>
+    <Ahp>
+        <AhpUid><codeId>LFMN</codeId></AhpUid>
+        <txtName>NICE COTE D'AZUR</txtName>
+        <codeIcao>LFMN</codeIcao>
+        <codeType>AD</codeType>
+        <geoLat>433955.00N</geoLat>
+        <geoLong>0071307.00E</geoLong>
+        <valElev>13</valElev>
+        <uomDistVer>FT</uomDistVer>
+    </Ahp>
+    <Rwy>
+        <RwyUid>
+            <AhpUid><codeId>LFMN</codeId></AhpUid>
+            <txtDesig>04L/22R</txtDesig>
+        </RwyUid>
+        <valLen>2570</valLen>
+        <valWid>45</valWid>
+        <uomDimRwy>M</uomDimRwy>
+        <codeComposition>ASPH</codeComposition>
+    </Rwy>
+</AIXM-Snapshot>
