@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.9.0 — 2026-08-20
+
+### Advanced EFB / Georeferenced Raster Foundation & Flight Automation
+
+- **Georeferenced Raster Engine (`openairac-charts::georaster`)**:
+  - Implemented `GeoRasterAsset`, `GeoBounds`, `AffineTransform`, and `GeospatialValidator`.
+  - 6-parameter affine coordinate transformation ($(\text{px}, \text{py}) \leftrightarrow (\text{lon}, \text{lat})$).
+  - High-precision invertible round-trip validation ($\le 0.001\text{ px}$ tolerance).
+  - Bounding box indexing and ownship pixel projection for FAA GeoTIFF products (VFR Sectional, TAC, IFR Enroute).
+  - Strict refusal to fabricate artificial georeferencing on uncalibrated d-TPP terminal PDFs.
+
+- **Deterministic EFB Domain Calculations (`openairac-charts::efb`)**:
+  - Flight phase state machine (`FlightPhaseEngine`) with hysteresis dwell counters and teleport/slew protection.
+  - Geodesic cross-track distance (`calculate_cross_track_nm`) with Left/Right/On-track side classification.
+  - Planning Top-of-Descent (`calculate_planning_tod_nm`) based on standard 3.0° descent slope and deceleration buffer.
+  - Runway wind component calculations (`calculate_runway_wind_components`) for headwind/tailwind and crosswind.
+  - Contextual chart suggestion engine (`ChartSuggestion::for_phase`).
+
+- **VATSIM Facility Mapping Semantic Audit (`openairac-online`)**:
+  - Audited VATSIM Data API v3 `facilities[]` specification and corrected authoritative facility mapping.
+  - Added `callsign_role_hint` and `is_consistent` validation on `OnlineController`.
+
 ## 1.8.0 — 2026-08-20
 
 ### Online Flying / VATSIM Live Network Awareness

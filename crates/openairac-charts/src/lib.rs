@@ -6,13 +6,20 @@
 pub mod association;
 pub mod cache;
 pub mod catalog;
+pub mod efb;
+pub mod georaster;
 pub mod model;
 pub mod provider;
 pub mod providers;
-
 pub use association::AssociationEngine;
 pub use cache::{CacheStatus, ChartCache, DEFAULT_MAX_CHART_SIZE_BYTES};
 pub use catalog::ChartCatalog;
+pub use efb::{
+    AircraftTelemetry, ChartSuggestion, FlightPhase, FlightPhaseEngine, PhaseAssessment,
+    PhaseConfidence, calculate_cross_track_nm, calculate_planning_tod_nm,
+    calculate_runway_wind_components,
+};
+pub use georaster::{AffineTransform, GeoBounds, GeoRasterAsset};
 pub use model::{
     AssociationConfidence, ChartAssociation, ChartDocument, ChartDocumentId, ChartMimeType,
     GeoreferenceStatus, NormalizedChartType,
