@@ -86,6 +86,10 @@ pub enum PathTerminator {
     HF, // Hold to Fix
     HM, // Hold to Manual
     RF, // Radius to Fix
+    AF, // Constant DME Arc to Fix
+    PI, // Procedure Turn to Intercept
+    PT, // Procedure Turn
+    FT, // Fix to Turn
     Unsupported(String),
 }
 
@@ -113,6 +117,10 @@ impl PathTerminator {
             "HF" => PathTerminator::HF,
             "HM" => PathTerminator::HM,
             "RF" => PathTerminator::RF,
+            "AF" => PathTerminator::AF,
+            "PI" => PathTerminator::PI,
+            "PT" => PathTerminator::PT,
+            "FT" => PathTerminator::FT,
             other => PathTerminator::Unsupported(other.to_string()),
         }
     }
@@ -140,6 +148,10 @@ impl PathTerminator {
             PathTerminator::HF => "HF",
             PathTerminator::HM => "HM",
             PathTerminator::RF => "RF",
+            PathTerminator::AF => "AF",
+            PathTerminator::PI => "PI",
+            PathTerminator::PT => "PT",
+            PathTerminator::FT => "FT",
             PathTerminator::Unsupported(s) => s.as_str(),
         }
     }
@@ -160,6 +172,8 @@ impl PathTerminator {
                 | PathTerminator::CI
                 | PathTerminator::CR
                 | PathTerminator::VR
+                | PathTerminator::AF
+                | PathTerminator::PI
         )
     }
 
@@ -367,6 +381,38 @@ impl ProcedureLeg {
                         canonical.sequence_number
                     ));
                 }
+            }
+            PathTerminator::AF => {
+                arc_radius_nm = canonical.arc_radius_nm;
+                if arc_radius_nm.is_none() {
+                    diagnostics.push(format!(
+                        "leg {}: AF requires an arc radius / DME distance",
+                        canonical.sequence_number
+                    ));
+                }
+                if canonical.recommended_navaid.is_none() {
+                    diagnostics.push(format!(
+                        "leg {}: AF requires a recommended navaid (DME center)",
+                        canonical.sequence_number
+                    ));
+                }
+            }
+            PathTerminator::PI => {
+                true_track_deg = canonical.course_a_deg;
+                distance_nm = canonical.distance_b_nm;
+                if canonical.recommended_navaid.is_none() {
+                    diagnostics.push(format!(
+                        "leg {}: PI requires a recommended navaid",
+                        canonical.sequence_number
+                    ));
+                }
+            }
+            PathTerminator::PT => {
+                true_track_deg = canonical.course_a_deg;
+                distance_nm = canonical.distance_b_nm;
+            }
+            PathTerminator::FT => {
+                true_track_deg = canonical.course_a_deg;
             }
             PathTerminator::Unsupported(_) => {
                 diagnostics.push(format!(
@@ -608,15 +654,20 @@ mod tests {
         assert_eq!(PathTerminator::parse("IF"), PathTerminator::IF);
         assert_eq!(PathTerminator::parse("TF"), PathTerminator::TF);
         assert_eq!(PathTerminator::parse("RF"), PathTerminator::RF);
+        assert_eq!(PathTerminator::parse("AF"), PathTerminator::AF);
+        assert_eq!(PathTerminator::parse("PI"), PathTerminator::PI);
+        assert_eq!(PathTerminator::parse("PT"), PathTerminator::PT);
+        assert_eq!(PathTerminator::parse("FT"), PathTerminator::FT);
         assert_eq!(
             PathTerminator::parse("XYZ"),
             PathTerminator::Unsupported("XYZ".to_string())
         );
         assert!(PathTerminator::FM.requires_navaid());
+        assert!(PathTerminator::AF.requires_navaid());
+        assert!(PathTerminator::PI.requires_navaid());
         assert!(PathTerminator::VA.primary_is_heading());
         assert!(PathTerminator::HF.is_hold());
     }
-
     #[test]
     fn test_va_leg_heading_and_altitude() {
         // Real KSFO CIITY3 RW10L VA leg: heading 103.8 (cols 71-74),

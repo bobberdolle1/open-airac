@@ -848,13 +848,13 @@ pub mod registry {
                     version_constraints: vec![VersionConstraint {
                         min: None,
                         max: None,
-                        note: "Legacy Garmin GNS430 / X-Plane 430 navdata format".to_string(),
+                        note: "Legacy Garmin GNS430 / X-Plane 430 navdata format (schema verified; live in-cockpit test pending)".to_string(),
                     }],
                     install_strategy: InstallStrategy::Subdirectory {
                         relative: String::new(),
                     },
                     validation_strategy: ValidationStrategy::HashVerify,
-                    support_state: SupportState::Supported,
+                    support_state: SupportState::Experimental,
                 },
                 TargetDescriptor {
                     id: "kln90b".to_string(),
@@ -886,13 +886,13 @@ pub mod registry {
                     version_constraints: vec![VersionConstraint {
                         min: None,
                         max: None,
-                        note: "Legacy KLN90B GPS database format".to_string(),
+                        note: "Legacy KLN90B GPS database format (.DAT files; PSS/PTT binary rebuild validation pending)".to_string(),
                     }],
                     install_strategy: InstallStrategy::Subdirectory {
                         relative: String::new(),
                     },
                     validation_strategy: ValidationStrategy::HashVerify,
-                    support_state: SupportState::Supported,
+                    support_state: SupportState::Experimental,
                 },
             ];
             v

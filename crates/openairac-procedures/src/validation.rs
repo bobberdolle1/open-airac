@@ -317,10 +317,10 @@ impl<'a> ProcedureValidator<'a> {
                     }
                 };
 
-                // Check altitude profile gradient for SIDs / STARs
+                // Check altitude profile gradient
                 if let (Some(prev), Some(curr)) = (prev_alt, current_alt) {
                     if proc.kind == ProcedureKind::Sid && curr + 500 < prev {
-                        // SIDs should generally climb
+                        // SIDs should generally climb or level off
                         issues.push(ProcedureIssue {
                             severity: IssueSeverity::Warning,
                             category: IssueCategory::InvalidConstraint,
@@ -332,11 +332,8 @@ impl<'a> ProcedureValidator<'a> {
                                 prev, curr, leg.sequence_number
                             ),
                         });
-                    } else if (proc.kind == ProcedureKind::Star
-                        || proc.kind == ProcedureKind::Approach)
-                        && curr > prev + 500
-                    {
-                        // STARs and Approaches should generally descend
+                    } else if proc.kind == ProcedureKind::Star && curr > prev + 500 {
+                        // STARs should generally descend or level off
                         issues.push(ProcedureIssue {
                             severity: IssueSeverity::Warning,
                             category: IssueCategory::InvalidConstraint,
@@ -344,11 +341,14 @@ impl<'a> ProcedureValidator<'a> {
                             sequence_number: Some(leg.sequence_number),
                             fix_ident: Some(fix.clone()),
                             message: format!(
-                                "Climbing altitude constraint in arrival/approach profile: {} ft -> {} ft at leg {}",
+                                "Climbing altitude constraint in arrival (STAR) profile: {} ft -> {} ft at leg {}",
                                 prev, curr, leg.sequence_number
                             ),
                         });
                     }
+                    // Note: Instrument Approaches (ProcedureKind::Approach) normally descend on final,
+                    // and climb on missed approach (e.g. 500 ft at threshold -> 4000 ft at hold).
+                    // Missed approach climbs are standard aviation design and are valid.
                 }
                 prev_alt = current_alt;
             }
@@ -524,6 +524,58 @@ mod tests {
                 .issues
                 .iter()
                 .any(|i| i.category == IssueCategory::GeometricDiscontinuity)
+        );
+    }
+
+    #[test]
+    fn test_approach_with_missed_approach_climb_is_healthy() {
+        let now = chrono::Utc::now();
+        let mut leg1 = test_leg(10, "IF", "IF25L", Some(4000), now);
+        let mut leg2 = test_leg(20, "CF", "FF25L", Some(2500), now);
+        let mut leg3 = test_leg(30, "CF", "RW25L", Some(364), now);
+        let mut leg4 = test_leg(40, "VA", "MAH01", Some(4000), now); // Missed approach climb
+
+        for l in [&mut leg1, &mut leg2, &mut leg3, &mut leg4] {
+            l.procedure_kind = 'F'; // Approach
+            l.procedure_ident = "ILS25L".to_string();
+        }
+
+        let legs = vec![leg1, leg2, leg3, leg4];
+        let proc = Procedure::assemble(
+            "EDDF",
+            ProcedureKind::Approach,
+            "ILS25L",
+            legs,
+            |f| match f {
+                "IF25L" => Some((50.05, 8.90)),
+                "FF25L" => Some((50.04, 8.75)),
+                "RW25L" => Some((50.03, 8.57)),
+                "MAH01" => Some((50.08, 8.65)),
+                _ => None,
+            },
+        )
+        .unwrap();
+
+        let validator = ProcedureValidator::new(|f| match f {
+            "IF25L" => Some((50.05, 8.90)),
+            "FF25L" => Some((50.04, 8.75)),
+            "RW25L" => Some((50.03, 8.57)),
+            "MAH01" => Some((50.08, 8.65)),
+            _ => None,
+        });
+
+        let report = validator.validate_procedure(&proc);
+        assert!(
+            report.is_flyable,
+            "Approach with missed approach climb must be flyable"
+        );
+        assert_eq!(report.error_count(), 0);
+        // Must not contain invalid constraint warnings for the missed approach climb
+        assert!(
+            !report
+                .issues
+                .iter()
+                .any(|i| i.category == IssueCategory::InvalidConstraint)
         );
     }
 }

@@ -13,7 +13,8 @@ here is claimed without an executed export+install+validation path.
 | msfs-bgl | SimpleNavData-style BGL package sources | Official MSFS SDK path (bglcomp schema, SimpleNavData sample, fspackagetool.exe, PackageOrderHint CUSTOM_NAVDATA); full ARINC 424 -> BGLComp leg mapping (all published path terminators, 199,966 legs on cycle 2609) | **Experimental** (source generation + transactional Community install verified; SDK compile + BglExplorer verification pending a real SDK) |
 | little-navmap-sqlite | Little Navmap nav database | Open-source schema (albar965/atools, GPL-3.0; interface reference only) | **Supported** for install path; in-app load not executed on the verification machine (Little Navmap absent) |
 | pmdg-text | wpNavAPT / wpNavAID / wpNavFIX / wpNavRTE | AIRNAV Navdata Data File Definition (public document) + PMDG Navdata Technical Glossary | **Experimental** (real cycle 2609 export verified; not loaded in a PMDG aircraft) |
-
+| gns430-text | Airports.txt / Navaids.txt / Waypoints.txt / ATS.txt / Proc/<ICAO>.txt | Public Garmin GNS430 & X-Plane Custom Data layout | **Experimental** (complete schema implemented and verified; live in-cockpit simulated GPS execution pending) |
+| kln90b-dat | APT.DAT / NAV.DAT / WPT.DAT / AWY.DAT / FAS.DAT / cycle.dat | Clean-room MIT implementation based on open KLN90B GPS loaders (Tu-154, vasFMC) | **Experimental** (clean-room generator implemented; binary PTT cache rebuild validation pending) |
 ## Research-only families (no implementation yet)
 
 | Family | Target examples | Blocking reason |

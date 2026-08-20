@@ -621,10 +621,10 @@ fn parse_leg_node(
         .unwrap_or("FIX01");
 
     let path_term = node
-        .find_descendant_text("pathTerminator")
+        .find_descendant_text("path")
+        .or_else(|| node.find_descendant_text("pathTerminator"))
         .or_else(|| node.find_descendant_text("legType"))
         .unwrap_or("TF");
-
     let turn_dir = node
         .find_descendant_text("turnDirection")
         .and_then(|s| s.chars().next());
@@ -670,6 +670,11 @@ fn parse_leg_node(
         .find_descendant_text("rnp")
         .and_then(|s| s.parse::<f64>().ok());
 
+    let rec_navaid = node
+        .find_descendant_text("recommendedNavaid")
+        .or_else(|| node.find_descendant_text("navaidChoice"))
+        .or_else(|| node.find_descendant_text("facilityChoice"))
+        .map(|s| s.to_string());
     Some(AixmProcedureLeg {
         airport_ident: apt_ident.to_string(),
         icao_code: "K2".to_string(),
@@ -682,10 +687,10 @@ fn parse_leg_node(
         fix_icao_code: "K2".to_string(),
         fix_section: "EA".to_string(),
         waypoint_description: "E   ".to_string(),
-        turn_direction: turn_dir,
+        recommended_navaid: rec_navaid,
         rnp_nm: rnp,
         path_terminator: path_term.to_string(),
-        recommended_navaid: None,
+        turn_direction: turn_dir,
         arc_radius_nm: arc_radius,
         course_a_deg: course,
         distance_a_nm: distance,
@@ -1150,5 +1155,57 @@ mod tests {
         assert_eq!(status.total_navaids, 1);
         assert_eq!(status.total_waypoints, 1);
         assert_eq!(status.total_procedure_legs, 2);
+    }
+
+    #[test]
+    fn test_aixm5_codelist_terminators() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<aixm:AIXMBasicMessage xmlns:aixm="http://www.aixm.aero/schema/5.1" xmlns:gml="http://www.opengis.net/gml/3.2">
+    <aixm:hasMember>
+        <aixm:InstrumentApproachProcedure gml:id="iap-ILS25L">
+            <aixm:InstrumentApproachProcedureTimeSlice gml:id="iapts-ILS25L">
+                <aixm:designator>ILS25L</aixm:designator>
+                <aixm:airportHeliport>EDDF</aixm:airportHeliport>
+                <aixm:ProcedureLeg gml:id="leg-af">
+                    <aixm:sequenceNumber>10</aixm:sequenceNumber>
+                    <aixm:pathTerminator>AF</aixm:pathTerminator>
+                    <aixm:fix>FFM12</aixm:fix>
+                    <aixm:recommendedNavaid>FFM</aixm:recommendedNavaid>
+                    <aixm:arcRadius>12.0</aixm:arcRadius>
+                    <aixm:turnDirection>R</aixm:turnDirection>
+                    <aixm:altitude1>4000</aixm:altitude1>
+                </aixm:ProcedureLeg>
+                <aixm:ProcedureLeg gml:id="leg-pi">
+                    <aixm:sequenceNumber>20</aixm:sequenceNumber>
+                    <aixm:pathTerminator>PI</aixm:pathTerminator>
+                    <aixm:fix>FFM</aixm:fix>
+                    <aixm:recommendedNavaid>FFM</aixm:recommendedNavaid>
+                    <aixm:course>248.0</aixm:course>
+                    <aixm:distance>6.0</aixm:distance>
+                </aixm:ProcedureLeg>
+                <aixm:ProcedureLeg gml:id="leg-other">
+                    <aixm:sequenceNumber>30</aixm:sequenceNumber>
+                    <aixm:pathTerminator>OTHER:SPECIAL_ARC</aixm:pathTerminator>
+                    <aixm:fix>FIX99</aixm:fix>
+                </aixm:ProcedureLeg>
+            </aixm:InstrumentApproachProcedureTimeSlice>
+        </aixm:InstrumentApproachProcedure>
+    </aixm:hasMember>
+</aixm:AIXMBasicMessage>"#;
+        let ds = parse_aixm5_xml(xml).expect("parse AIXM 5 with AF/PI/OTHER terminators");
+        assert_eq!(ds.procedure_legs.len(), 3);
+        assert_eq!(ds.procedure_legs[0].path_terminator, "AF");
+        assert_eq!(ds.procedure_legs[0].arc_radius_nm, Some(12.0));
+        assert_eq!(ds.procedure_legs[0].turn_direction, Some('R'));
+        assert_eq!(
+            ds.procedure_legs[0].recommended_navaid.as_deref(),
+            Some("FFM")
+        );
+
+        assert_eq!(ds.procedure_legs[1].path_terminator, "PI");
+        assert_eq!(ds.procedure_legs[1].course_a_deg, Some(248.0));
+        assert_eq!(ds.procedure_legs[1].distance_a_nm, Some(6.0));
+
+        assert_eq!(ds.procedure_legs[2].path_terminator, "OTHER:SPECIAL_ARC");
     }
 }

@@ -46,6 +46,10 @@ pub fn provider_constructors() -> &'static [ProviderConstructor] {
             Box::new(crate::aixm::Aixm5Provider::default_byod_aixm())
                 as Box<dyn crate::provider::DataProvider>
         }),
+        ("fr_sia", || {
+            Box::new(crate::aixm45::Aixm45Provider::default_france_sia())
+                as Box<dyn crate::provider::DataProvider>
+        }),
     ]
 }
 

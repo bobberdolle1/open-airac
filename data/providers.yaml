@@ -114,19 +114,47 @@ providers:
     source_uri_pattern: "https://openflightmaps.org/"
     notes: "Open VFR and enroute aeronautical data for European countries."
 
-  DFS_Germany:
-    name: "DFS_Germany"
+  DFS_INSPIRE:
+    name: "DFS_INSPIRE"
     namespace: "dfs"
     jurisdiction: "DE"
-    authority: "DFS Deutsche Flugsicherung GmbH"
+    authority: "DFS Deutsche Flugsicherung GmbH (INSPIRE Open Data)"
     format: "aixm5"
     airac_cadence: "28-day AIRAC"
     license_id: "GeoNutzV-OpenData"
     redistribution: "public_redistribution"
     derivative_work_allowed: true
     attribution_required: true
-    attribution_notice: "DFS Deutsche Flugsicherung GmbH Open Data"
+    attribution_notice: "DFS Deutsche Flugsicherung GmbH (INSPIRE GeoNutzV)"
     is_local_only: false
+    coverage:
+      airports: true
+      runways: true
+      navaids: true
+      fixes: true
+      airways: true
+      sids: false
+      stars: false
+      approaches: false
+      lpv_fas: false
+      msa: false
+      mora: false
+    source_uri_pattern: "https://aip.dfs.de/"
+    notes: "German INSPIRE open aeronautical geodata: aerodromes, runways, navaids, waypoints, airways."
+
+  DFS_AIS:
+    name: "DFS_AIS"
+    namespace: "dfs_ais"
+    jurisdiction: "DE"
+    authority: "DFS Deutsche Flugsicherung GmbH (AIS Portal)"
+    format: "aixm5"
+    airac_cadence: "28-day AIRAC"
+    license_id: "DFS-AIS-TermsOfUse"
+    redistribution: "local_only"
+    derivative_work_allowed: true
+    attribution_required: true
+    attribution_notice: "DFS Deutsche Flugsicherung GmbH AIS Portal"
+    is_local_only: true
     coverage:
       airports: true
       runways: true
@@ -139,8 +167,36 @@ providers:
       lpv_fas: true
       msa: true
       mora: false
-    source_uri_pattern: "https://aip.dfs.de/"
-    notes: "German AIP aeronautical dataset under open government terms."
+    source_uri_pattern: "https://ais.dfs.de/"
+    notes: "German AIP eAIP/AIS terminal flight procedures; user account required, local use only."
+
+  FR_SIA:
+    name: "FR_SIA"
+    namespace: "sia"
+    jurisdiction: "FR"
+    authority: "Service de l'Information Aeronautique (DGAC France)"
+    format: "aixm4"
+    airac_cadence: "28-day AIRAC"
+    license_id: "Licence-Ouverte-v2.0"
+    redistribution: "public_redistribution"
+    derivative_work_allowed: true
+    attribution_required: true
+    attribution_notice: "Service de l'Information Aeronautique - DGAC France (Licence Ouverte v2.0)"
+    is_local_only: false
+    coverage:
+      airports: true
+      runways: true
+      navaids: true
+      fixes: true
+      airways: true
+      sids: true
+      stars: true
+      approaches: true
+      lpv_fas: false
+      msa: false
+      mora: false
+    source_uri_pattern: "http://data.cquest.org/dgac/aip/"
+    notes: "French AIP / AIXM 4.5 aeronautical data under Etalab Licence Ouverte v2.0."
 
   Eurocontrol_EAD:
     name: "Eurocontrol_EAD"

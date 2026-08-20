@@ -1,5 +1,33 @@
 # Changelog
 
+## 1.4.0 — 2026-08-20
+
+### Reality Gate / First Real Non-US Aeronautical Dataset Integration
+
+- **French SIA (DGAC France) AIXM 4.5 Ingestion**:
+  - Implemented version-isolated `Aixm45Provider` in `openairac-ingest::aixm45`.
+  - Verified end-to-end against real 34 MB DGAC/SIA AIRAC XML dataset: successfully ingested 940 French aerodromes (LFPG, LFPO, LFMN, LFLL, LFBO), 893 runways, 551 radio navaids (VOR, DME, NDB, TACAN), and 2,609 airway segments (e.g. UN874).
+  - Provenance tracked under `FR_SIA` with Etalab Licence Ouverte v2.0.
+  - Verified that public SIA AIXM 4.5 airspace dataset does not contain machine-readable procedure legs (published via eAIP PDF); reported truthfully with zero invented data.
+
+- **AIXM 5.1.1 Codelist Completeness**:
+  - Full specification alignment for all official `CodeSegmentPathType` / `CodeSegmentPathBaseType` path terminators (`AF`, `PI`, `PT`, `FT`, `IF`, `TF`, `CF`, `DF`, `FA`, `FC`, `FD`, `FM`, `CA`, `CD`, `CI`, `CR`, `VA`, `VD`, `VI`, `VM`, `VR`, `HA`, `HF`, `HM`, `RF`, `OTHER`).
+  - Unknown `OTHER:*` terminators fail closed with typed unsupported diagnostics.
+
+- **ProcedureValidator Aviation Semantics**:
+  - Corrected altitude constraint validation: recognized standard missed-approach climbs in instrument approaches (`ProcedureKind::Approach`) as valid, eliminating false constraint warnings.
+  - Enforced realistic airspeed constraint bounds (60–400 kts) and phase-aware profile gradient checks.
+
+- **Automatic Version-Detecting AIXM Ingestion**:
+  - `openairac_ingest::ingest_aixm_auto` seamlessly routes between AIXM 4.5 and AIXM 5.x parsers for both CLI `openairac import aixm` and automated background sync.
+
+- **Provider Licensing Audit & Separation**:
+  - Formally differentiated `DFS_INSPIRE` (open geodata under GeoNutzV, no terminal procedures) from `DFS_AIS` (full procedure portal requiring user account).
+
+- **Target Maturity Calibration & Acceptance Matrix**:
+  - Published `docs/REAL_WORLD_ACCEPTANCE.md` providing empirical verification status for every provider and simulator target.
+  - Adjusted `xplane-gns430` and `kln90b` to `EXPERIMENTAL` status until live in-cockpit/gauge execution tests are performed on the verification workstation.
+
 ## 1.3.0 — 2026-08-20
 
 ### Worldwide Navdata Platform & Multi-Sim Expansion
