@@ -16,6 +16,7 @@ members = [
     "crates/openairac-export-msfs",
     "crates/openairac-export-lnm",
     "crates/openairac-charts",
+    "crates/openairac-weather",
     "crates/openairac-export-pmdg",
     "crates/openairac-cli",
     "crates/openairac-plugin",

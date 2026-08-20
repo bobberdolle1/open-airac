@@ -1,0 +1,27 @@
+[package]
+name = "openairac-weather"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+openairac-model = { path = "../openairac-model" }
+openairac-store = { path = "../openairac-store" }
+anyhow.workspace = true
+chrono.workspace = true
+reqwest = { workspace = true, optional = true }
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile = "3.17"
+tokio = { workspace = true, features = ["rt", "macros"] }
+
+[features]
+default = ["online"]
+online = ["dep:reqwest"]

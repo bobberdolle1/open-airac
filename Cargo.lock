@@ -1455,6 +1455,7 @@ dependencies = [
  "openairac-routing",
  "openairac-service",
  "openairac-store",
+ "openairac-weather",
  "reqwest",
  "rusqlite",
  "serde_json",
@@ -1675,6 +1676,25 @@ dependencies = [
  "serde_json",
  "sha2",
  "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "openairac-weather"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "openairac-model",
+ "openairac-store",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tokio",
  "tracing",
 ]
 

@@ -22,6 +22,7 @@ openairac-reconcile = { path = "../openairac-reconcile" }
 openairac-bundle = { path = "../openairac-bundle" }
 openairac-service = { path = "../openairac-service" }
 openairac-charts = { path = "../openairac-charts" }
+openairac-weather = { path = "../openairac-weather" }
 clap.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
