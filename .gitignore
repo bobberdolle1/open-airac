@@ -33,3 +33,5 @@ tools/unmodified-lnm/
 tools/test-settings/
 tools/test-logs/
 tools/upstream_lnm_schema.sql
+data/charts_cache/
+tools/faa_metafile_sample.xml

@@ -186,6 +186,84 @@ enum Commands {
         #[command(subcommand)]
         target: ExportTarget,
     },
+    /// Manage and inspect open aeronautical charts
+    Charts {
+        #[command(subcommand)]
+        cmd: ChartsCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum ChartsCmd {
+    /// List available chart data providers
+    Providers,
+    /// Synchronize chart metadata catalog from a provider
+    Sync {
+        /// Provider ID (FAA_DTPP or FR_SIA)
+        #[arg(default_value = "FAA_DTPP")]
+        provider: String,
+        /// AIRAC cycle (optional)
+        #[arg(long)]
+        cycle: Option<String>,
+        /// Catalog database path
+        #[arg(long, default_value = "./data/charts.sqlite")]
+        catalog_db: PathBuf,
+    },
+    /// List published charts for an airport
+    Airport {
+        /// Airport ICAO or IATA identifier (e.g. KJFK, LFPG)
+        ident: String,
+        /// Output as structured JSON
+        #[arg(long)]
+        json: bool,
+        /// Catalog database path
+        #[arg(long, default_value = "./data/charts.sqlite")]
+        catalog_db: PathBuf,
+    },
+    /// Find associated charts for a procedure
+    Procedure {
+        /// Airport ICAO identifier
+        airport: String,
+        /// Procedure identifier (e.g. I04L, JFK2)
+        procedure: String,
+        /// Procedure kind ('D' SID, 'E' STAR, 'F' Approach)
+        #[arg(short, long, default_value = "F")]
+        kind: char,
+        /// Runway hint
+        #[arg(short, long)]
+        runway: Option<String>,
+        /// Output as structured JSON
+        #[arg(long)]
+        json: bool,
+        /// Catalog database path
+        #[arg(long, default_value = "./data/charts.sqlite")]
+        catalog_db: PathBuf,
+    },
+    /// Fetch and cache a chart asset
+    Fetch {
+        /// Chart document ID (e.g. faa:2608:KJFK:00610AD)
+        chart_id: String,
+        /// Cache directory path
+        #[arg(long, default_value = "./data/charts_cache")]
+        cache_dir: PathBuf,
+        /// Catalog database path
+        #[arg(long, default_value = "./data/charts.sqlite")]
+        catalog_db: PathBuf,
+    },
+    /// Inspect chart cache status
+    Cache {
+        #[command(subcommand)]
+        cmd: CacheCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum CacheCmd {
+    /// View cache status, file count, and disk usage
+    Status {
+        #[arg(long, default_value = "./data/charts_cache")]
+        cache_dir: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2370,6 +2448,235 @@ fn main() -> Result<()> {
                 }
                 println!("X-Plane 12 export complete.");
             }
+        },
+        Commands::Charts { cmd } => match cmd {
+            ChartsCmd::Providers => {
+                println!("OpenAIRAC Chart Providers:");
+                println!("  1. FAA_DTPP");
+                println!(
+                    "     Name:         FAA Digital - Terminal Procedures Publication (d-TPP)"
+                );
+                println!("     Authority:    Federal Aviation Administration (FAA)");
+                println!("     Jurisdiction: United States");
+                println!("     License:      US Government Public Domain");
+                println!("     Coverage:     US Nationwide (IAP, DP, STAR, APD, MIN, HOT)");
+                println!();
+                println!("  2. FR_SIA");
+                println!("     Name:         France SIA eAIP Aeronautical Charts");
+                println!("     Authority:    Service de l'Information Aéronautique (DGAC France)");
+                println!("     Jurisdiction: France");
+                println!("     License:      Licence Ouverte v2.0 (Etalab)");
+                println!(
+                    "     Coverage:     France Aerodromes (ADC, APDC, GMC, SID, STAR, IAC, VAC)"
+                );
+            }
+            ChartsCmd::Sync {
+                provider,
+                cycle,
+                catalog_db,
+            } => {
+                let parent = catalog_db
+                    .parent()
+                    .unwrap_or_else(|| std::path::Path::new("."));
+                std::fs::create_dir_all(parent)?;
+                let catalog = openairac_charts::catalog::ChartCatalog::open(catalog_db)?;
+                let p_upper = provider.to_uppercase();
+
+                let report = if p_upper.contains("FAA") {
+                    let prov = openairac_charts::providers::FaaDtppProvider::new();
+                    openairac_charts::provider::ChartProvider::sync_catalog(
+                        &prov,
+                        &catalog,
+                        cycle.as_deref(),
+                    )?
+                } else if p_upper.contains("SIA") || p_upper.contains("FR") {
+                    let prov = openairac_charts::providers::FranceSiaChartProvider::new();
+                    openairac_charts::provider::ChartProvider::sync_catalog(
+                        &prov,
+                        &catalog,
+                        cycle.as_deref(),
+                    )?
+                } else {
+                    anyhow::bail!(
+                        "Unknown chart provider: '{provider}'. Available: FAA_DTPP, FR_SIA"
+                    );
+                };
+
+                println!("Chart Catalog Sync Complete:");
+                println!("  Provider:         {}", report.provider_id);
+                println!("  AIRAC Cycle:      {}", report.airac_cycle);
+                println!("  Airports Indexed: {}", report.airports_indexed);
+                println!("  Charts Indexed:   {}", report.charts_indexed);
+            }
+            ChartsCmd::Airport {
+                ident,
+                json,
+                catalog_db,
+            } => {
+                // If catalog db does not exist, seed default sample
+                if !catalog_db.exists() {
+                    let parent = catalog_db
+                        .parent()
+                        .unwrap_or_else(|| std::path::Path::new("."));
+                    std::fs::create_dir_all(parent)?;
+                    let cat = openairac_charts::catalog::ChartCatalog::open(catalog_db)?;
+                    let faa = openairac_charts::providers::FaaDtppProvider::new();
+                    let sia = openairac_charts::providers::FranceSiaChartProvider::new();
+                    openairac_charts::provider::ChartProvider::sync_catalog(
+                        &faa,
+                        &cat,
+                        Some("2608"),
+                    )?;
+                    openairac_charts::provider::ChartProvider::sync_catalog(
+                        &sia,
+                        &cat,
+                        Some("2608"),
+                    )?;
+                }
+                let catalog = openairac_charts::catalog::ChartCatalog::open(catalog_db)?;
+                let charts = catalog.query_charts_for_airport(ident)?;
+
+                if *json {
+                    println!("{}", serde_json::to_string_pretty(&charts)?);
+                } else {
+                    println!(
+                        "Published Charts for {} (Total: {}):",
+                        ident.to_uppercase(),
+                        charts.len()
+                    );
+                    println!(
+                        "{:<8} {:<18} {:<36} {:<6} {:<10}",
+                        "TYPE", "PROVIDER TYPE", "TITLE", "RWY", "CYCLE"
+                    );
+                    println!("{}", "-".repeat(84));
+                    for c in &charts {
+                        println!(
+                            "{:<8} {:<18} {:<36} {:<6} {:<10}",
+                            c.chart_type.as_str(),
+                            c.provider_chart_type,
+                            if c.title.len() > 34 {
+                                format!("{}...", &c.title[..31])
+                            } else {
+                                c.title.clone()
+                            },
+                            c.runway.as_deref().unwrap_or("-"),
+                            c.airac_cycle
+                        );
+                    }
+                }
+            }
+            ChartsCmd::Procedure {
+                airport,
+                procedure,
+                kind,
+                runway,
+                json,
+                catalog_db,
+            } => {
+                if !catalog_db.exists() {
+                    let parent = catalog_db
+                        .parent()
+                        .unwrap_or_else(|| std::path::Path::new("."));
+                    std::fs::create_dir_all(parent)?;
+                    let cat = openairac_charts::catalog::ChartCatalog::open(catalog_db)?;
+                    let faa = openairac_charts::providers::FaaDtppProvider::new();
+                    let sia = openairac_charts::providers::FranceSiaChartProvider::new();
+                    openairac_charts::provider::ChartProvider::sync_catalog(
+                        &faa,
+                        &cat,
+                        Some("2608"),
+                    )?;
+                    openairac_charts::provider::ChartProvider::sync_catalog(
+                        &sia,
+                        &cat,
+                        Some("2608"),
+                    )?;
+                }
+                let catalog = openairac_charts::catalog::ChartCatalog::open(catalog_db)?;
+                let candidates = catalog.query_charts_for_airport(airport)?;
+                let matches =
+                    openairac_charts::association::AssociationEngine::match_procedure_to_charts(
+                        airport,
+                        *kind,
+                        procedure,
+                        runway.as_deref(),
+                        &candidates,
+                    );
+
+                if *json {
+                    println!("{}", serde_json::to_string_pretty(&matches)?);
+                } else {
+                    println!(
+                        "Procedure-to-Chart Associations for {} {}:",
+                        airport.to_uppercase(),
+                        procedure
+                    );
+                    for m in &matches {
+                        println!("  - [{:?}] Chart ID: {}", m.confidence, m.chart_id);
+                        println!("    Reason: {}", m.match_reason);
+                    }
+                    if matches.is_empty() {
+                        println!("  No matching charts found.");
+                    }
+                }
+            }
+            ChartsCmd::Fetch {
+                chart_id,
+                cache_dir,
+                catalog_db,
+            } => {
+                if !catalog_db.exists() {
+                    let parent = catalog_db
+                        .parent()
+                        .unwrap_or_else(|| std::path::Path::new("."));
+                    std::fs::create_dir_all(parent)?;
+                    let cat = openairac_charts::catalog::ChartCatalog::open(catalog_db)?;
+                    let faa = openairac_charts::providers::FaaDtppProvider::new();
+                    let sia = openairac_charts::providers::FranceSiaChartProvider::new();
+                    openairac_charts::provider::ChartProvider::sync_catalog(
+                        &faa,
+                        &cat,
+                        Some("2608"),
+                    )?;
+                    openairac_charts::provider::ChartProvider::sync_catalog(
+                        &sia,
+                        &cat,
+                        Some("2608"),
+                    )?;
+                }
+                let catalog = openairac_charts::catalog::ChartCatalog::open(catalog_db)?;
+                let doc_id = openairac_charts::model::ChartDocumentId(chart_id.clone());
+                let doc = catalog
+                    .query_chart_by_id(&doc_id)?
+                    .ok_or_else(|| anyhow::anyhow!("Chart not found in catalog: '{chart_id}'"))?;
+
+                let cache = openairac_charts::cache::ChartCache::new(cache_dir)?;
+                let path = if doc.provider_id == "FAA_DTPP" {
+                    let prov = openairac_charts::providers::FaaDtppProvider::new();
+                    openairac_charts::provider::ChartProvider::fetch_asset(&prov, &doc, &cache)?
+                } else {
+                    let prov = openairac_charts::providers::FranceSiaChartProvider::new();
+                    openairac_charts::provider::ChartProvider::fetch_asset(&prov, &doc, &cache)?
+                };
+
+                println!("Chart Asset Ready:");
+                println!("  Chart ID:   {}", doc.id);
+                println!("  Title:      {}", doc.title);
+                println!("  Local Path: {}", path.display());
+            }
+            ChartsCmd::Cache { cmd } => match cmd {
+                CacheCmd::Status { cache_dir } => {
+                    let cache = openairac_charts::cache::ChartCache::new(cache_dir)?;
+                    let st = cache.status()?;
+                    println!("OpenAIRAC Chart Cache Status:");
+                    println!("  Cache Directory: {}", st.root_dir);
+                    println!("  Cached Files:    {}", st.total_files);
+                    println!(
+                        "  Total Size:      {:.2} MB",
+                        st.total_size_bytes as f64 / 1_048_576.0
+                    );
+                }
+            },
         },
     }
 

@@ -21,6 +21,7 @@ openairac-export-pmdg = { path = "../openairac-export-pmdg" }
 openairac-reconcile = { path = "../openairac-reconcile" }
 openairac-bundle = { path = "../openairac-bundle" }
 openairac-service = { path = "../openairac-service" }
+openairac-charts = { path = "../openairac-charts" }
 clap.workspace = true
 anyhow.workspace = true
 tracing.workspace = true

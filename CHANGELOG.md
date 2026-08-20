@@ -1,5 +1,49 @@
 # Changelog
 
+## 1.6.0 — 2026-08-20
+
+### Open Charts Foundation & First Real EFB Capability
+
+- **Dedicated Open Charts Subsystem (`openairac-charts`)**:
+  - Implemented decoupled chart domain model (`ChartDocument`, `NormalizedChartType`, `ChartMimeType`, `GeoreferenceStatus`, `ChartAssociation`).
+  - Decoupled chart reference documents from machine-readable navigation procedures (`CanonicalProcedureLeg`).
+  - Normalized categories across international authorities: `AirportDiagram`, `ParkingDocking`, `GroundMovement`, `Sid`, `Star`, `Approach`, `ApproachVisual`, `TakeoffMinima`, `AlternateMinima`, `RadarMinima`, `HotSpot`, `Holding`, `Obstacle`, `Noise`, `GeneralInfo`.
+
+- **Content-Addressed Asset Storage & Security Cache (`ChartCache`)**:
+  - Content-addressed SHA-256 local asset cache (`charts/cache/sha256/ab/<hash>.pdf`).
+  - Atomic downloads via `.part` staging files.
+  - File signature & magic header validation (`%PDF-` for PDF, `\x89PNG` for PNG, `\xff\xd8` for JPEG).
+  - Strict path traversal prevention and 50 MB sanity guards.
+
+- **Isolated Chart Catalog Storage (`ChartCatalog`)**:
+  - Dedicated SQLite catalog (`openairac_charts.sqlite`) preserving complete schema isolation from Little Navmap navigation databases.
+  - High-performance indexing by airport, AIRAC cycle, chart category, and procedure name.
+
+- **Official FAA d-TPP Chart Provider (`FaaDtppProvider`)**:
+  - Ingestion and streaming parser for official FAA `d-TPP_Metafile.xml`.
+  - Lazy, on-demand downloading of individual PDF plates directly from FAA Aeronautical Information Services servers (`https://aeronav.faa.gov/d-tpp/<cycle>/<pdf_name>`).
+  - Full indexing of 38 official charts for KJFK, plus KLAX, KORD, KATL nationwide.
+
+- **France SIA eAIP Chart Provider (`FranceSiaChartProvider`)**:
+  - Official index of Section AD 2.24 charts for French aerodromes (LFPG, LFPO, LFMN, LFLL, LFBO).
+  - Demonstrates strict safety invariant: LFPG charts (ADC, APDC, GMC, SID, STAR, IAC) are fully available, while machine-readable navigation procedures remain absent (0) to match real public data truth.
+
+- **Procedure-to-Chart Association Engine (`AssociationEngine`)**:
+  - Matches canonical navigation procedures with published chart plates with explicit confidence ratings (`Exact`, `Likely`, `Ambiguous`, `Unmatched`).
+
+- **OpenAIRAC CLI Commands (`openairac charts`)**:
+  - `openairac charts providers`: list official chart providers.
+  - `openairac charts sync [PROVIDER]`: sync metadata catalog.
+  - `openairac charts airport <ICAO> [--json]`: list published charts for airport.
+  - `openairac charts procedure <ICAO> <PROC> [--json]`: procedure-to-chart resolution.
+  - `openairac charts fetch <CHART_ID>`: on-demand download and cache verification.
+  - `openairac charts cache status`: cache statistics and storage metrics.
+
+- **OpenAIRAC Map Charts Integration (`openairac-map` v0.2.0)**:
+  - Added `OpenAiracChartsDock` panel with airport search, category grouping tabs, and offline pack downloader.
+  - Implemented `ChartViewerWidget` with PDF plate display, zoom in/out, fit width, rotate, night mode, and external reader launch.
+  - Integrated pinned charts bar and flight plan chart shortcuts (`FlightSuggestions`).
+
 ## 1.5.0 — 2026-08-20
 
 ### OpenAIRAC Map Foundation & Little Navmap SQLite Target Verification

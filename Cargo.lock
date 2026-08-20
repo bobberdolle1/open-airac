@@ -1413,6 +1413,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "openairac-charts"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "openairac-model",
+ "openairac-procedures",
+ "openairac-store",
+ "quick-xml",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "openairac-cli"
 version = "1.0.0"
 dependencies = [
@@ -1420,6 +1441,7 @@ dependencies = [
  "chrono",
  "clap",
  "openairac-bundle",
+ "openairac-charts",
  "openairac-export",
  "openairac-export-lnm",
  "openairac-export-msfs",
