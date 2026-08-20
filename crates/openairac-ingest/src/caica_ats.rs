@@ -32,6 +32,8 @@ pub struct CaicaAtsGraphSummary {
     pub bidirectional_segments: usize,
     pub validation_errors: Vec<String>,
 }
+/// Directionality of an airway segment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AirwayDirectionality {
     Both,
     ForwardOnly,

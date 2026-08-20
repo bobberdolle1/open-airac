@@ -235,7 +235,10 @@ fn test_caica_index_semantic_classification_and_arithmetic() {
     assert_eq!(index.offshore_platform_entries(), 5);
     assert_eq!(index.navigation_entries(), 1);
     assert_eq!(index.total_aviation_objects(), 7);
-    assert!(index.verify_arithmetic(), "Arithmetic: 1 + 1 + 5 = 7 aviation objects, 7 + 1 = 8 total");
+    assert!(
+        index.verify_arithmetic(),
+        "Arithmetic: 1 + 1 + 5 = 7 aviation objects, 7 + 1 = 8 total"
+    );
 }
 
 #[test]
@@ -318,20 +321,117 @@ G370,10,KLT,56.7431,60.8028,TOL,55.0125,82.6508,BOTH,180,660,18000,RNAV 5,UNNT
 N869,10,TOL,55.0125,82.6508,KEM,56.1728,92.4831,BOTH,180,660,18000,RNAV 5,UNKL
 N869,20,KEM,56.1728,92.4831,IRK,52.2681,104.3889,BOTH,180,660,18000,RNAV 5,UIII
 T562,10,IRK,52.2681,104.3889,KHB,48.5281,135.1883,BOTH,180,660,18000,RNAV 5,UHHH
+T562,20,KHB,48.5281,135.1883,UHWW,43.3989,132.1481,BOTH,180,660,18000,RNAV 5,UHWW
 W31,10,MR,55.9726,37.4146,SCH,43.4499,39.9566,BOTH,180,660,18000,RNAV 5,URRV
+A300,10,MR,55.9726,37.4146,UWKD,55.6061,49.2786,BOTH,140,660,14000,RNAV 5,UWKD
+B200,10,UWKD,55.6061,49.2786,UWWW,53.5047,50.1644,BOTH,140,660,14000,RNAV 5,UWWW
+G495,10,UWWW,53.5047,50.1644,KLT,56.7431,60.8028,BOTH,180,660,18000,RNAV 5,USSS
+L870,10,MR,55.9726,37.4146,URMM,44.2250,43.0819,BOTH,180,660,18000,RNAV 5,URRV
+P865,10,KLT,56.7431,60.8028,USRR,61.3439,73.4019,BOTH,140,660,14000,RNAV 5,USRR
+P865,20,USRR,61.3439,73.4019,USNN,60.9497,76.4883,BOTH,140,660,14000,RNAV 5,USNN
+R30,10,TOL,55.0125,82.6508,UNOO,54.9669,73.3106,BOTH,140,660,14000,RNAV 5,UNOO
+T500,10,IRK,52.2681,104.3889,UEEE,62.0933,129.7708,BOTH,180,660,18000,RNAV 5,UEEE
+UM864,10,SPB,59.8003,30.2625,ULMM,68.7817,32.7508,BOTH,180,660,18000,RNAV 5,ULMM
+W12,10,IRK,52.2681,104.3889,UIBB,56.3706,101.6989,BOTH,120,660,12000,RNAV 5,UIBB
+W18,10,KHB,48.5281,135.1883,UHPP,53.1678,158.4539,BOTH,180,660,18000,RNAV 5,UHPP
+W24,10,KHB,48.5281,135.1883,UHSS,46.8886,142.7175,BOTH,140,660,14000,RNAV 5,UHSS
+W35,10,UEEE,62.0933,129.7708,UHMM,59.9108,150.7206,BOTH,180,660,18000,RNAV 5,UHMM
+W42,10,UHMM,59.9108,150.7206,UHMA,64.7333,177.7333,BOTH,180,660,18000,RNAV 5,UHMA
+W55,10,KEM,56.1728,92.4831,UOHH,71.9700,102.4900,BOTH,140,660,14000,RNAV 5,UOHH
+W68,10,TOL,55.0125,82.6508,USTJ,58.1367,68.3458,BOTH,120,660,12000,RNAV 5,USTJ
+W74,10,UEEE,62.0933,129.7708,UERS,71.9800,114.0800,BOTH,120,660,12000,RNAV 5,UEEE
+W82,10,KHB,48.5281,135.1883,UHNA,56.4500,138.1600,BOTH,120,660,12000,RNAV 5,UHNA
 "#;
 
     let segments = openairac_ingest::caica_ats::CaicaAtsProvider::parse_ats_table(ats_csv)
         .expect("Must parse ATS table");
-    assert_eq!(segments.len(), 8);
+    assert_eq!(segments.len(), 27);
 
     let summary = openairac_ingest::caica_ats::CaicaAtsProvider::analyze_graph(&segments);
-    assert_eq!(summary.total_routes, 6);
-    assert_eq!(summary.total_segments, 8);
-    assert_eq!(summary.unique_nodes, 8);
-    assert_eq!(summary.bidirectional_segments, 8);
+    assert_eq!(summary.total_routes, 23);
+    assert_eq!(summary.total_segments, 27);
+    assert_eq!(summary.unique_nodes, 27);
+    assert_eq!(summary.bidirectional_segments, 27);
     assert_eq!(summary.one_way_segments, 0);
-    assert!(summary.validation_errors.is_empty(), "Zero graph validation errors");
+    assert!(
+        summary.validation_errors.is_empty(),
+        "Zero graph validation errors"
+    );
+}
+
+#[test]
+fn test_russia_coverage_json_internal_consistency_self_check() {
+    let report_str = include_str!("../../../docs/russia_coverage.json");
+    let v: serde_json::Value = serde_json::from_str(report_str).expect("Valid JSON report");
+
+    // 1. Aviation Object Category Sum: airports + vertodromes + offshore == aviation_objects
+    let airports = v["source_index"]["airports"].as_u64().unwrap();
+    let vertodromes = v["source_index"]["vertodromes"].as_u64().unwrap();
+    let offshore = v["source_index"]["offshore"].as_u64().unwrap();
+    let aviation_objects = v["source_index"]["aviation_objects"].as_u64().unwrap();
+    assert_eq!(
+        airports + vertodromes + offshore,
+        aviation_objects,
+        "Aviation objects sum mismatch: {} + {} + {} != {}",
+        airports,
+        vertodromes,
+        offshore,
+        aviation_objects
+    );
+
+    // 2. Total Href Sum: aviation_objects + navigation == total_href
+    let navigation = v["source_index"]["navigation"].as_u64().unwrap();
+    let total_href = v["source_index"]["total_href"].as_u64().unwrap();
+    assert_eq!(
+        aviation_objects + navigation,
+        total_href,
+        "Total href sum mismatch: {} + {} != {}",
+        aviation_objects,
+        navigation,
+        total_href
+    );
+
+    // 3. Procedure Pages Accounting: pages_with_procedures + pages_no_procedure_data == pages_attempted
+    let procs_pages = v["national_procedures"]["pages_with_procedures"]
+        .as_u64()
+        .unwrap();
+    let no_procs_pages = v["national_procedures"]["pages_no_procedure_data"]
+        .as_u64()
+        .unwrap();
+    let attempted = v["national_procedures"]["pages_attempted"]
+        .as_u64()
+        .unwrap();
+    assert_eq!(
+        procs_pages + no_procs_pages,
+        attempted,
+        "Pages accounting mismatch: {} + {} != {}",
+        procs_pages,
+        no_procs_pages,
+        attempted
+    );
+
+    // 4. VOR Arithmetic: vor_family_total == vor_dme + vor_standalone + vortac
+    let vor_total = v["radionavigation"]["vor_family_total"].as_u64().unwrap();
+    let vor_dme = v["radionavigation"]["vor_dme"].as_u64().unwrap();
+    let vor_std = v["radionavigation"]["vor_standalone"].as_u64().unwrap();
+    let vortac = v["radionavigation"]["vortac"].as_u64().unwrap();
+    assert_eq!(
+        vor_dme + vor_std + vortac,
+        vor_total,
+        "VOR arithmetic mismatch: {} + {} + {} != {}",
+        vor_dme,
+        vor_std,
+        vortac,
+        vor_total
+    );
+
+    // 5. ILS Systems Consistency: russian_loc_components == russian_ils_systems
+    let ils_systems = v["ils"]["russian_ils_systems"].as_u64().unwrap();
+    let loc_comps = v["ils"]["russian_loc_components"].as_u64().unwrap();
+    assert_eq!(
+        ils_systems, loc_comps,
+        "ILS systems and LOC count must match"
+    );
 }
 
 #[test]

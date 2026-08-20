@@ -12,7 +12,9 @@ pub mod registry;
 pub mod sia_procedures;
 pub mod world_composer;
 
-pub use caica_ats::{AirwayDirectionality, CaicaAtsGraphSummary, CaicaAtsProvider, CaicaAtsSegment};
+pub use caica_ats::{
+    AirwayDirectionality, CaicaAtsGraphSummary, CaicaAtsProvider, CaicaAtsSegment,
+};
 pub use caica_procedures::{
     CaicaAltitudeConstraint, CaicaDiscoveredAirport, CaicaEntryKind, CaicaNationalStatistics,
     CaicaParsedProcedure, CaicaProcedureIndex, CaicaProcedureProvider, CaicaRawLegRow,

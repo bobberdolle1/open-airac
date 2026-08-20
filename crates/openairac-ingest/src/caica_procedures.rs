@@ -177,9 +177,18 @@ impl CaicaProcedureIndex {
                     };
 
                     let up_text = ru_name.to_uppercase();
-                    let kind = if up_text.contains("МЛСП") || up_text.contains("ПРИРАЗЛОМНАЯ") || up_text.contains("МОЛИКПАК") || up_text.contains("ЛУНСКОЕ") || up_text.contains("Р-111") || up_text.contains("ТЕРЛЕЦКАЯ") {
+                    let kind = if up_text.contains("МЛСП")
+                        || up_text.contains("ПРИРАЗЛОМНАЯ")
+                        || up_text.contains("МОЛИКПАК")
+                        || up_text.contains("ЛУНСКОЕ")
+                        || up_text.contains("Р-111")
+                        || up_text.contains("ТЕРЛЕЦКАЯ")
+                    {
                         CaicaEntryKind::OffshorePlatform
-                    } else if up_text.contains("ВЕРТОДРОМ") || up_text.contains("ВАЛ") || up_text.contains("ВЕРТОЛЕТ") {
+                    } else if up_text.contains("ВЕРТОДРОМ")
+                        || up_text.contains("ВАЛ")
+                        || up_text.contains("ВЕРТОЛЕТ")
+                    {
                         CaicaEntryKind::HeliportVertodrome
                     } else if icao == "NAV" || icao == "INDEX" || url.contains("nav.htm") {
                         CaicaEntryKind::NavigationNonData
@@ -234,13 +243,24 @@ impl CaicaProcedureIndex {
                             .to_uppercase()
                     };
 
-                    if (icao.len() == 4 && (icao.starts_with('U') || icao.starts_with('X')) || icao == "NAV" || url.contains("nav.htm"))
+                    if (icao.len() == 4 && (icao.starts_with('U') || icao.starts_with('X'))
+                        || icao == "NAV"
+                        || url.contains("nav.htm"))
                         && !self.airports.iter().any(|a| a.icao == icao)
                     {
                         let up_text = link_text.to_uppercase();
-                        let kind = if up_text.contains("МЛСП") || up_text.contains("ПРИРАЗЛОМНАЯ") || up_text.contains("МОЛИКПАК") || up_text.contains("ЛУНСКОЕ") || up_text.contains("Р-111") || up_text.contains("ТЕРЛЕЦКАЯ") {
+                        let kind = if up_text.contains("МЛСП")
+                            || up_text.contains("ПРИРАЗЛОМНАЯ")
+                            || up_text.contains("МОЛИКПАК")
+                            || up_text.contains("ЛУНСКОЕ")
+                            || up_text.contains("Р-111")
+                            || up_text.contains("ТЕРЛЕЦКАЯ")
+                        {
                             CaicaEntryKind::OffshorePlatform
-                        } else if up_text.contains("ВЕРТОДРОМ") || up_text.contains("ВАЛ") || up_text.contains("ВЕРТОЛЕТ") {
+                        } else if up_text.contains("ВЕРТОДРОМ")
+                            || up_text.contains("ВАЛ")
+                            || up_text.contains("ВЕРТОЛЕТ")
+                        {
                             CaicaEntryKind::HeliportVertodrome
                         } else if icao == "NAV" || icao == "INDEX" || url.contains("nav.htm") {
                             CaicaEntryKind::NavigationNonData
@@ -272,27 +292,45 @@ impl CaicaProcedureIndex {
     }
 
     pub fn total_aviation_objects(&self) -> usize {
-        self.airports.iter().filter(|a| a.entry_kind != CaicaEntryKind::NavigationNonData).count()
+        self.airports
+            .iter()
+            .filter(|a| a.entry_kind != CaicaEntryKind::NavigationNonData)
+            .count()
     }
 
     pub fn airport_entries(&self) -> usize {
-        self.airports.iter().filter(|a| a.entry_kind == CaicaEntryKind::Airport).count()
+        self.airports
+            .iter()
+            .filter(|a| a.entry_kind == CaicaEntryKind::Airport)
+            .count()
     }
 
     pub fn heliport_vertodrome_entries(&self) -> usize {
-        self.airports.iter().filter(|a| a.entry_kind == CaicaEntryKind::HeliportVertodrome).count()
+        self.airports
+            .iter()
+            .filter(|a| a.entry_kind == CaicaEntryKind::HeliportVertodrome)
+            .count()
     }
 
     pub fn offshore_platform_entries(&self) -> usize {
-        self.airports.iter().filter(|a| a.entry_kind == CaicaEntryKind::OffshorePlatform).count()
+        self.airports
+            .iter()
+            .filter(|a| a.entry_kind == CaicaEntryKind::OffshorePlatform)
+            .count()
     }
 
     pub fn other_aviation_object_entries(&self) -> usize {
-        self.airports.iter().filter(|a| a.entry_kind == CaicaEntryKind::OtherAviationObject).count()
+        self.airports
+            .iter()
+            .filter(|a| a.entry_kind == CaicaEntryKind::OtherAviationObject)
+            .count()
     }
 
     pub fn navigation_entries(&self) -> usize {
-        self.airports.iter().filter(|a| a.entry_kind == CaicaEntryKind::NavigationNonData).count()
+        self.airports
+            .iter()
+            .filter(|a| a.entry_kind == CaicaEntryKind::NavigationNonData)
+            .count()
     }
 
     pub fn verify_arithmetic(&self) -> bool {
