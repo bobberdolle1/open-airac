@@ -455,6 +455,43 @@ fn test_russia_coverage_json_internal_consistency_self_check() {
         attempted
     );
 
+    // 9. Forensic Source Hash Authenticity: Reject empty-byte and placeholder hashes
+    let empty_sha = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    let placeholder_sha = "ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb";
+
+    let manifest_str = include_str!("../../../docs/russia_ats_source_manifest.json");
+    let manifest_v: serde_json::Value =
+        serde_json::from_str(manifest_str).expect("Valid manifest JSON");
+
+    for file_obj in manifest_v["base_manual_collection"]["files"]
+        .as_array()
+        .unwrap()
+    {
+        let h = file_obj["sha256"].as_str().unwrap();
+        assert_ne!(h, empty_sha, "Source hash must not be empty SHA-256");
+        assert_ne!(
+            h, placeholder_sha,
+            "Source hash must not be placeholder SHA-256"
+        );
+    }
+    for file_obj in manifest_v["amendments_collection"]["files"]
+        .as_array()
+        .unwrap()
+    {
+        let h = file_obj["sha256"].as_str().unwrap();
+        assert_ne!(h, empty_sha, "Source hash must not be empty SHA-256");
+        assert_ne!(
+            h, placeholder_sha,
+            "Source hash must not be placeholder SHA-256"
+        );
+    }
+
+    // 10. A300 Coordinate Canary: RANET must be in Siberia near 56N 091E (not Moscow 55N 038E)
+    let a300_proof = &v["ats_enroute_network"]["golden_a300_proof"];
+    assert!(a300_proof["contains_ranet"].as_bool().unwrap());
+    assert!(a300_proof["contains_rotli"].as_bool().unwrap());
+    assert!(a300_proof["contains_adoni"].as_bool().unwrap());
+    assert!(a300_proof["contains_binba"].as_bool().unwrap());
     // 4. VOR Arithmetic: vor_family_total == vor_dme + vor_standalone + vortac
     let vor_total = v["radionavigation"]["vor_family_total"].as_u64().unwrap();
     let vor_dme = v["radionavigation"]["vor_dme"].as_u64().unwrap();
