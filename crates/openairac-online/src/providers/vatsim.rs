@@ -209,10 +209,11 @@ impl VatsimProvider {
 
         let frequency = sanitize_text(c["frequency"].as_str().unwrap_or(""), 12);
         let facility = c["facility"].as_u64().unwrap_or(0) as u8;
-        let mut facility_type = FacilityType::from_u8(facility);
-        if facility_type == FacilityType::Unknown {
-            facility_type = FacilityType::from_callsign(&callsign);
-        }
+        let facility_type = FacilityType::from_u8(facility);
+        let callsign_role_hint = FacilityType::from_callsign(&callsign);
+        let is_consistent = facility_type == FacilityType::Unknown
+            || callsign_role_hint == FacilityType::Unknown
+            || facility_type == callsign_role_hint;
 
         let rating = c["rating"].as_u64().unwrap_or(0) as u8;
         let visual_range_nm = c["visual_range"].as_u64().unwrap_or(0) as u32;
@@ -248,6 +249,8 @@ impl VatsimProvider {
             frequency,
             facility,
             facility_type,
+            callsign_role_hint,
+            is_consistent,
             rating,
             visual_range_nm,
             text_atis,

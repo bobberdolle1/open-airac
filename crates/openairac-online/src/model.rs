@@ -48,23 +48,24 @@ impl NetworkFreshness {
 #[repr(u8)]
 pub enum FacilityType {
     Unknown = 0,
-    Delivery = 1,
-    Ground = 2,
-    Tower = 3,
-    Approach = 4,
-    Center = 5,
-    Fss = 6,
+    Fss = 1,
+    Delivery = 2,
+    Ground = 3,
+    Tower = 4,
+    Approach = 5,
+    Center = 6,
 }
 
 impl FacilityType {
+    /// Authoritative facility ID mapping per VATSIM Data API v3 specification.
     pub fn from_u8(val: u8) -> Self {
         match val {
-            1 => Self::Delivery,
-            2 => Self::Ground,
-            3 => Self::Tower,
-            4 => Self::Approach,
-            5 => Self::Center,
-            6 => Self::Fss,
+            1 => Self::Fss,
+            2 => Self::Delivery,
+            3 => Self::Ground,
+            4 => Self::Tower,
+            5 => Self::Approach,
+            6 => Self::Center,
             _ => Self::Unknown,
         }
     }
@@ -151,6 +152,8 @@ pub struct OnlineController {
     pub frequency: String,
     pub facility: u8,
     pub facility_type: FacilityType,
+    pub callsign_role_hint: FacilityType,
+    pub is_consistent: bool,
     pub rating: u8,
     pub visual_range_nm: u32,
     pub text_atis: Vec<String>,
@@ -159,7 +162,6 @@ pub struct OnlineController {
     pub logon_time: Option<DateTime<Utc>>,
     pub last_updated: Option<DateTime<Utc>>,
 }
-
 /// Live active ATIS broadcast.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OnlineAtis {

@@ -184,7 +184,13 @@ impl RouteOnlineAwareness {
         }
 
         // Sort departure and arrival ATC logically (DEL -> GND -> TWR -> APP)
-        departure_atc.sort_by_key(|rc| rc.controller.facility_type as u8);
+        departure_atc.sort_by_key(|rc| match rc.controller.facility_type {
+            FacilityType::Delivery => 1,
+            FacilityType::Ground => 2,
+            FacilityType::Tower => 3,
+            FacilityType::Approach => 4,
+            _ => 5,
+        });
         arrival_atc.sort_by_key(|rc| match rc.controller.facility_type {
             FacilityType::Approach => 1,
             FacilityType::Tower => 2,
@@ -267,7 +273,13 @@ pub fn summarize_airport_online(
             atc_controllers.push(c.clone());
         }
     }
-    atc_controllers.sort_by_key(|c| c.facility_type as u8);
+    atc_controllers.sort_by_key(|c| match c.facility_type {
+        FacilityType::Delivery => 1,
+        FacilityType::Ground => 2,
+        FacilityType::Tower => 3,
+        FacilityType::Approach => 4,
+        _ => 5,
+    });
 
     // 2. ATIS
     let atis = snapshot
