@@ -20,3 +20,4 @@ tracing.workspace = true
 sha2.workspace = true
 reqwest.workspace = true
 zip = { version = "2", default-features = false, features = ["deflate"] }
+quick-xml.workspace = true

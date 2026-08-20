@@ -13,7 +13,11 @@ dist/
 *.sqlite
 *.sqlite3
 *.db
-data/
+data/*.sqlite*
+data/*.db*
+data/*.xml
+data/*.csv
+!data/providers.yaml
 prompt.md
 # Signing key material (NEVER commit)
 *.key

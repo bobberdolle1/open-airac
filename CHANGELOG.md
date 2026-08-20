@@ -1,5 +1,39 @@
 # Changelog
 
+## 1.3.0 — 2026-08-20
+
+### Worldwide Navdata Platform & Multi-Sim Expansion
+
+- **Provider Federation & Licensing Policy Layer**:
+  - First-class provider and licensing model with 4-tier `RedistributionPermission` (`PublicRedistribution`, `LocalOnly`, `MetadataOnly`, `Forbidden`).
+  - Machine-readable global authority registry in `data/providers.yaml` (FAA, OurAirports, openflightmaps, DFS Germany, Eurocontrol EAD, BYOD).
+  - Automated bundle builder distribution policy enforcement and local-only safeguards (`BundleScope::PublicRelease` vs `BundleScope::LocalDevelopment`).
+
+- **Generic AIXM 5.x Ingestion**:
+  - Full XML/GML DOM & streaming parser for AIXM 5.1/5.1.1 basic messages (`openairac-ingest::aixm`).
+  - Support for `AirportHeliport`, `Runway`, `Navaid`, `DesignatedPoint`, `Route`, `StandardInstrumentDeparture`, `StandardInstrumentArrival`, `InstrumentApproachProcedure`.
+  - Lossless translation of all standard ARINC/AIXM path terminators, altitude/speed constraint profiles, and vertical navigation geometry.
+
+- **Local / BYOD Ingestion Workflows**:
+  - User CLI workflow `openairac import aixm <file>` with explicit provenance and isolated local-only distribution tags.
+  - Secure local compilation of personal AIP/EAD datasets without risk of public release contamination.
+
+- **Worldwide Procedure Validation Layer**:
+  - Comprehensive semantic and geometric validator in `openairac-procedures::validation`.
+  - Fix coordinate resolution, sequence continuity, runway association, altitude gradient monotonicity, and geometric discontinuity detection (> 250 NM).
+
+- **Coverage Inspector & Terminal Doctor**:
+  - `openairac coverage [ICAO] [--json]` for instant airport metadata, runway inventories, procedures count, and data provenance.
+  - `openairac doctor-airport <ICAO> [--json]` diagnostic tool analyzing missing elements, flyability status, and procedure validation issues.
+
+- **Legacy Garmin GNS430 & KLN90B Exporters**:
+  - `Gns430Exporter` generating complete `Airports.txt`, `Navaids.txt`, `Waypoints.txt`, `ATS.txt`, and `Proc/<ICAO>.txt` files (`docs/GNS430_COMPATIBILITY.md`).
+  - `Kln90bExporter` generating standard clean-room MIT `.DAT` tables (`APT.DAT`, `NAV.DAT`, `WPT.DAT`, `AWY.DAT`, `FAS.DAT`) (`docs/KLN90B_COMPATIBILITY.md`).
+  - Target descriptors and transactional installers for `xplane-gns430` and `kln90b` (SUPPORTED status).
+
+- **Regional Bundle Filtering**:
+  - Deterministic regional bundle packaging (`BundleFilter`) with presets for `world-open`, `us`, and `europe-open`.
+
 ## 1.2.0 — 2026-08-20
 
 ### X-Plane 12 complete dataset serialization

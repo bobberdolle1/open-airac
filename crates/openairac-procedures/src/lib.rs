@@ -32,6 +32,8 @@
 use anyhow::{Result, bail};
 use openairac_model::{CanonicalProcedureLeg, TemporalValidity};
 use serde::{Deserialize, Serialize};
+pub mod validation;
+pub use validation::*;
 
 /// Type of Instrument Procedure
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

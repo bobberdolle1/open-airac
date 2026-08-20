@@ -43,3 +43,5 @@ chrono = { version = "0.4", features = ["serde"] }
 rusqlite = { version = "0.32", features = ["bundled", "backup"] }
 geo = "0.29"
 sha2 = "0.10"
+serde_yaml = "0.9"
+quick-xml = { version = "0.37", features = ["serialize"] }

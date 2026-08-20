@@ -121,6 +121,62 @@ pub struct CoverageReport {
     pub airports_by_country: Vec<(String, usize)>,
 }
 
+/// Details of one runway for airport coverage.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunwayDetail {
+    pub designator: String,
+    pub length_ft: u32,
+    pub width_ft: Option<u32>,
+    pub surface: Option<String>,
+}
+
+/// Source provenance record for coverage inspector.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceProvenanceInfo {
+    pub provider: String,
+    pub dataset: String,
+    pub airac_cycle: Option<String>,
+    pub effective_from: Option<String>,
+    pub license_id: String,
+    pub redistribution: String,
+}
+
+/// Detailed coverage report for a specific airport.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AirportCoverageReport {
+    pub ident: String,
+    pub name: String,
+    pub airport_type: String,
+    pub latitude: f64,
+    pub longitude: f64,
+    pub elevation_ft: Option<f64>,
+    pub country: Option<String>,
+    pub municipality: Option<String>,
+    pub runways: Vec<RunwayDetail>,
+    pub navaids_count: usize,
+    pub sids_count: usize,
+    pub stars_count: usize,
+    pub approaches_count: usize,
+    pub sids: Vec<String>,
+    pub stars: Vec<String>,
+    pub approaches: Vec<String>,
+    pub sources: Vec<SourceProvenanceInfo>,
+}
+
+/// Detailed diagnostic health and continuity report for an airport's terminal data.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AirportDoctorReport {
+    pub ident: String,
+    pub name: Option<String>,
+    pub status: String,
+    pub has_airport_record: bool,
+    pub runway_count: usize,
+    pub procedures_found: usize,
+    pub missing_elements: Vec<String>,
+    pub validation_issues: Vec<openairac_procedures::ProcedureIssue>,
+    pub is_flyable: bool,
+}
+
 /// Service entry point.
 pub struct WorldQuery {
     store: WorldStore,
@@ -501,6 +557,193 @@ impl WorldQuery {
         self.store.query_waypoints_at(date)
     }
 
+    /// Detailed coverage information for a specific airport (ident).
+    pub fn airport_coverage(
+        &self,
+        ident: &str,
+        as_of: DateTime<Utc>,
+    ) -> Result<Option<AirportCoverageReport>> {
+        let airport = match self.airport(ident, as_of)? {
+            Some(a) => a,
+            None => return Ok(None),
+        };
+
+        let runways = airport
+            .runways
+            .iter()
+            .map(|r| RunwayDetail {
+                designator: r.official_designator.clone(),
+                length_ft: r.length_ft,
+                width_ft: r.width_ft,
+                surface: r.surface.clone(),
+            })
+            .collect();
+
+        // Count nearby navaids associated with this airport
+        let navaids_count = self
+            .store
+            .query_navaids_at(as_of)?
+            .into_iter()
+            .filter(|n| n.associated_airport.as_deref() == Some(ident))
+            .count();
+
+        // Query procedures
+        let sids_list = self.procedures(ident, Some(ProcedureKind::Sid), as_of)?;
+        let stars_list = self.procedures(ident, Some(ProcedureKind::Star), as_of)?;
+        let app_list = self.procedures(ident, Some(ProcedureKind::Approach), as_of)?;
+
+        let sids: Vec<String> = sids_list.iter().map(|p| p.ident.clone()).collect();
+        let stars: Vec<String> = stars_list.iter().map(|p| p.ident.clone()).collect();
+        let approaches: Vec<String> = app_list.iter().map(|p| p.ident.clone()).collect();
+
+        // Source provenance
+        let snapshots = self.store.query_source_snapshots()?;
+        let mut sources = Vec::new();
+        let mut seen_providers = std::collections::BTreeSet::new();
+        for snap in snapshots {
+            if seen_providers.insert(snap.provider.clone()) {
+                let policy = openairac_model::get_provider_policy(&snap.provider);
+                let license_id = snap
+                    .license_id
+                    .or_else(|| policy.map(|p| p.license_id.clone()))
+                    .unwrap_or_else(|| "Unknown".to_string());
+                let redistribution = policy
+                    .map(|p| p.redistribution.as_str().to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+                sources.push(SourceProvenanceInfo {
+                    provider: snap.provider,
+                    dataset: snap.dataset,
+                    airac_cycle: snap.airac_cycle,
+                    effective_from: snap.effective_from.map(|t| t.to_rfc3339()),
+                    license_id,
+                    redistribution,
+                });
+            }
+        }
+
+        Ok(Some(AirportCoverageReport {
+            ident: airport.ident,
+            name: airport.name,
+            airport_type: airport.airport_type,
+            latitude: airport.latitude,
+            longitude: airport.longitude,
+            elevation_ft: airport.elevation_ft,
+            country: airport.iso_country,
+            municipality: airport.municipality,
+            runways,
+            navaids_count,
+            sids_count: sids.len(),
+            stars_count: stars.len(),
+            approaches_count: approaches.len(),
+            sids,
+            stars,
+            approaches,
+            sources,
+        }))
+    }
+
+    /// Health check & diagnostic analysis for a specific airport.
+    pub fn doctor_airport(&self, ident: &str, as_of: DateTime<Utc>) -> Result<AirportDoctorReport> {
+        let airport = self.airport(ident, as_of)?;
+        let mut missing_elements = Vec::new();
+        let mut validation_issues = Vec::new();
+
+        let (has_airport_record, airport_name, runway_count) = match &airport {
+            Some(a) => (true, Some(a.name.clone()), a.runways.len()),
+            None => {
+                missing_elements.push(format!(
+                    "Airport '{}' record missing from canonical database",
+                    ident
+                ));
+                (false, None, 0)
+            }
+        };
+
+        if has_airport_record && runway_count == 0 {
+            missing_elements.push("No runways published for this airport".to_string());
+        }
+
+        // Fetch all procedure legs for this airport
+        let all_legs: Vec<_> = self
+            .store
+            .query_procedure_legs_at(as_of)?
+            .into_iter()
+            .filter(|l| l.airport_ident == ident)
+            .collect();
+
+        let waypoints = self.store.query_waypoints_at(as_of)?;
+        let fix_map: std::collections::BTreeMap<String, (f64, f64)> = waypoints
+            .into_iter()
+            .map(|w| (w.ident, (w.latitude, w.longitude)))
+            .collect();
+
+        let fix_lookup = |name: &str| fix_map.get(name).copied();
+
+        // Group legs into distinct procedures
+        let mut proc_groups: std::collections::BTreeMap<
+            (char, String),
+            Vec<openairac_model::CanonicalProcedureLeg>,
+        > = std::collections::BTreeMap::new();
+        for leg in all_legs {
+            proc_groups
+                .entry((leg.procedure_kind, leg.procedure_ident.clone()))
+                .or_default()
+                .push(leg);
+        }
+
+        let procedures_found = proc_groups.len();
+        if has_airport_record && procedures_found == 0 {
+            missing_elements.push(
+                "No instrument terminal procedures (SID/STAR/Approach) found for this airport"
+                    .to_string(),
+            );
+        }
+
+        let validator = openairac_procedures::ProcedureValidator::new(fix_lookup);
+        for ((kind_char, proc_ident), legs) in proc_groups {
+            let kind = openairac_procedures::ProcedureKind::from_arinc(kind_char)
+                .unwrap_or(openairac_procedures::ProcedureKind::Approach);
+            if let Ok(proc) = openairac_procedures::Procedure::assemble(
+                ident,
+                kind,
+                &proc_ident,
+                legs,
+                fix_lookup,
+            ) {
+                let rep = validator.validate_procedure(&proc);
+                validation_issues.extend(rep.issues);
+            }
+        }
+
+        let is_flyable = has_airport_record
+            && runway_count > 0
+            && !validation_issues
+                .iter()
+                .any(|i| i.severity == openairac_procedures::IssueSeverity::Error);
+
+        let status = if !has_airport_record {
+            "AIRPORT_MISSING".to_string()
+        } else if !is_flyable {
+            "DEFECTS_DETECTED".to_string()
+        } else if !validation_issues.is_empty() || !missing_elements.is_empty() {
+            "WARNINGS_DETECTED".to_string()
+        } else {
+            "HEALTHY".to_string()
+        };
+
+        Ok(AirportDoctorReport {
+            ident: ident.to_string(),
+            name: airport_name,
+            status,
+            has_airport_record,
+            runway_count,
+            procedures_found,
+            missing_elements,
+            validation_issues,
+            is_flyable,
+        })
+    }
+
     /// The current navaid list.
     pub fn navaids(&self, date: DateTime<Utc>) -> Result<Vec<CanonicalNavaid>> {
         self.store.query_navaids_at(date)
@@ -727,7 +970,10 @@ mod tests {
         let t = Utc::now();
         let service = seeded(t).unwrap();
         let report = service.coverage_report(t).unwrap();
-        assert_eq!(report.providers.len(), 2);
+        assert_eq!(
+            report.providers.len(),
+            openairac_model::PROVIDER_MANIFESTS.len()
+        );
         let oa = report
             .providers
             .iter()
@@ -769,5 +1015,30 @@ mod tests {
         // KJFK does not exist in the fixture: fail closed with the airport.
         let err = service.plan(&request).unwrap_err();
         assert!(err.to_string().contains("KJFK"));
+    }
+
+    #[test]
+    fn test_airport_coverage_and_doctor() {
+        let t = Utc::now();
+        let service = seeded(t).unwrap();
+
+        // KSFO is in seeded store
+        let cov = service
+            .airport_coverage("KSFO", t)
+            .unwrap()
+            .expect("KSFO coverage");
+        assert_eq!(cov.ident, "KSFO");
+        assert_eq!(cov.name, "San Francisco International");
+        assert_eq!(cov.runways.len(), 0);
+
+        let doc = service.doctor_airport("KSFO", t).unwrap();
+        assert_eq!(doc.ident, "KSFO");
+        assert_eq!(doc.runway_count, 0);
+        assert_eq!(doc.status, "DEFECTS_DETECTED"); // seeded KSFO has 0 runways -> not flyable
+
+        // Unknown airport
+        let doc_unknown = service.doctor_airport("Z999", t).unwrap();
+        assert_eq!(doc_unknown.status, "AIRPORT_MISSING");
+        assert!(!doc_unknown.has_airport_record);
     }
 }

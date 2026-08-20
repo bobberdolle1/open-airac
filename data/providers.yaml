@@ -1,0 +1,255 @@
+# OpenAIRAC Worldwide Aeronautical Data Provider Registry
+# Machine-readable provider metadata, licensing contracts, and distribution policies.
+
+providers:
+  FAA_CIFP:
+    name: "FAA_CIFP"
+    namespace: "faa"
+    jurisdiction: "US"
+    authority: "Federal Aviation Administration"
+    format: "arinc424"
+    airac_cadence: "28-day AIRAC"
+    license_id: "PublicDomain-US-Gov"
+    redistribution: "public_redistribution"
+    derivative_work_allowed: true
+    attribution_required: false
+    attribution_notice: "FAA Aeronautical Information Services CIFP (Public Domain)"
+    is_local_only: false
+    coverage:
+      airports: true
+      runways: true
+      navaids: true
+      fixes: true
+      airways: true
+      sids: true
+      stars: true
+      approaches: true
+      lpv_fas: true
+      msa: true
+      mora: true
+    source_uri_pattern: "https://nfdc.faa.gov/webContent/28DaySub/{cycle}_CSV.zip"
+    notes: "US nationwide coverage with comprehensive ARINC 424-18 procedure semantics."
+
+  FAA_AIXM:
+    name: "FAA_AIXM"
+    namespace: "faa_aixm"
+    jurisdiction: "US"
+    authority: "Federal Aviation Administration"
+    format: "aixm5"
+    airac_cadence: "28-day AIRAC"
+    license_id: "PublicDomain-US-Gov"
+    redistribution: "public_redistribution"
+    derivative_work_allowed: true
+    attribution_required: false
+    attribution_notice: "FAA NASR AIXM 5.1 (Public Domain)"
+    is_local_only: false
+    coverage:
+      airports: true
+      runways: true
+      navaids: true
+      fixes: true
+      airways: true
+      sids: true
+      stars: true
+      approaches: true
+      lpv_fas: true
+      msa: true
+      mora: false
+    source_uri_pattern: "https://nfdc.faa.gov/webContent/28DaySub/aixm5.1_{cycle}.zip"
+    notes: "Generic AIXM 5.1 ingestion for US NASR datasets."
+
+  OurAirports:
+    name: "OurAirports"
+    namespace: "ourairports"
+    jurisdiction: "GLOBAL"
+    authority: "OurAirports Community"
+    format: "openairports_csv"
+    airac_cadence: "continuous daily"
+    license_id: "CC0-1.0"
+    redistribution: "public_redistribution"
+    derivative_work_allowed: true
+    attribution_required: false
+    attribution_notice: "OurAirports.com (Dedicated to Public Domain via CC0 1.0)"
+    is_local_only: false
+    coverage:
+      airports: true
+      runways: true
+      navaids: true
+      fixes: false
+      airways: false
+      sids: false
+      stars: false
+      approaches: false
+      lpv_fas: false
+      msa: false
+      mora: false
+    source_uri_pattern: "https://davidmegginson.github.io/ourairports-data/{dataset}.csv"
+    notes: "Worldwide airport, runway, and radio navaid basic metadata."
+
+  OpenFlightmaps:
+    name: "OpenFlightmaps"
+    namespace: "ofm"
+    jurisdiction: "EU"
+    authority: "open flightmaps association"
+    format: "aixm5"
+    airac_cadence: "28-day AIRAC"
+    license_id: "OFMA-Open-Data"
+    redistribution: "public_redistribution"
+    derivative_work_allowed: true
+    attribution_required: true
+    attribution_notice: "open flightmaps (OFMA)"
+    is_local_only: false
+    coverage:
+      airports: true
+      runways: true
+      navaids: true
+      fixes: true
+      airways: true
+      sids: false
+      stars: false
+      approaches: false
+      lpv_fas: false
+      msa: false
+      mora: false
+    source_uri_pattern: "https://openflightmaps.org/"
+    notes: "Open VFR and enroute aeronautical data for European countries."
+
+  DFS_Germany:
+    name: "DFS_Germany"
+    namespace: "dfs"
+    jurisdiction: "DE"
+    authority: "DFS Deutsche Flugsicherung GmbH"
+    format: "aixm5"
+    airac_cadence: "28-day AIRAC"
+    license_id: "GeoNutzV-OpenData"
+    redistribution: "public_redistribution"
+    derivative_work_allowed: true
+    attribution_required: true
+    attribution_notice: "DFS Deutsche Flugsicherung GmbH Open Data"
+    is_local_only: false
+    coverage:
+      airports: true
+      runways: true
+      navaids: true
+      fixes: true
+      airways: true
+      sids: true
+      stars: true
+      approaches: true
+      lpv_fas: true
+      msa: true
+      mora: false
+    source_uri_pattern: "https://aip.dfs.de/"
+    notes: "German AIP aeronautical dataset under open government terms."
+
+  Eurocontrol_EAD:
+    name: "Eurocontrol_EAD"
+    namespace: "ead"
+    jurisdiction: "EU"
+    authority: "EUROCONTROL European AIS Database"
+    format: "aixm5"
+    airac_cadence: "28-day AIRAC"
+    license_id: "Eurocontrol-EAD-TermsOfUse"
+    redistribution: "local_only"
+    derivative_work_allowed: true
+    attribution_required: true
+    attribution_notice: "EUROCONTROL EAD (Local Use Only; User Authenticated)"
+    is_local_only: true
+    coverage:
+      airports: true
+      runways: true
+      navaids: true
+      fixes: true
+      airways: true
+      sids: true
+      stars: true
+      approaches: true
+      lpv_fas: true
+      msa: true
+      mora: false
+    source_uri_pattern: "https://www.ead.eurocontrol.int/"
+    notes: "Requires user personal EAD account. Permitted for local personal compiler use, forbidden from public redistribution."
+
+  BYOD_AIXM:
+    name: "BYOD_AIXM"
+    namespace: "byod"
+    jurisdiction: "BYOD"
+    authority: "User Bring-Your-Own-Data"
+    format: "aixm5"
+    airac_cadence: "ad-hoc"
+    license_id: "BYOD-Local-License"
+    redistribution: "local_only"
+    derivative_work_allowed: true
+    attribution_required: false
+    attribution_notice: null
+    is_local_only: true
+    coverage:
+      airports: true
+      runways: true
+      navaids: true
+      fixes: true
+      airways: true
+      sids: true
+      stars: true
+      approaches: true
+      lpv_fas: true
+      msa: true
+      mora: true
+    source_uri_pattern: null
+    notes: "User-imported AIXM dataset. Strictly local-only, excluded from public bundle publication."
+
+  BYOD_ARINC424:
+    name: "BYOD_ARINC424"
+    namespace: "byod_424"
+    jurisdiction: "BYOD"
+    authority: "User Bring-Your-Own-Data"
+    format: "arinc424"
+    airac_cadence: "ad-hoc"
+    license_id: "BYOD-Local-License"
+    redistribution: "local_only"
+    derivative_work_allowed: true
+    attribution_required: false
+    attribution_notice: null
+    is_local_only: true
+    coverage:
+      airports: true
+      runways: true
+      navaids: true
+      fixes: true
+      airways: true
+      sids: true
+      stars: true
+      approaches: true
+      lpv_fas: true
+      msa: true
+      mora: true
+    source_uri_pattern: null
+    notes: "User-imported ARINC 424 dataset for local compiler use."
+
+  Navigraph_Forbidden:
+    name: "Navigraph_Forbidden"
+    namespace: "navigraph_forbidden"
+    jurisdiction: "COMMERCIAL"
+    authority: "Navigraph / Jeppesen"
+    format: "arinc424"
+    airac_cadence: "28-day AIRAC"
+    license_id: "Proprietary-Restricted"
+    redistribution: "forbidden"
+    derivative_work_allowed: false
+    attribution_required: false
+    attribution_notice: null
+    is_local_only: true
+    coverage:
+      airports: false
+      runways: false
+      navaids: false
+      fixes: false
+      airways: false
+      sids: false
+      stars: false
+      approaches: false
+      lpv_fas: false
+      msa: false
+      mora: false
+    source_uri_pattern: null
+    notes: "Proprietary commercial navdata. Ingestion, distribution, and repository inclusion are strictly FORBIDDEN."

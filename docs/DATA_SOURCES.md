@@ -63,26 +63,18 @@ Every ingested dataset is recorded in SQLite under `source_snapshots` with:
   - Terminal record support is decoding/verification level: procedure
     geometry rendering (RF arcs etc.) is not implemented.
 
-## Worldwide source research (v0.6)
+## Worldwide Provider Matrix
 
-Evaluated candidates for legal, redistributable regional coverage.
-Conclusion: implement only sources with clear public/open licensing;
-quality over provider count.
+Detailed provider registry and licensing terms are machine-enforced via `data/providers.yaml` and `docs/REDISTRIBUTION_POLICY.md`.
 
-| Source | Region | License basis | Verdict |
-|---|---|---|---|
-| FAA CIFP / ARINC 424 | United States | US Government work, public domain | **In use** (nationwide AIRAC cycles) |
-| OurAirports | Worldwide | Public domain (CC0-style release) | **In use** (airports/runways/navaids) |
-| OSM-derived aviation data | Worldwide | ODbL — redistribution allowed with attribution + share-alike | Candidate; needs ODbL compliance review before bundle redistribution |
-| National AIP open data | Single countries | Varies per state; registration/attribution often required | Candidates; each needs a per-country license review — none implemented yet |
-| Navigraph / Jeppesen / proprietary ARINC sets | — | Proprietary | **Rejected**: no redistribution rights |
-
-OpenAIRAC bundles must remain legally distributable: any future
-provider must pass a license/redistribution review before its data can
-ship inside a bundle.
-
-## Not yet ingested
-
-- ICAO AIP / worldwide procedure sources (regional coverage expansion,
-  roadmap v0.6).
-- MSFS 2024 navdata inputs (roadmap v0.7).
+| Provider | Authority | Format | License | Redistribution | Coverage |
+|---|---|---|---|---|---|
+| `FAA_CIFP` | Federal Aviation Administration (USA) | ARINC 424-18 | Public Domain (US Gov) | `public_redistribution` | Nationwide (Airports, Runways, Navaids, Waypoints, Airways, SIDs, STARs, Approaches, LPV FAS, MSA, MORA) |
+| `FAA_AIXM` | Federal Aviation Administration (USA) | AIXM 5.1 XML | Public Domain (US Gov) | `public_redistribution` | Nationwide (AIXM 5.1 NASR Subscription) |
+| `OurAirports` | OurAirports Open Data Community | CSV | CC0 1.0 (Public Domain) | `public_redistribution` | Worldwide (Airports, Runways, Radio Navaids) |
+| `OpenFlightmaps` | open flightmaps association (OFMA) | AIXM 5.x / OFMX | OFMA Open Data | `public_redistribution` | European airspace (Airports, Runways, Navaids, Fixes, Airways) |
+| `DFS_Germany` | DFS Deutsche Flugsicherung GmbH | AIXM 5.1 XML | GeoNutzV Open Data | `public_redistribution` | German AIP (Airports, Runways, Navaids, SIDs, STARs, Approaches) |
+| `Eurocontrol_EAD` | EUROCONTROL European AIS Database | AIXM 5.1 / 4.5 | EAD Terms of Use | `local_only` | European AIPs (Allowed for personal local compiler use only) |
+| `BYOD_AIXM` | User Bring-Your-Own-Data | AIXM 5.x XML | BYOD Local User License | `local_only` | User-imported AIXM files (Local compiler only) |
+| `BYOD_ARINC424` | User Bring-Your-Own-Data | ARINC 424 | BYOD Local User License | `local_only` | User-imported ARINC 424 files (Local compiler only) |
+| `Navigraph_Forbidden` | Navigraph / Jeppesen | Proprietary | Proprietary-Restricted | `forbidden` | **REJECTED**: Ingestion and redistribution strictly blocked |

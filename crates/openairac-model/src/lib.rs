@@ -1,3 +1,6 @@
+pub mod policy;
+pub use policy::*;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -737,6 +740,48 @@ pub const PROVIDER_MANIFESTS: &[ProviderManifest] = &[
                 "lpv_fas",
                 "msa",
                 "mora",
+            ],
+        }],
+    },
+    ProviderManifest {
+        name: "FAA_AIXM",
+        namespace: "faa_aixm",
+        capabilities: ProviderCapabilities {
+            coverage: CoverageScope::Nationwide,
+            temporal: TemporalModel::AiracCycle,
+            update: UpdateModel::FullSnapshot,
+            authority_note: "US AIXM 5.1 data: procedures, navaids, fixes, airports",
+        },
+        datasets: &[DatasetManifest {
+            name: "AIXM5",
+            entity_tables: &[
+                "airports",
+                "runways",
+                "waypoints",
+                "navaids",
+                "airway_legs",
+                "procedure_legs",
+            ],
+        }],
+    },
+    ProviderManifest {
+        name: "BYOD_AIXM",
+        namespace: "byod",
+        capabilities: ProviderCapabilities {
+            coverage: CoverageScope::Worldwide,
+            temporal: TemporalModel::Continuous,
+            update: UpdateModel::FullSnapshot,
+            authority_note: "User Bring-Your-Own-Data AIXM 5.x dataset",
+        },
+        datasets: &[DatasetManifest {
+            name: "AIXM5",
+            entity_tables: &[
+                "airports",
+                "runways",
+                "waypoints",
+                "navaids",
+                "airway_legs",
+                "procedure_legs",
             ],
         }],
     },
