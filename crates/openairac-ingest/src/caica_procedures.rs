@@ -267,6 +267,43 @@ impl CaicaProcedureIndex {
         count
     }
 
+    pub fn total_entries(&self) -> usize {
+        self.airports.len()
+    }
+
+    pub fn total_aviation_objects(&self) -> usize {
+        self.airports.iter().filter(|a| a.entry_kind != CaicaEntryKind::NavigationNonData).count()
+    }
+
+    pub fn airport_entries(&self) -> usize {
+        self.airports.iter().filter(|a| a.entry_kind == CaicaEntryKind::Airport).count()
+    }
+
+    pub fn heliport_vertodrome_entries(&self) -> usize {
+        self.airports.iter().filter(|a| a.entry_kind == CaicaEntryKind::HeliportVertodrome).count()
+    }
+
+    pub fn offshore_platform_entries(&self) -> usize {
+        self.airports.iter().filter(|a| a.entry_kind == CaicaEntryKind::OffshorePlatform).count()
+    }
+
+    pub fn other_aviation_object_entries(&self) -> usize {
+        self.airports.iter().filter(|a| a.entry_kind == CaicaEntryKind::OtherAviationObject).count()
+    }
+
+    pub fn navigation_entries(&self) -> usize {
+        self.airports.iter().filter(|a| a.entry_kind == CaicaEntryKind::NavigationNonData).count()
+    }
+
+    pub fn verify_arithmetic(&self) -> bool {
+        let sum_aviation = self.airport_entries()
+            + self.heliport_vertodrome_entries()
+            + self.offshore_platform_entries()
+            + self.other_aviation_object_entries();
+        sum_aviation == self.total_aviation_objects()
+            && self.total_aviation_objects() + self.navigation_entries() == self.total_entries()
+    }
+
     /// Compute comprehensive national procedure statistics.
     pub fn compute_national_statistics(
         procedures: &[CaicaParsedProcedure],

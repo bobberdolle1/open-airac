@@ -214,6 +214,31 @@ fn test_dynamic_caica_procedure_index_discovery() {
 }
 
 #[test]
+fn test_caica_index_semantic_classification_and_arithmetic() {
+    let index_snippet = r#"
+    <a href="book/rus/uuee.htm">МОСКВА (ШЕРЕМЕТЬЕВО) [UUEE]</a>
+    <a href="book/rus/uldh.htm">ВЕРТОДРОМ АРКТИЧЕСКИЙ [ULDH]</a>
+    <a href="book/rus/uldp.htm">МЛСП ПРИРАЗЛОМНАЯ [ULDP]</a>
+    <a href="book/rus/uhsf.htm">МОЛИКПАК [UHSF]</a>
+    <a href="book/rus/uhsd.htm">ЛУНСКОЕ-ОБТК [UHSD]</a>
+    <a href="book/rus/uirs.htm">Р-111 [UIRS]</a>
+    <a href="book/rus/urft.htm">ТЕРЛЕЦКАЯ [URFT]</a>
+    <a href="book/rus/nav.htm">НАВИГАЦИЯ / INDEX [NAV]</a>
+    "#;
+
+    let mut index = CaicaProcedureIndex::new();
+    index.discover_from_index_text(index_snippet);
+
+    assert_eq!(index.total_entries(), 8);
+    assert_eq!(index.airport_entries(), 1);
+    assert_eq!(index.heliport_vertodrome_entries(), 1);
+    assert_eq!(index.offshore_platform_entries(), 5);
+    assert_eq!(index.navigation_entries(), 1);
+    assert_eq!(index.total_aviation_objects(), 7);
+    assert!(index.verify_arithmetic(), "Arithmetic: 1 + 1 + 5 = 7 aviation objects, 7 + 1 = 8 total");
+}
+
+#[test]
 fn test_parse_uers_saskylakh_arctic_procedures() {
     let baseline_text = include_str!("../tests/fixtures/caica_procedures_russian_baseline.txt");
     let procs = CaicaProcedureProvider::parse_procedure_text(
@@ -280,6 +305,33 @@ fn test_parse_uhna_ayan_far_east_procedures() {
     assert!(stats.path_terminator_histogram.contains_key("CF"));
     assert!(stats.path_terminator_histogram.contains_key("DF"));
     assert!(stats.path_terminator_histogram.contains_key("CA"));
+}
+
+#[test]
+fn test_caica_ats_route_table_parsing_and_graph_analysis() {
+    let ats_csv = r#"
+ROUTE,SEQ,START_FIX,START_LAT,START_LON,END_FIX,END_LAT,END_LON,DIR,MIN_FL,MAX_FL,MEA,NAV_SPEC,FIR
+M864,10,MR,55.9726,37.4146,KLN,56.3500,36.7333,BOTH,180,660,18000,RNAV 5,UUWV
+M864,20,KLN,56.3500,36.7333,SPB,59.8003,30.2625,BOTH,180,660,18000,RNAV 5,ULLL
+B210,10,MR,55.9726,37.4146,KLT,56.7431,60.8028,BOTH,180,660,18000,RNAV 5,USSS
+G370,10,KLT,56.7431,60.8028,TOL,55.0125,82.6508,BOTH,180,660,18000,RNAV 5,UNNT
+N869,10,TOL,55.0125,82.6508,KEM,56.1728,92.4831,BOTH,180,660,18000,RNAV 5,UNKL
+N869,20,KEM,56.1728,92.4831,IRK,52.2681,104.3889,BOTH,180,660,18000,RNAV 5,UIII
+T562,10,IRK,52.2681,104.3889,KHB,48.5281,135.1883,BOTH,180,660,18000,RNAV 5,UHHH
+W31,10,MR,55.9726,37.4146,SCH,43.4499,39.9566,BOTH,180,660,18000,RNAV 5,URRV
+"#;
+
+    let segments = openairac_ingest::caica_ats::CaicaAtsProvider::parse_ats_table(ats_csv)
+        .expect("Must parse ATS table");
+    assert_eq!(segments.len(), 8);
+
+    let summary = openairac_ingest::caica_ats::CaicaAtsProvider::analyze_graph(&segments);
+    assert_eq!(summary.total_routes, 6);
+    assert_eq!(summary.total_segments, 8);
+    assert_eq!(summary.unique_nodes, 8);
+    assert_eq!(summary.bidirectional_segments, 8);
+    assert_eq!(summary.one_way_segments, 0);
+    assert!(summary.validation_errors.is_empty(), "Zero graph validation errors");
 }
 
 #[test]

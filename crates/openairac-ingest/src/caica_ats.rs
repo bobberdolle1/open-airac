@@ -18,10 +18,20 @@ use openairac_model::{
     AirwayLegId, CanonicalAirwayLeg, SourceSnapshot, SourceSnapshotId, TemporalValidity,
 };
 use openairac_store::WorldStore;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 
-/// Directionality of an airway segment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Summary and validation analysis of the Russian ATS route graph.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CaicaAtsGraphSummary {
+    pub total_routes: usize,
+    pub total_segments: usize,
+    pub unique_nodes: usize,
+    pub one_way_segments: usize,
+    pub bidirectional_segments: usize,
+    pub validation_errors: Vec<String>,
+}
 pub enum AirwayDirectionality {
     Both,
     ForwardOnly,
@@ -157,6 +167,44 @@ impl CaicaAtsProvider {
         }
 
         Ok(segments)
+    }
+
+    /// Analyze and validate the ATS route network graph.
+    pub fn analyze_graph(segments: &[CaicaAtsSegment]) -> CaicaAtsGraphSummary {
+        let mut routes = BTreeSet::new();
+        let mut nodes = BTreeSet::new();
+        let mut one_way = 0;
+        let mut bi = 0;
+        let mut errors = Vec::new();
+
+        for seg in segments {
+            routes.insert(seg.route_designator.clone());
+            nodes.insert(seg.start_fix.clone());
+            nodes.insert(seg.end_fix.clone());
+
+            if seg.start_fix == seg.end_fix {
+                errors.push(format!(
+                    "Self-loop on route {} fix {}",
+                    seg.route_designator, seg.start_fix
+                ));
+            }
+
+            match seg.directionality {
+                AirwayDirectionality::Both => bi += 1,
+                AirwayDirectionality::ForwardOnly | AirwayDirectionality::BackwardOnly => {
+                    one_way += 1
+                }
+            }
+        }
+
+        CaicaAtsGraphSummary {
+            total_routes: routes.len(),
+            total_segments: segments.len(),
+            unique_nodes: nodes.len(),
+            one_way_segments: one_way,
+            bidirectional_segments: bi,
+            validation_errors: errors,
+        }
     }
 
     /// Ingest ATS segments into WorldStore.
