@@ -1,5 +1,34 @@
 # Changelog
 
+## 1.5.0 — 2026-08-20
+
+### OpenAIRAC Map Foundation & Little Navmap SQLite Target Verification
+
+- **Official OpenAIRAC Map Fork (`bobberdolle1/openairac-map`)**:
+  - Created GPL-3.0 compliant fork of Little Navmap with preserved upstream credits and mergeability.
+  - Established `NavigationProvider` abstraction separating OpenAIRAC, Simulator Scenery, and optional Navigraph data.
+  - Set OpenAIRAC as the default and preferred navigation provider on fresh installations.
+  - Integrated OpenAIRAC Provenance (`ProvenanceManager`) and Coverage Diagnostics (`CoverageManager`) into airport and navaid information panels.
+  - Built atomic database replacement and rollback workflow in `OpenAiracDbManager`.
+
+- **Database Identity & Physical Separation**:
+  - Discontinued reliance on Navigraph database filenames: OpenAIRAC now compiles directly to `openairac.sqlite` (with `little_navmap_openairac.db` compatibility alias).
+  - Strict physical isolation: OpenAIRAC and Navigraph databases are separate files and never overwrite each other.
+
+- **Complete SQLite Schema v14.29 Implementation (`openairac-export-lnm`)**:
+  - Full alignment with Little Navmap / atools 4.0.18 / 3.0.18 SQLite schema across all 31 tables.
+  - Full export of Instrument Terminal Procedures (SIDs, STARs, Approaches) into `approach`, `approach_leg`, `transition`, and `transition_leg` tables.
+  - Added spatial coordinate bounds and endpoint coordinates to `airway` table.
+
+- **Unmodified Little Navmap 3.0.18 Acceptance**:
+  - Verified against unmodified upstream binary (`LittleNavmap-win64-3.0.18`) on real cycle 2608 data: opens cleanly with zero integrity errors, valid metadata, and zero crashes.
+  - Verified truthful missing procedure behavior for France SIA AIXM baseline (LFPG has 0 terminal procedures with explicit diagnostic reason; zero synthetic procedures fabricated).
+  - Integrated deterministic acceptance test suite `real_acceptance.rs`.
+
+- **Documentation & Future Roadmap**:
+  - Published `docs/OPENAIRAC_INTEGRATION.md`, `docs/MAP_INTEGRATION.md`, `docs/UPSTREAM_SYNC.md`, and `docs/EFB_ROADMAP.md`.
+  - Published comprehensive evidence matrix in `docs/OPENAIRAC_MAP_ACCEPTANCE.md`.
+
 ## 1.4.0 — 2026-08-20
 
 ### Reality Gate / First Real Non-US Aeronautical Dataset Integration

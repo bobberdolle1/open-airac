@@ -666,8 +666,11 @@ pub mod registry {
                             subdir: String::new(),
                         },
                     ],
-                    required_artifacts: vec!["little_navmap_openairac.db".to_string()],
-                    optional_artifacts: vec!["cycle.json".to_string()],
+                    required_artifacts: vec!["openairac.sqlite".to_string()],
+                    optional_artifacts: vec![
+                        "little_navmap_openairac.db".to_string(),
+                        "cycle.json".to_string(),
+                    ],
                     version_constraints: vec![VersionConstraint {
                         min: Some("3.0".to_string()),
                         max: None,

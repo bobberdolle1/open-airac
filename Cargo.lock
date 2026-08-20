@@ -1463,6 +1463,7 @@ dependencies = [
  "chrono",
  "openairac-export",
  "openairac-export-xplane",
+ "openairac-ingest",
  "openairac-model",
  "openairac-store",
  "rusqlite",

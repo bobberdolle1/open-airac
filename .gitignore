@@ -29,3 +29,7 @@ tools/littlenavmap-app/
 
 tools/lnm-test-env/
 gate/
+tools/unmodified-lnm/
+tools/test-settings/
+tools/test-logs/
+tools/upstream_lnm_schema.sql
