@@ -1,4 +1,8 @@
+pub mod airac;
+pub mod fra;
 pub mod policy;
+pub use airac::*;
+pub use fra::*;
 pub use policy::*;
 
 use chrono::{DateTime, Utc};
@@ -380,6 +384,31 @@ pub fn nominal_heading_from_designator(designator: &str) -> Option<f64> {
     None
 }
 
+/// Classification tiers for airports and landing facilities.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AirportTier {
+    CertifiedNavigationAirport,
+    PublicCivilAirport,
+    RegionalAirport,
+    Airfield,
+    Heliport,
+    Closed,
+}
+
+impl AirportTier {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::CertifiedNavigationAirport => "certified_navigation_airport",
+            Self::PublicCivilAirport => "public_civil_airport",
+            Self::RegionalAirport => "regional_airport",
+            Self::Airfield => "airfield",
+            Self::Heliport => "heliport",
+            Self::Closed => "closed",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CanonicalAirport {
     pub id: AirportId,
@@ -393,6 +422,24 @@ pub struct CanonicalAirport {
     pub municipality: Option<String>,
     pub runways: Vec<CanonicalRunway>,
     pub temporal: TemporalValidity,
+}
+
+impl CanonicalAirport {
+    pub fn tier(&self) -> AirportTier {
+        if self.airport_type.eq_ignore_ascii_case("heliport") {
+            AirportTier::Heliport
+        } else if self.airport_type.eq_ignore_ascii_case("closed") {
+            AirportTier::Closed
+        } else if self.airport_type.eq_ignore_ascii_case("large_airport") {
+            AirportTier::CertifiedNavigationAirport
+        } else if self.airport_type.eq_ignore_ascii_case("medium_airport") {
+            AirportTier::PublicCivilAirport
+        } else if self.airport_type.eq_ignore_ascii_case("small_airport") {
+            AirportTier::RegionalAirport
+        } else {
+            AirportTier::Airfield
+        }
+    }
 }
 
 /// Canonical Airway Segment (one leg of an enroute airway, ARINC 424 `ER`).

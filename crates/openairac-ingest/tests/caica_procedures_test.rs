@@ -2,7 +2,9 @@
 //! Local AIP Vault, RSBN Radio Navigation, and Mixed AIRAC Cycle Provenance.
 
 use chrono::Utc;
-use openairac_ingest::caica_procedures::{CaicaAltitudeConstraint, CaicaProcedureProvider};
+use openairac_ingest::caica_procedures::{
+    CaicaAltitudeConstraint, CaicaProcedureIndex, CaicaProcedureProvider,
+};
 use openairac_ingest::caica_rsbn::CaicaRsbnProvider;
 use openairac_ingest::local_vault::LocalAipVault;
 use openairac_procedures::ProcedureKind;
@@ -184,6 +186,100 @@ fn test_parse_ustj_canary_airac_2608() {
     assert_eq!(p.airport_ru_name.as_deref(), Some("ТОБОЛЬСК РЕМИЗОВ"));
     assert_eq!(p.procedure_ident, "GIRUS 1A");
     assert_eq!(p.legs.len(), 3);
+}
+
+#[test]
+fn test_dynamic_caica_procedure_index_discovery() {
+    let sample_index_html = r#"
+    <html>
+    <body>
+    <a href="book/rus/uuee.htm">МОСКВА (ШЕРЕМЕТЬЕВО) / MOSCOW (SHEREMETYEVO) [UUEE]</a>
+    <a href="book/rus/uers.htm">САСКЫЛАХ / SASKYLAKH [UERS]</a>
+    <a href="book/rus/uhna.htm">АЯН (МУНУК) / AYAN (MUNUK) [UHNA]</a>
+    <a href="book/rus/uhma.htm">АНАДЫРЬ (УГОЛЬНЫЙ) / ANADYR (UGOLNY) [UHMA]</a>
+    <a href="book/rus/ustj.htm">ТОБОЛЬСК (РЕМИЗОВ) / TOBOLSK (REMIZOV) [USTJ]</a>
+    </body>
+    </html>
+    "#;
+
+    let mut index = CaicaProcedureIndex::new();
+    let discovered = index.discover_from_index_text(sample_index_html);
+    assert_eq!(discovered, 5);
+    assert_eq!(index.airports.len(), 5);
+    assert!(index.airports.iter().any(|a| a.icao == "UERS"));
+    assert!(index.airports.iter().any(|a| a.icao == "UHNA"));
+    assert!(index.airports.iter().any(|a| a.icao == "UHMA"));
+    assert!(index.airports.iter().any(|a| a.icao == "USTJ"));
+    assert!(index.airports.iter().any(|a| a.icao == "UUEE"));
+}
+
+#[test]
+fn test_parse_uers_saskylakh_arctic_procedures() {
+    let baseline_text = include_str!("../tests/fixtures/caica_procedures_russian_baseline.txt");
+    let procs = CaicaProcedureProvider::parse_procedure_text(
+        baseline_text,
+        "UUEE",
+        ProcedureKind::Sid,
+        "CAICA National Collection (AIRAC 2608)",
+    )
+    .expect("Must parse national baseline");
+
+    let uers_procs: Vec<_> = procs.iter().filter(|p| p.airport_icao == "UERS").collect();
+    assert!(
+        !uers_procs.is_empty(),
+        "UERS must be discovered in national baseline"
+    );
+
+    let sid = uers_procs
+        .iter()
+        .find(|p| p.procedure_ident == "LENA 1A")
+        .expect("UERS LENA 1A");
+    assert_eq!(sid.procedure_kind, ProcedureKind::Sid);
+    assert_eq!(sid.airport_ru_name.as_deref(), Some("САСКЫЛАХ"));
+    assert_eq!(sid.legs.len(), 3);
+
+    let app = uers_procs
+        .iter()
+        .find(|p| p.procedure_ident == "RNP 04")
+        .expect("UERS RNP 04");
+    assert_eq!(app.procedure_kind, ProcedureKind::Approach);
+    assert_eq!(app.legs[2].vertical_angle_deg, Some(-3.0));
+    assert_eq!(app.legs[2].tch_ft, Some(50.0));
+}
+
+#[test]
+fn test_parse_uhna_ayan_far_east_procedures() {
+    let baseline_text = include_str!("../tests/fixtures/caica_procedures_russian_baseline.txt");
+    let procs = CaicaProcedureProvider::parse_procedure_text(
+        baseline_text,
+        "UUEE",
+        ProcedureKind::Sid,
+        "CAICA National Collection (AIRAC 2608)",
+    )
+    .expect("Must parse national baseline");
+
+    let uhna_procs: Vec<_> = procs.iter().filter(|p| p.airport_icao == "UHNA").collect();
+    assert!(
+        !uhna_procs.is_empty(),
+        "UHNA must be discovered in national baseline"
+    );
+
+    let sid = uhna_procs
+        .iter()
+        .find(|p| p.procedure_ident == "AYAN 1A")
+        .expect("UHNA AYAN 1A");
+    assert_eq!(sid.procedure_kind, ProcedureKind::Sid);
+    assert_eq!(sid.airport_ru_name.as_deref(), Some("АЯН МУНУК"));
+
+    let stats = CaicaProcedureIndex::compute_national_statistics(&procs);
+    assert!(stats.total_airports_discovered >= 10);
+    assert!(stats.total_procedures >= 20);
+    assert!(stats.total_legs >= 60);
+    assert!(stats.path_terminator_histogram.contains_key("IF"));
+    assert!(stats.path_terminator_histogram.contains_key("TF"));
+    assert!(stats.path_terminator_histogram.contains_key("CF"));
+    assert!(stats.path_terminator_histogram.contains_key("DF"));
+    assert!(stats.path_terminator_histogram.contains_key("CA"));
 }
 
 #[test]

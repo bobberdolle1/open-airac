@@ -29,7 +29,7 @@
 //!   checks reject the layer.
 
 use anyhow::{Context, Result, bail};
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, Utc};
 use openairac_model::*;
 use openairac_store::WorldStore;
 use serde::{Deserialize, Serialize};
@@ -82,12 +82,7 @@ impl ExportReport {
 /// Verified against published cycle dates: 2513 effective 2025-12-25,
 /// 2601 effective 2026-01-22, 2608 effective 2026-08-06 (FAA CIFP Readme).
 pub fn airac_cycle(date: DateTime<Utc>) -> String {
-    let epoch = NaiveDate::from_ymd_opt(2020, 1, 30).expect("static date");
-    let days = date.date_naive().signed_duration_since(epoch).num_days();
-    let cycle_index = days / 28;
-    let year = 2020 + cycle_index / 13;
-    let number = cycle_index % 13 + 1;
-    format!("{}{:02}", year % 100, number)
+    openairac_model::AiracCycleInfo::for_date(date).cycle
 }
 
 /// A 2-character ICAO 7910 region code. Also accepts the US one-letter

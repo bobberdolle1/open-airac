@@ -42,3 +42,6 @@ id,ident,type,name,latitude_deg,longitude_deg,elevation_ft,continent,iso_country
 10028,URMM,large_airport,Mineralnye Vody Airport,44.225,43.081944,1053,EU,RU,STA,Mineralnye Vody,yes,URMM,MRV,URMM,,,
 10029,URMG,large_airport,Grozny Airport,43.34,45.7,548,EU,RU,CHE,Grozny,yes,URMG,GRV,URMG,,,
 10030,URML,large_airport,Makhachkala Uytash Airport,42.816667,47.652222,13,EU,RU,DAG,Makhachkala,yes,URML,MCX,URML,,,
+10031,UERS,medium_airport,Saskylakh Airport,71.980000,114.080000,75,EU,RU,SAH,Saskylakh,yes,UERS,SYS,UERS,,,
+10032,UHNA,medium_airport,Ayan Munuk Airport,56.450000,138.160000,105,EU,RU,KHA,Ayan,yes,UHNA,AYN,UHNA,,,
+10033,UHMA,large_airport,Ugolny Airport,64.733333,177.733333,115,EU,RU,CHU,Anadyr,yes,UHMA,DYR,UHMA,,,

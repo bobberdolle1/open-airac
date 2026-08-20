@@ -21,6 +21,7 @@ use openairac_model::{
 };
 use openairac_procedures::ProcedureKind;
 use openairac_store::WorldStore;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
@@ -75,6 +76,207 @@ pub struct CaicaParsedProcedure {
     pub source_doc_title: String,
 }
 
+/// Discovered Russian airport entry from official CAICA ProcedureList index.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaicaDiscoveredAirport {
+    pub icao: String,
+    pub name_ru: String,
+    pub name_en: Option<String>,
+    pub source_page_url: String,
+    pub has_sids: bool,
+    pub has_stars: bool,
+    pub has_approaches: bool,
+    pub airac_cycle: Option<String>,
+}
+
+/// National statistics summary across all parsed Russian CAICA procedures.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CaicaNationalStatistics {
+    pub total_airports_discovered: usize,
+    pub airports_with_sids: usize,
+    pub airports_with_stars: usize,
+    pub airports_with_approaches: usize,
+    pub total_procedures: usize,
+    pub total_sids: usize,
+    pub total_stars: usize,
+    pub total_approaches: usize,
+    pub total_legs: usize,
+    pub total_holds: usize,
+    pub path_terminator_histogram: std::collections::BTreeMap<String, usize>,
+    pub row_revision_histogram: std::collections::BTreeMap<String, usize>,
+    pub rejected_pages_count: usize,
+    pub rejection_reasons: Vec<String>,
+}
+
+/// Dynamic indexer for official CAICA ProcedureList navigation collections.
+#[derive(Debug, Clone, Default)]
+pub struct CaicaProcedureIndex {
+    pub airports: Vec<CaicaDiscoveredAirport>,
+}
+
+impl CaicaProcedureIndex {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Discover airports from official CAICA ProcedureList HTML navigation index.
+    pub fn discover_from_index_text(&mut self, html_text: &str) -> usize {
+        let mut count = 0;
+        for line in html_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+
+            // Example patterns:
+            // <a href="book/rus/uhna.htm">АЯН (МУНУК) / AYAN (MUNUK) [UHNA]</a>
+            // UERS | САСКЫЛАХ | SASKYLAKH | book/rus/uers.htm | SID,STAR,APCH | 2608
+            if trimmed.contains('|') {
+                let parts: Vec<&str> = trimmed.split('|').map(|s| s.trim()).collect();
+                if parts.len() >= 4 {
+                    let icao = parts[0].to_uppercase();
+                    let ru_name = parts[1].to_string();
+                    let en_name = if !parts[2].is_empty() {
+                        Some(parts[2].to_string())
+                    } else {
+                        None
+                    };
+                    let url = parts[3].to_string();
+                    let procs_str = if parts.len() > 4 {
+                        parts[4].to_uppercase()
+                    } else {
+                        "SID,STAR,APCH".to_string()
+                    };
+                    let cycle = if parts.len() > 5 {
+                        Some(parts[5].to_string())
+                    } else {
+                        None
+                    };
+
+                    let discovered = CaicaDiscoveredAirport {
+                        icao: icao.clone(),
+                        name_ru: ru_name,
+                        name_en: en_name,
+                        source_page_url: url,
+                        has_sids: procs_str.contains("SID"),
+                        has_stars: procs_str.contains("STAR"),
+                        has_approaches: procs_str.contains("APCH")
+                            || procs_str.contains("RNP")
+                            || procs_str.contains("APP"),
+                        airac_cycle: cycle,
+                    };
+
+                    if !self.airports.iter().any(|a| a.icao == icao) {
+                        self.airports.push(discovered);
+                        count += 1;
+                    }
+                }
+            } else if let Some(href_idx) = trimmed.find("href=\"") {
+                let rest = &trimmed[href_idx + 6..];
+                if let Some(end_quote) = rest.find('\"') {
+                    let url = rest[..end_quote].to_string();
+                    // Extract ICAO from url or link text
+                    let link_text = if let Some(tag_end) = rest.find('>') {
+                        if let Some(closing) = rest.find("</a>") {
+                            &rest[tag_end + 1..closing]
+                        } else {
+                            ""
+                        }
+                    } else {
+                        ""
+                    };
+
+                    let icao = if let Some(open_b) = link_text.find('[') {
+                        if let Some(close_b) = link_text.find(']') {
+                            link_text[open_b + 1..close_b].trim().to_uppercase()
+                        } else {
+                            url.trim_end_matches(".htm")
+                                .trim_start_matches("book/rus/")
+                                .to_uppercase()
+                        }
+                    } else {
+                        url.trim_end_matches(".htm")
+                            .trim_start_matches("book/rus/")
+                            .to_uppercase()
+                    };
+
+                    if icao.len() == 4
+                        && icao.starts_with('U')
+                        && !self.airports.iter().any(|a| a.icao == icao)
+                    {
+                        self.airports.push(CaicaDiscoveredAirport {
+                            icao,
+                            name_ru: link_text.to_string(),
+                            name_en: None,
+                            source_page_url: url,
+                            has_sids: true,
+                            has_stars: true,
+                            has_approaches: true,
+                            airac_cycle: Some("2608".to_string()),
+                        });
+                        count += 1;
+                    }
+                }
+            }
+        }
+        count
+    }
+
+    /// Compute comprehensive national procedure statistics.
+    pub fn compute_national_statistics(
+        procedures: &[CaicaParsedProcedure],
+    ) -> CaicaNationalStatistics {
+        let mut stats = CaicaNationalStatistics::default();
+        let mut apt_set = std::collections::BTreeSet::new();
+        let mut sid_apts = std::collections::BTreeSet::new();
+        let mut star_apts = std::collections::BTreeSet::new();
+        let mut app_apts = std::collections::BTreeSet::new();
+
+        for p in procedures {
+            apt_set.insert(p.airport_icao.clone());
+            stats.total_procedures += 1;
+            match p.procedure_kind {
+                ProcedureKind::Sid => {
+                    stats.total_sids += 1;
+                    sid_apts.insert(p.airport_icao.clone());
+                }
+                ProcedureKind::Star => {
+                    stats.total_stars += 1;
+                    star_apts.insert(p.airport_icao.clone());
+                }
+                ProcedureKind::Approach => {
+                    stats.total_approaches += 1;
+                    app_apts.insert(p.airport_icao.clone());
+                }
+            }
+
+            for leg in &p.legs {
+                stats.total_legs += 1;
+                *stats
+                    .path_terminator_histogram
+                    .entry(leg.path_terminator.clone())
+                    .or_insert(0) += 1;
+                if leg.path_terminator == "HM"
+                    || leg.path_terminator == "HA"
+                    || leg.path_terminator == "HF"
+                {
+                    stats.total_holds += 1;
+                }
+                if let Some(rev) = &leg.airac_row_cycle {
+                    *stats.row_revision_histogram.entry(rev.clone()).or_insert(0) += 1;
+                }
+            }
+        }
+
+        stats.total_airports_discovered = apt_set.len();
+        stats.airports_with_sids = sid_apts.len();
+        stats.airports_with_stars = star_apts.len();
+        stats.airports_with_approaches = app_apts.len();
+
+        stats
+    }
+}
+
 /// Provider for Russian Federation CAICA official structured procedure publications.
 pub struct CaicaProcedureProvider {
     pub provider_name: String,
@@ -118,15 +320,16 @@ impl CaicaProcedureProvider {
                 continue;
             }
             if trimmed.starts_with('#') || trimmed.starts_with("//") {
-                // Check if comment line names an airport: e.g. "# ... UUDD / DOMODEDOVO"
-                let up = trimmed.to_uppercase();
-                for icao in [
-                    "UUEE", "UUDD", "UUWW", "ULLI", "ULMM", "ULAA", "UWKD", "UWWW", "UWUU", "USSS",
-                    "USCC", "USPP", "UNNT", "UNOO", "USTJ", "USRR", "USNN", "UNKL", "UIII", "UIBB",
-                    "UHHH", "UHWW", "UHPP", "UHSS", "UHMM", "UEEE", "URSS", "URMM", "URMG", "URML",
-                ] {
-                    if up.contains(icao) {
-                        clean_icao = icao.to_string();
+                // Extract any 4-letter Russian ICAO code starting with 'U' from comment lines
+                let words: Vec<&str> = trimmed
+                    .split(|c: char| !c.is_ascii_alphanumeric())
+                    .collect();
+                for w in words {
+                    if w.len() == 4
+                        && w.starts_with('U')
+                        && w.chars().all(|c| c.is_ascii_uppercase())
+                    {
+                        clean_icao = w.to_string();
                         break;
                     }
                 }
@@ -169,39 +372,17 @@ impl CaicaProcedureProvider {
                             || key.contains("АЭРОПОРТ")
                         {
                             let ru_name = val.clone();
-                            let up_ru = ru_name.to_uppercase();
-                            if up_ru.contains("ШЕРЕМЕТЬЕВО") || up_ru.contains("SVO") {
-                                clean_icao = "UUEE".to_string();
-                            } else if up_ru.contains("ДОМОДЕДОВО") || up_ru.contains("DME")
-                            {
-                                clean_icao = "UUDD".to_string();
-                            } else if up_ru.contains("ВНУКОВО") || up_ru.contains("VKO") {
-                                clean_icao = "UUWW".to_string();
-                            } else if up_ru.contains("ПУЛКОВО") || up_ru.contains("LED") {
-                                clean_icao = "ULLI".to_string();
-                            } else if up_ru.contains("КОЛЬЦОВО") || up_ru.contains("SVX") {
-                                clean_icao = "USSS".to_string();
-                            } else if up_ru.contains("ТОЛМАЧЕВО") || up_ru.contains("OVB")
-                            {
-                                clean_icao = "UNNT".to_string();
-                            } else if up_ru.contains("ТОБОЛЬСК") || up_ru.contains("РЕМИЗОВ")
-                            {
-                                clean_icao = "USTJ".to_string();
-                            } else if up_ru.contains("ХАБАРОВСК") || up_ru.contains("KHV")
-                            {
-                                clean_icao = "UHHH".to_string();
-                            } else if up_ru.contains("ПЕТРОПАВЛОВСК") || up_ru.contains("PKC")
-                            {
-                                clean_icao = "UHPP".to_string();
-                            } else if up_ru.contains("ЯКУТСК") || up_ru.contains("YKS") {
-                                clean_icao = "UEEE".to_string();
-                            } else if up_ru.contains("СОЧИ") || up_ru.contains("AER") {
-                                clean_icao = "URSS".to_string();
-                            } else if up_ru.contains("КРАСНОЯРСК") || up_ru.contains("KJA")
-                            {
-                                clean_icao = "UNKL".to_string();
-                            } else if up_ru.contains("ИРКУТСК") || up_ru.contains("IKT") {
-                                clean_icao = "UIII".to_string();
+                            let words: Vec<&str> = ru_name
+                                .split(|c: char| !c.is_ascii_alphanumeric())
+                                .collect();
+                            for w in words {
+                                if w.len() == 4
+                                    && w.starts_with('U')
+                                    && w.chars().all(|c| c.is_ascii_uppercase())
+                                {
+                                    clean_icao = w.to_string();
+                                    break;
+                                }
                             }
                             airport_ru_name = Some(ru_name);
                         }
