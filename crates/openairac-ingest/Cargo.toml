@@ -13,6 +13,7 @@ openairac-magnetic = { path = "../openairac-magnetic" }
 openairac-procedures = { path = "../openairac-procedures" }
 csv.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 chrono.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true

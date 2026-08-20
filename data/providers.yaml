@@ -253,6 +253,90 @@ providers:
       mora: false
     source_uri_pattern: "https://aip.enaire.es/"
     notes: "Spanish ENAIRE AIP tabular procedure descriptions; redistribution restricted without prior written authorization, local use only."
+
+  RU_CAICA_PROCEDURES:
+    name: "RU_CAICA_PROCEDURES"
+    namespace: "caica_proc"
+    jurisdiction: "RU"
+    authority: "ФАВТ / Росавиация / ЦАИ (Центр Аэронавигационной Информации)"
+    format: "caica_html"
+    airac_cadence: "28-day AIRAC"
+    license_id: "CAICA-TermsOfUse"
+    redistribution: "local_only"
+    derivative_work_allowed: true
+    attribution_required: true
+    attribution_notice: "ФГУП «Госкорпорация по ОрВД» / Центр Аэронавигационной Информации (ЦАИ)"
+    is_local_only: true
+    coverage:
+      airports: false
+      runways: false
+      navaids: false
+      fixes: true
+      airways: false
+      sids: true
+      stars: true
+      approaches: true
+      lpv_fas: false
+      msa: false
+      mora: false
+    source_uri_pattern: "http://www.caica.ru/"
+    notes: "Official Russian Federation RNAV procedure coding collection; open access publication, strictly Local-Only for derived navigation data unless explicit redistribution permission granted."
+
+  RU_CAICA:
+    name: "RU_CAICA"
+    namespace: "caica"
+    jurisdiction: "RU"
+    authority: "ФГУП «Госкорпорация по ОрВД» / Центр Аэронавигационной Информации (ЦАИ)"
+    format: "caica_html"
+    airac_cadence: "28-day AIRAC"
+    license_id: "CAICA-TermsOfUse"
+    redistribution: "local_only"
+    derivative_work_allowed: true
+    attribution_required: true
+    attribution_notice: "ФГУП «Госкорпорация по ОрВД» / ЦАИ"
+    is_local_only: true
+    coverage:
+      airports: true
+      runways: true
+      navaids: true
+      fixes: true
+      airways: true
+      sids: true
+      stars: true
+      approaches: true
+      lpv_fas: true
+      msa: true
+      mora: false
+    source_uri_pattern: "http://www.caica.ru/"
+    notes: "Comprehensive Russian Federation aeronautical data provider in Local AIP Vault."
+
+  RU_ARNAD_LOCAL:
+    name: "RU_ARNAD_LOCAL"
+    namespace: "arnad_local"
+    jurisdiction: "RU"
+    authority: "ЦАИ / ARNAD"
+    format: "arinc424"
+    airac_cadence: "28-day AIRAC"
+    license_id: "ARNAD-Commercial-License"
+    redistribution: "local_only"
+    derivative_work_allowed: true
+    attribution_required: true
+    attribution_notice: "ЦАИ ARNAD (Local Use Only)"
+    is_local_only: true
+    coverage:
+      airports: true
+      runways: true
+      navaids: true
+      fixes: true
+      airways: true
+      sids: true
+      stars: true
+      approaches: true
+      lpv_fas: true
+      msa: true
+      mora: true
+    source_uri_pattern: null
+    notes: "User-supplied commercial ARNAD ARINC 424 navigation database for local aircraft interoperability."
   Eurocontrol_EAD:
     name: "Eurocontrol_EAD"
     namespace: "ead"

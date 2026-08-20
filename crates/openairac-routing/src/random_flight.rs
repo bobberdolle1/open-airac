@@ -140,6 +140,96 @@ impl AircraftProfile {
         }
     }
 
+    pub fn tu154() -> Self {
+        Self {
+            name: "Tupolev Tu-154M (Soviet Trijet)".to_string(),
+            icao_type: Some("T154".to_string()),
+            aircraft_class: AircraftClass::NarrowbodyJet,
+            min_runway_length_ft: 7500,
+            preferred_runway_length_ft: 8500,
+            min_runway_width_ft: Some(120),
+            min_distance_nm: 250.0,
+            max_distance_nm: 2800.0,
+            preferred_distance_nm: Some(1000.0),
+            requires_hard_surface: true,
+            requires_ifr: true,
+            requires_tower: false,
+            cruise_speed_kts: Some(460),
+        }
+    }
+
+    pub fn il76() -> Self {
+        Self {
+            name: "Ilyushin Il-76MD (Heavy Transport)".to_string(),
+            icao_type: Some("IL76".to_string()),
+            aircraft_class: AircraftClass::WidebodyJet,
+            min_runway_length_ft: 6500,
+            preferred_runway_length_ft: 8000,
+            min_runway_width_ft: Some(120),
+            min_distance_nm: 400.0,
+            max_distance_nm: 3600.0,
+            preferred_distance_nm: Some(1500.0),
+            requires_hard_surface: false, // Unpaved capable
+            requires_ifr: true,
+            requires_tower: false,
+            cruise_speed_kts: Some(430),
+        }
+    }
+
+    pub fn il96() -> Self {
+        Self {
+            name: "Ilyushin Il-96-300 (Long-Haul Widebody)".to_string(),
+            icao_type: Some("IL96".to_string()),
+            aircraft_class: AircraftClass::B747Class,
+            min_runway_length_ft: 8500,
+            preferred_runway_length_ft: 10000,
+            min_runway_width_ft: Some(150),
+            min_distance_nm: 800.0,
+            max_distance_nm: 6200.0,
+            preferred_distance_nm: Some(3000.0),
+            requires_hard_surface: true,
+            requires_ifr: true,
+            requires_tower: true,
+            cruise_speed_kts: Some(470),
+        }
+    }
+
+    pub fn an24() -> Self {
+        Self {
+            name: "Antonov An-24RV (Regional Turboprop)".to_string(),
+            icao_type: Some("AN24".to_string()),
+            aircraft_class: AircraftClass::Turboprop,
+            min_runway_length_ft: 4500,
+            preferred_runway_length_ft: 5500,
+            min_runway_width_ft: None,
+            min_distance_nm: 80.0,
+            max_distance_nm: 1200.0,
+            preferred_distance_nm: Some(400.0),
+            requires_hard_surface: false, // Gravel / unpaved capable
+            requires_ifr: false,
+            requires_tower: false,
+            cruise_speed_kts: Some(240),
+        }
+    }
+
+    pub fn yak40() -> Self {
+        Self {
+            name: "Yakovlev Yak-40 (Regional Trijet)".to_string(),
+            icao_type: Some("YK40".to_string()),
+            aircraft_class: AircraftClass::RegionalJet,
+            min_runway_length_ft: 4000,
+            preferred_runway_length_ft: 5000,
+            min_runway_width_ft: None,
+            min_distance_nm: 60.0,
+            max_distance_nm: 950.0,
+            preferred_distance_nm: Some(350.0),
+            requires_hard_surface: false,
+            requires_ifr: false,
+            requires_tower: false,
+            cruise_speed_kts: Some(280),
+        }
+    }
+
     /// Evaluates whether an airport satisfies this aircraft's physical suitability constraints.
     pub fn evaluate_airport(&self, airport: &CanonicalAirport) -> (bool, Vec<String>) {
         let mut reasons = Vec::new();

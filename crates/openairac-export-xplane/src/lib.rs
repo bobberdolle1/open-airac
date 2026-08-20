@@ -157,7 +157,8 @@ impl ExportedEntityIndex {
             | NavaidKind::Vordme
             | NavaidKind::Vortac
             | NavaidKind::Tacan
-            | NavaidKind::Dme => {
+            | NavaidKind::Dme
+            | NavaidKind::Rsbn => {
                 self.vhf.insert(key);
             }
             NavaidKind::IlsLocalizer | NavaidKind::IlsGlidepath => {}
@@ -1322,7 +1323,11 @@ fn row_code_for(
 ) -> u8 {
     match nav.kind {
         NavaidKind::Ndb => 2,
-        NavaidKind::Vor | NavaidKind::Vordme | NavaidKind::Vortac | NavaidKind::Tacan => 3,
+        NavaidKind::Vor
+        | NavaidKind::Vordme
+        | NavaidKind::Vortac
+        | NavaidKind::Tacan
+        | NavaidKind::Rsbn => 3,
         // Full ILS localizer: row 4; localizer-only approach
         // (LOC/LDA/SDF, no glideslope): row 5. Converter-verified:
         // IBET row 4, IDLG row 5.

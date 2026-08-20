@@ -101,6 +101,7 @@ impl FormatExporter for Kln90bExporter {
                 NavaidKind::IlsLocalizer => ("LOC", format!("{:.3}", nav.frequency.to_mhz())),
                 NavaidKind::IlsGlidepath => ("GS", format!("{:.3}", nav.frequency.to_mhz())),
                 NavaidKind::Tacan => ("TACAN", format!("{:.3}", nav.frequency.to_mhz())),
+                NavaidKind::Rsbn => ("RSBN", format!("{:.3}", nav.frequency.to_mhz())),
             };
 
             nav_dat.push_str(&format!(

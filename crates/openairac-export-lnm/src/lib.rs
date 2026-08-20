@@ -307,7 +307,8 @@ impl FormatExporter for LnmNavdataExporter {
                     NavaidKind::Vor
                     | NavaidKind::Vordme
                     | NavaidKind::Vortac
-                    | NavaidKind::Tacan => {
+                    | NavaidKind::Tacan
+                    | NavaidKind::Rsbn => {
                         let vtype = match nav.service_volume_nm {
                             Some(v) if v >= 100 => "VTH",
                             Some(v) if v >= 30 => "VTL",

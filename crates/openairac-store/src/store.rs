@@ -940,6 +940,7 @@ impl WorldStore {
                             }
                             NavaidKind::Dme => (108_000, 118_000, "DME 108-118 MHz paired"),
                             NavaidKind::Tacan => (108_000, 136_000, "TACAN 108-136 MHz paired"),
+                            NavaidKind::Rsbn => (100_000, 200_000, "RSBN 100-200 MHz"),
                         };
                         if freq < lo || freq > hi {
                             push(

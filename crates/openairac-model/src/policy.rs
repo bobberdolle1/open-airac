@@ -77,6 +77,8 @@ pub enum DatasetFormat {
     CustomJson,
     /// Official procedure coding publication table format (e.g. SIA DATA, ENAIRE tabular).
     ProcedurePublicationPdf,
+    /// Official Russian CAICA HTML procedure coding collection.
+    CaicaHtml,
 }
 
 impl DatasetFormat {
@@ -90,6 +92,7 @@ impl DatasetFormat {
             Self::CustomXml => "custom_xml",
             Self::CustomJson => "custom_json",
             Self::ProcedurePublicationPdf => "procedure_pub_pdf",
+            Self::CaicaHtml => "caica_html",
         }
     }
 }
@@ -582,6 +585,106 @@ impl ProviderRegistry {
                 "Spanish ENAIRE AIP tabular procedure descriptions; redistribution restricted without prior written authorization, local use only."
                     .to_string(),
             ),
+        });
+
+        // 5e. Russian Federation CAICA Official Procedure Coding (Local-Only / BYOD)
+        reg.register(ProviderPolicy {
+            name: "RU_CAICA_PROCEDURES".to_string(),
+            namespace: "caica_proc".to_string(),
+            jurisdiction: "RU".to_string(),
+            authority: "ФАВТ / Росавиация / ЦАИ (Центр Аэронавигационной Информации)".to_string(),
+            format: DatasetFormat::CaicaHtml,
+            airac_cadence: Some("28-day AIRAC".to_string()),
+            license_id: "CAICA-TermsOfUse".to_string(),
+            redistribution: RedistributionPermission::LocalOnly,
+            derivative_work_allowed: true,
+            attribution_required: true,
+            attribution_notice: Some("ФГУП «Госкорпорация по ОрВД» / Центр Аэронавигационной Информации (ЦАИ)".to_string()),
+            is_local_only: true,
+            coverage: ProviderEntityCoverage {
+                airports: false,
+                runways: false,
+                navaids: false,
+                fixes: true,
+                airways: false,
+                sids: true,
+                stars: true,
+                approaches: true,
+                lpv_fas: false,
+                msa: false,
+                mora: false,
+            },
+            source_uri_pattern: Some("http://www.caica.ru/".to_string()),
+            notes: Some(
+                "Official Russian Federation RNAV procedure coding collection; open access publication, strictly Local-Only for derived navigation data unless explicit redistribution permission granted."
+                    .to_string(),
+            ),
+        });
+
+        // 5f. Russian Federation CAICA Full Navigation Provider (Local-Only / BYOD)
+        reg.register(ProviderPolicy {
+            name: "RU_CAICA".to_string(),
+            namespace: "caica".to_string(),
+            jurisdiction: "RU".to_string(),
+            authority: "ФГУП «Госкорпорация по ОрВД» / Центр Аэронавигационной Информации (ЦАИ)"
+                .to_string(),
+            format: DatasetFormat::CaicaHtml,
+            airac_cadence: Some("28-day AIRAC".to_string()),
+            license_id: "CAICA-TermsOfUse".to_string(),
+            redistribution: RedistributionPermission::LocalOnly,
+            derivative_work_allowed: true,
+            attribution_required: true,
+            attribution_notice: Some("ФГУП «Госкорпорация по ОрВД» / ЦАИ".to_string()),
+            is_local_only: true,
+            coverage: ProviderEntityCoverage {
+                airports: true,
+                runways: true,
+                navaids: true,
+                fixes: true,
+                airways: true,
+                sids: true,
+                stars: true,
+                approaches: true,
+                lpv_fas: true,
+                msa: true,
+                mora: false,
+            },
+            source_uri_pattern: Some("http://www.caica.ru/".to_string()),
+            notes: Some(
+                "Comprehensive Russian Federation aeronautical data provider in Local AIP Vault."
+                    .to_string(),
+            ),
+        });
+
+        // 5g. Russian Federation ARNAD Commercial Database (Local-Only / BYOD)
+        reg.register(ProviderPolicy {
+            name: "RU_ARNAD_LOCAL".to_string(),
+            namespace: "arnad_local".to_string(),
+            jurisdiction: "RU".to_string(),
+            authority: "ЦАИ / ARNAD".to_string(),
+            format: DatasetFormat::Arinc424,
+            airac_cadence: Some("28-day AIRAC".to_string()),
+            license_id: "ARNAD-Commercial-License".to_string(),
+            redistribution: RedistributionPermission::LocalOnly,
+            derivative_work_allowed: true,
+            attribution_required: true,
+            attribution_notice: Some("ЦАИ ARNAD (Local Use Only)".to_string()),
+            is_local_only: true,
+            coverage: ProviderEntityCoverage {
+                airports: true,
+                runways: true,
+                navaids: true,
+                fixes: true,
+                airways: true,
+                sids: true,
+                stars: true,
+                approaches: true,
+                lpv_fas: true,
+                msa: true,
+                mora: true,
+            },
+            source_uri_pattern: None,
+            notes: Some("User-supplied commercial ARNAD ARINC 424 navigation database for local aircraft interoperability.".to_string()),
         });
         // 6. Eurocontrol EAD (European AIS Database) - Local-Only / BYOD
         reg.register(ProviderPolicy {

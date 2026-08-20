@@ -107,6 +107,7 @@ fn frequency_in_range(kind: NavaidKind, freq_khz: u32) -> bool {
         NavaidKind::IlsGlidepath => (328_000, 336_000),
         NavaidKind::Dme => (108_000, 118_000),
         NavaidKind::Tacan => (108_000, 136_000),
+        NavaidKind::Rsbn => (100_000, 200_000),
     };
     freq_khz >= lo && freq_khz <= hi
 }

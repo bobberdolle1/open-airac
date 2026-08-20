@@ -1,12 +1,21 @@
 pub mod aixm;
 pub mod aixm45;
+pub mod caica_procedures;
+pub mod caica_rsbn;
 pub mod cifp_discovery;
 pub mod faa_cifp;
+pub mod local_vault;
 pub mod ourairports;
 pub mod provider;
 pub mod registry;
 pub mod sia_procedures;
 pub mod world_composer;
+
+pub use caica_procedures::{
+    CaicaAltitudeConstraint, CaicaParsedProcedure, CaicaProcedureProvider, CaicaRawLegRow,
+};
+pub use caica_rsbn::{CaicaRsbnProvider, ParsedRsbnStation};
+pub use local_vault::{LocalAipVault, VaultEntityCounts, VaultPackageManifest, VaultSourceFile};
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};

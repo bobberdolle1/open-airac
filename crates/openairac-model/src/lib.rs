@@ -210,6 +210,7 @@ pub enum NavaidKind {
     Tacan,
     IlsLocalizer,
     IlsGlidepath,
+    Rsbn,
 }
 
 impl NavaidKind {
@@ -223,6 +224,7 @@ impl NavaidKind {
             NavaidKind::Tacan => "TACAN",
             NavaidKind::IlsLocalizer => "ILS-LOC",
             NavaidKind::IlsGlidepath => "ILS-GS",
+            NavaidKind::Rsbn => "RSBN",
         }
     }
 
@@ -236,6 +238,7 @@ impl NavaidKind {
             "TACAN" => Some(NavaidKind::Tacan),
             "ILS-LOC" | "LOC" | "ILS" => Some(NavaidKind::IlsLocalizer),
             "ILS-GS" | "GS" => Some(NavaidKind::IlsGlidepath),
+            "RSBN" | "РСБН" => Some(NavaidKind::Rsbn),
             _ => None,
         }
     }
@@ -272,6 +275,22 @@ pub struct CanonicalNavaid {
     pub localizer_bearing_true_deg: Option<f64>,
     pub localizer_bearing_mag_deg: Option<f64>,
     pub glideslope_angle_deg: Option<f64>,
+    pub temporal: TemporalValidity,
+}
+
+/// Canonical RSBN (Радиотехническая система ближней навигации) Station.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CanonicalRsbnStation {
+    pub object_id: NavaidId,
+    pub ident: String,
+    pub name: String,
+    pub channel: u8,
+    pub latitude: f64,
+    pub longitude: f64,
+    pub elevation_ft: Option<i32>,
+    pub range_km: Option<f64>,
+    pub associated_airport: Option<String>,
+    pub magnetic_variation_deg: Option<f64>,
     pub temporal: TemporalValidity,
 }
 

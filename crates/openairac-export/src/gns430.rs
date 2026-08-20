@@ -107,7 +107,7 @@ impl FormatExporter for Gns430Exporter {
             let freq_mhz = nav.frequency.to_mhz();
 
             match nav.kind {
-                NavaidKind::Vor | NavaidKind::Vordme | NavaidKind::Vortac => {
+                NavaidKind::Vor | NavaidKind::Vordme | NavaidKind::Vortac | NavaidKind::Rsbn => {
                     navaids_txt.push_str(&format!(
                         "V,{},{},{:.3},H,{:.6},{:.6},{},{:.1},{:.1}\n",
                         nav.ident,

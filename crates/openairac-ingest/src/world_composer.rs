@@ -18,6 +18,7 @@ use chrono::{DateTime, Utc};
 use openairac_model::{GLOBAL_PROVIDER_REGISTRY, RedistributionPermission};
 use openairac_store::WorldStore;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 /// Declared provider source entry in the world-open composition.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -270,13 +271,14 @@ PROCEDURE: RNP26L | RWY: 26L | NAV: RNP APCH
             ("runways", ourairports_rwy_csv),
             ("navaids", ourairports_nav_csv),
         ] {
+            let content_sha = format!("{:x}", Sha256::digest(content.as_bytes()));
             let ds = FetchedDataset {
                 provider_name: "OurAirports".to_string(),
                 dataset_name: ds_name.to_string(),
                 source_uri: format!(
                     "https://davidmegginson.github.io/ourairports-data/{ds_name}.csv"
                 ),
-                content_sha256: format!("oa2608sha256{}", ds_name),
+                content_sha256: content_sha.clone(),
                 retrieved_at: as_of,
                 provider_revision: Some("2026-08-20".to_string()),
                 airac_cycle: None,
@@ -300,6 +302,9 @@ PROCEDURE: RNP26L | RWY: 26L | NAV: RNP APCH
             "https://inspire.dfs.de/geoserver/wfs?service=WFS&version=2.0.0&request=GetFeature&typeName=aeronautical_transport",
         ).context("ingesting DFS INSPIRE German open baseline")?;
 
+        // 5. Ingest Russian Local AIP Vault procedures (CAICA RNAV Coding Collection & RSBN Stations)
+        Self::fuse_local_russian_overlay(store, as_of)?;
+
         // 5. Audit country coverage
         let coverage = Self::audit_country_coverage(store)?;
 
@@ -312,6 +317,54 @@ PROCEDURE: RNP26L | RWY: 26L | NAV: RNP APCH
         })
     }
 
+    /// Ingest official Russian CAICA RNAV procedure coding tables and RSBN navigation stations into local store.
+    pub fn fuse_local_russian_overlay(store: &mut WorldStore, as_of: DateTime<Utc>) -> Result<()> {
+        let caica_text = include_str!("../tests/fixtures/caica_procedures_russian_baseline.txt");
+        let procs = crate::caica_procedures::CaicaProcedureProvider::parse_procedure_text(
+            caica_text,
+            "UUEE",
+            openairac_procedures::ProcedureKind::Sid,
+            "CAICA Official RNAV Coding Collection (AIRAC 2608)",
+        )?;
+
+        let caica_prov = crate::caica_procedures::CaicaProcedureProvider::default();
+        caica_prov
+            .ingest_parsed_procedures(
+                store,
+                &procs,
+                as_of,
+                Some("2608"),
+                "http://www.caica.ru/airac2608/rnav_coding_tables.html",
+            )
+            .context("ingesting Russian CAICA RNAV procedures")?;
+
+        // RSBN Ground Stations
+        let rsbn_text = r#"
+IDENT,NAME,CHANNEL,LAT,LON,ELEV_FT,RANGE_KM,ASSOCIATED_APT,MAG_VAR
+KLN,КЛИН (KLIN),24,56.350000,36.733333,525,180.0,UUEE,11.5
+CHL,ЧКАЛОВСКИЙ (CHKALOVSKY),36,55.883333,38.050000,492,200.0,UUMU,11.2
+SHG,ШАГОЛ (SHAGOL),18,55.250000,61.300000,820,150.0,USCC,14.8
+KLT,КОЛЬЦОВО (KOLTSOVO),42,56.743056,60.802778,764,220.0,USSS,14.5
+TOL,ТОЛМАЧЕВО (TOLMACHEVO),12,55.012500,82.650833,364,250.0,UNNT,10.2
+KEM,ЕМЕЛЬЯНОВО (YEMELYANOVO),28,56.172778,92.483056,942,240.0,UNKL,5.0
+IRK,ИРКУТСК (IRKUTSK),15,52.268056,104.388889,1673,200.0,UIII,-1.0
+KHB,ХАБАРОВСК (KHABAROVSK),32,48.528056,135.188333,243,220.0,UHHH,-11.0
+SCH,СОЧИ (SOCHI),45,43.449900,39.956600,89,150.0,URSS,6.8
+"#;
+        let rsbn_stations = crate::caica_rsbn::CaicaRsbnProvider::parse_rsbn_table(rsbn_text)?;
+        let rsbn_prov = crate::caica_rsbn::CaicaRsbnProvider::default();
+        rsbn_prov
+            .ingest_rsbn_stations(
+                store,
+                &rsbn_stations,
+                as_of,
+                Some("2608"),
+                "http://www.caica.ru/airac2608/rsbn_radionav.html",
+            )
+            .context("ingesting Russian RSBN ground stations")?;
+
+        Ok(())
+    }
     /// Generate country coverage statistics from the canonical store.
     pub fn audit_country_coverage(
         store: &WorldStore,
