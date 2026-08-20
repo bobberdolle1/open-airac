@@ -93,9 +93,13 @@ GENERATOR=OpenAIRAC KLN90B Exporter v1.0
 FINGERPRINT=fp-kln90b-2608-1786707660
 ```
 
-## Integration and Verification
+## Integration, Forensic Loader Analysis & Maturity
 
-Target ID: `kln90b`
-Support State: `SUPPORTED`
-Validation Strategy: `HashVerify` (all files verified against generated hashes before activation).
-Installer: Staging -> transactional swap -> atomic rollback on failure.
+- **Target ID**: `kln90b`
+- **Support State**: `EXPERIMENTAL`
+- **Forensic Loader Architecture**:
+  - Open-source KLN90B GPS implementations (e.g. Project Tupolev Tu-154, vasFMC) historically ingest either PSS-format files (`PSSAPT.dat`, `PSSNAV.dat`, `PSSWPT.dat`, `PSSAWY.dat`) or compile them at first gauge initialization into internal binary index cache files (`PTT_APT.DAT`, `PTT_VOR.DAT`, `PTT_NDB.DAT`, `PTT_WPT.DAT`, `PTT_SUP.DAT`).
+  - The OpenAIRAC `kln90b` exporter currently serializes clean-room standard `.DAT` tables (`APT.DAT`, `NAV.DAT`, `WPT.DAT`, `AWY.DAT`, `FAS.DAT`, `cycle.dat`).
+  - Transition to `SUPPORTED` requires end-to-end binary cache rebuild validation against the unmodified Project Tupolev KLN90B gauge or vasFMC loader executable.
+- **Validation Strategy**: `HashVerify` (all files verified against generated hashes before activation).
+- **Transactional Installer**: Staging -> transactional swap -> atomic rollback on failure.

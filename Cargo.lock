@@ -1526,6 +1526,7 @@ dependencies = [
  "openairac-magnetic",
  "openairac-model",
  "openairac-procedures",
+ "openairac-service",
  "openairac-store",
  "quick-xml",
  "reqwest",

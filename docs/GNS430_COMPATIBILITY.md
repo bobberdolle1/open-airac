@@ -117,9 +117,10 @@ Terminal instrument procedures:
   TF,RIDSU,50.150000,8.900000,0, ,+,5000,0,250,85.0,12.4
   ```
 
-## Installer Contract
+## Installer Contract & Maturity
 
-When installing to target `xplane-gns430`:
-- Strategy: `Subdirectory` (into `%XPLANE%/Custom Data/GNS430/navdata`)
-- Validation: SHA-256 integrity verification of every generated file.
-- Transactional backup and rollback supported automatically by `openairac-export`.
+- **Target ID**: `xplane-gns430`
+- **Maturity**: `EXPERIMENTAL` (implemented, unit tested, and syntax verified; live in-cockpit simulated GNS430 load test required before transitioning to `SUPPORTED`).
+- **Install Strategy**: `Subdirectory` (into `%XPLANE%/Custom Data/GNS430/navdata`)
+- **Validation**: SHA-256 integrity verification of every generated file.
+- **Transactional Rollback**: Supported automatically by `openairac-export`.

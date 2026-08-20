@@ -785,6 +785,27 @@ pub const PROVIDER_MANIFESTS: &[ProviderManifest] = &[
             ],
         }],
     },
+    ProviderManifest {
+        name: "FR_SIA",
+        namespace: "sia",
+        capabilities: ProviderCapabilities {
+            coverage: CoverageScope::Nationwide,
+            temporal: TemporalModel::AiracCycle,
+            update: UpdateModel::FullSnapshot,
+            authority_note: "French SIA official AIP / AIXM 4.5 aeronautical data",
+        },
+        datasets: &[DatasetManifest {
+            name: "AIXM4.5",
+            entity_tables: &[
+                "airports",
+                "runways",
+                "waypoints",
+                "navaids",
+                "airway_legs",
+                "procedure_legs",
+            ],
+        }],
+    },
 ];
 
 /// Manifest by stored provider string (source_snapshots.provider).

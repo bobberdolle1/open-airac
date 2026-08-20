@@ -1377,20 +1377,18 @@ fn main() -> Result<()> {
                 store.migrate()?;
                 let content = std::fs::read_to_string(file)
                     .with_context(|| format!("reading AIXM file: {}", file.display()))?;
-                let aixm_prov =
-                    openairac_ingest::aixm::Aixm5Provider::new(provider, namespace, license);
                 let effective = chrono::Utc::now();
-                let report = aixm_prov.ingest_xml_content(
-                    &mut store,
-                    &content,
-                    effective,
-                    cycle.as_deref(),
-                    &format!("file://{}", file.display()),
-                )?;
-                println!(
-                    "Successfully imported AIXM 5 dataset from {}",
-                    file.display()
-                );
+                let source_uri = format!("file://{}", file.display());
+                let opts = openairac_ingest::AixmIngestOptions {
+                    provider_name: provider,
+                    namespace,
+                    license,
+                    effective_from: effective,
+                    airac_cycle: cycle.as_deref(),
+                    source_uri: &source_uri,
+                };
+                let report = openairac_ingest::ingest_aixm_auto(&mut store, &content, &opts)?;
+                println!("Successfully imported AIXM dataset from {}", file.display());
                 println!("  Provider: {} ({})", provider, namespace);
                 println!("  License: {}", license);
                 println!("  Records created: {}", report.records_created);

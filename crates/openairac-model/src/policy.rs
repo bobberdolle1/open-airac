@@ -412,20 +412,51 @@ impl ProviderRegistry {
             ),
         });
 
-        // 5. DFS Germany Open Data (Deutsche Flugsicherung)
+        // 5a. DFS Germany INSPIRE Open Geodata (Deutsche Flugsicherung)
         reg.register(ProviderPolicy {
-            name: "DFS_Germany".to_string(),
+            name: "DFS_INSPIRE".to_string(),
             namespace: "dfs".to_string(),
             jurisdiction: "DE".to_string(),
-            authority: "DFS Deutsche Flugsicherung GmbH".to_string(),
+            authority: "DFS Deutsche Flugsicherung GmbH (INSPIRE Open Data)".to_string(),
             format: DatasetFormat::Aixm5,
             airac_cadence: Some("28-day AIRAC".to_string()),
             license_id: "GeoNutzV-OpenData".to_string(),
             redistribution: RedistributionPermission::PublicRedistribution,
             derivative_work_allowed: true,
             attribution_required: true,
-            attribution_notice: Some("DFS Deutsche Flugsicherung GmbH Open Data".to_string()),
+            attribution_notice: Some("DFS Deutsche Flugsicherung GmbH (INSPIRE GeoNutzV)".to_string()),
             is_local_only: false,
+            coverage: ProviderEntityCoverage {
+                airports: true,
+                runways: true,
+                navaids: true,
+                fixes: true,
+                airways: true,
+                sids: false,
+                stars: false,
+                approaches: false,
+                lpv_fas: false,
+                msa: false,
+                mora: false,
+            },
+            source_uri_pattern: Some("https://aip.dfs.de/".to_string()),
+            notes: Some("German INSPIRE open aeronautical geodata: aerodromes, runways, navaids, waypoints, airways.".to_string()),
+        });
+
+        // 5b. DFS Germany AIS Portal (Local-Only / Authenticated)
+        reg.register(ProviderPolicy {
+            name: "DFS_AIS".to_string(),
+            namespace: "dfs_ais".to_string(),
+            jurisdiction: "DE".to_string(),
+            authority: "DFS Deutsche Flugsicherung GmbH (AIS Portal)".to_string(),
+            format: DatasetFormat::Aixm5,
+            airac_cadence: Some("28-day AIRAC".to_string()),
+            license_id: "DFS-AIS-TermsOfUse".to_string(),
+            redistribution: RedistributionPermission::LocalOnly,
+            derivative_work_allowed: true,
+            attribution_required: true,
+            attribution_notice: Some("DFS Deutsche Flugsicherung GmbH AIS Portal".to_string()),
+            is_local_only: true,
             coverage: ProviderEntityCoverage {
                 airports: true,
                 runways: true,
@@ -439,8 +470,44 @@ impl ProviderRegistry {
                 msa: true,
                 mora: false,
             },
-            source_uri_pattern: Some("https://aip.dfs.de/".to_string()),
-            notes: Some("German AIP aeronautical dataset under open government terms.".to_string()),
+            source_uri_pattern: Some("https://ais.dfs.de/".to_string()),
+            notes: Some("German AIP eAIP/AIS terminal flight procedures; user account required, local use only.".to_string()),
+        });
+        // 5b. French SIA (Service de l'Information Aeronautique - DGAC France)
+        reg.register(ProviderPolicy {
+            name: "FR_SIA".to_string(),
+            namespace: "sia".to_string(),
+            jurisdiction: "FR".to_string(),
+            authority: "Service de l'Information Aeronautique (DGAC France)".to_string(),
+            format: DatasetFormat::Aixm4,
+            airac_cadence: Some("28-day AIRAC".to_string()),
+            license_id: "Licence-Ouverte-v2.0".to_string(),
+            redistribution: RedistributionPermission::PublicRedistribution,
+            derivative_work_allowed: true,
+            attribution_required: true,
+            attribution_notice: Some(
+                "Service de l'Information Aeronautique - DGAC France (Licence Ouverte v2.0)"
+                    .to_string(),
+            ),
+            is_local_only: false,
+            coverage: ProviderEntityCoverage {
+                airports: true,
+                runways: true,
+                navaids: true,
+                fixes: true,
+                airways: true,
+                sids: true,
+                stars: true,
+                approaches: true,
+                lpv_fas: false,
+                msa: false,
+                mora: false,
+            },
+            source_uri_pattern: Some("http://data.cquest.org/dgac/aip/".to_string()),
+            notes: Some(
+                "French AIP / AIXM 4.5 aeronautical data under Etalab Licence Ouverte v2.0."
+                    .to_string(),
+            ),
         });
 
         // 6. Eurocontrol EAD (European AIS Database) - Local-Only / BYOD
