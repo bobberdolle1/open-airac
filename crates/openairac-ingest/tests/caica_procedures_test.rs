@@ -392,10 +392,10 @@ fn test_russia_coverage_json_internal_consistency_self_check() {
     );
 
     // 3. Procedure Pages Accounting: pages_with_procedures + pages_no_procedure_data == pages_attempted
-    let procs_pages = v["national_procedures"]["pages_with_procedures"]
+    let procs_pages = v["national_procedures"]["pages_with_any_structured_data"]
         .as_u64()
         .unwrap();
-    let no_procs_pages = v["national_procedures"]["pages_no_procedure_data"]
+    let no_procs_pages = v["national_procedures"]["pages_without_procedure_tables"]
         .as_u64()
         .unwrap();
     let attempted = v["national_procedures"]["pages_attempted"]
@@ -431,6 +431,50 @@ fn test_russia_coverage_json_internal_consistency_self_check() {
     assert_eq!(
         ils_systems, loc_comps,
         "ILS systems and LOC count must match"
+    );
+
+    // 6. ATS Unique Points List Consistency: declared_count == unique_points_list.len()
+    let declared_pts = v["ats_enroute_network"]["unique_route_points"]
+        .as_u64()
+        .unwrap() as usize;
+    let list_len = v["ats_enroute_network"]["unique_points_list"]
+        .as_array()
+        .unwrap()
+        .len();
+    assert_eq!(
+        declared_pts, list_len,
+        "Declared ATS unique points count must equal list length"
+    );
+    assert_eq!(
+        v["ats_enroute_network"]["graph"]["nodes"].as_u64().unwrap() as usize,
+        list_len
+    );
+
+    // 7. Procedure Category Sum: sid + star + app == total_procedures
+    let sid_p = v["national_procedures"]["sid_procedures"].as_u64().unwrap();
+    let star_p = v["national_procedures"]["star_procedures"]
+        .as_u64()
+        .unwrap();
+    let app_p = v["national_procedures"]["approach_procedures"]
+        .as_u64()
+        .unwrap();
+    let total_p = v["national_procedures"]["total_procedures"]
+        .as_u64()
+        .unwrap();
+    assert_eq!(
+        sid_p + star_p + app_p,
+        total_p,
+        "Procedures sum mismatch: {} + {} + {} != {}",
+        sid_p,
+        star_p,
+        app_p,
+        total_p
+    );
+
+    // 8. Consistency Errors list must be empty
+    assert!(
+        v["consistency_errors"].as_array().unwrap().is_empty(),
+        "Machine report must have zero consistency errors"
     );
 }
 
