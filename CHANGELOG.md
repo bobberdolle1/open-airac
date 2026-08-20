@@ -1,5 +1,43 @@
 # Changelog
 
+## 1.8.0 — 2026-08-20
+
+### Online Flying / VATSIM Live Network Awareness
+
+- **Dedicated Online Network Subsystem (`openairac-online`)**:
+  - Read-only real-time domain model (`OnlinePilot`, `OnlineController`, `OnlineAtis`, `OnlineEvent`, `OnlineServer`, `OnlinePrefile`, `NetworkSnapshot`).
+  - 4-tier freshness classification (`Live`, `Delayed`, `Stale`, `Offline`).
+  - Complete data isolation from canonical AIRAC navigation database (untrusted filed routes never pollute navdata).
+
+- **Official VATSIM Data API v3 Provider (`VatsimProvider`)**:
+  - Ingestion from `https://data.vatsim.net/v3/vatsim-data.json` at official 15-second cadence.
+  - Parsing of thousands of live pilots, ATC stations, active ATIS broadcasts, connected servers, and prefiled plans.
+  - Clean extraction of airport stations (`KJFK_DEL`, `EGLL_APP`) and enroute centers (`LON_CTR`, `NY_CTR`).
+
+- **Official VATSIM Events API v2 Provider (`parse_vatsim_events_json`)**:
+  - Ingestion from `https://events.vatsim.net/api/v2/events`.
+  - Extraction of active and upcoming online events, time windows, participating airports, and routes.
+
+- **Route & Airport Online Awareness Engine (`RouteOnlineAwareness`)**:
+  - ATC along flight plan route (departure ATC, enroute ATC, arrival ATC).
+  - Traffic filtering within configurable route corridor (default 50 NM) and destination vicinity (100 NM).
+  - Airport operations summary (active controllers, ATIS broadcast, filed arrivals, filed departures, on-ground traffic).
+  - Flight plan route event correlation.
+
+- **Ephemeral Operational Cache & Security Sanitization (`OnlineCache`)**:
+  - Ephemeral SQLite operational cache (`openairac_online.sqlite`) with bounded retention.
+  - Strict input sanitization, coordinate bounds checking, and HTML entity escaping.
+
+- **OpenAIRAC Online CLI (`openairac online ...`)**:
+  - Added `openairac online providers`, `vatsim status`, `vatsim pilots`, `vatsim controllers`, `vatsim airport`, `vatsim atis`, `vatsim route`, `vatsim events` with full `--json` support.
+
+## 1.7.0 — 2026-08-20
+
+### OpenAIRAC Weather Subsystem & Flight Briefing
+
+- **Dedicated Weather Subsystem (`openairac-weather`)**:
+  - AviationWeather.gov Data API provider, METAR/TAF/SIGMET/PIREP parsing, route corridor hazard intersections, and preflight flight briefing.
+
 ## 1.6.0 — 2026-08-20
 
 ### Open Charts Foundation & First Real EFB Capability

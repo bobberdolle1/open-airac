@@ -17,6 +17,7 @@ members = [
     "crates/openairac-export-lnm",
     "crates/openairac-charts",
     "crates/openairac-weather",
+    "crates/openairac-online",
     "crates/openairac-export-pmdg",
     "crates/openairac-cli",
     "crates/openairac-plugin",

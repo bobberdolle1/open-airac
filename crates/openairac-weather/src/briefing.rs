@@ -51,20 +51,34 @@ impl FlightBriefing {
             self.navdata_cycle,
             self.charts_cycle
         );
-        out += "================================================================================\n\n";
+        out +=
+            "================================================================================\n\n";
 
         // 1. Departure
         out += &format!("1. DEPARTURE AIRPORT: {}\n", self.departure_icao);
         out += &format!("   Charts Available:   {}\n", self.departure.charts_count);
-        out += &format!("   Navdata Procedures: {}\n", if self.departure.navdata_procedures_available { "YES" } else { "NO" });
+        out += &format!(
+            "   Navdata Procedures: {}\n",
+            if self.departure.navdata_procedures_available {
+                "YES"
+            } else {
+                "NO"
+            }
+        );
         if !self.departure.navdata_note.is_empty() {
             out += &format!("   Navdata Notice:     {}\n", self.departure.navdata_note);
         }
         if let Some(m) = &self.departure.metar {
-            out += &format!("   METAR ({}): {}\n", m.flight_category.as_str(), m.raw_text);
+            out += &format!(
+                "   METAR ({}): {}\n",
+                m.flight_category.as_str(),
+                m.raw_text
+            );
             out += &format!(
                 "   Conditions: Wind {}/{} kt, Temp {}°C, Vis {} SM, Alt {} hPa\n",
-                m.wind_dir_deg.map(|d| d.to_string()).unwrap_or_else(|| "VRB".to_string()),
+                m.wind_dir_deg
+                    .map(|d| d.to_string())
+                    .unwrap_or_else(|| "VRB".to_string()),
                 m.wind_speed_kts.unwrap_or(0),
                 m.temp_c.unwrap_or(0.0),
                 m.visibility_sm.unwrap_or(10.0),
@@ -79,32 +93,70 @@ impl FlightBriefing {
         out += "\n";
 
         // 2. Destination
-        out += &format!("2. DESTINATION AIRPORT: {} (ETA: {})\n", self.destination_icao, self.estimated_time_of_arrival.format("%H:%MZ"));
+        out += &format!(
+            "2. DESTINATION AIRPORT: {} (ETA: {})\n",
+            self.destination_icao,
+            self.estimated_time_of_arrival.format("%H:%MZ")
+        );
         out += &format!("   Charts Available:   {}\n", self.destination.charts_count);
-        out += &format!("   Navdata Procedures: {}\n", if self.destination.navdata_procedures_available { "YES" } else { "NO" });
+        out += &format!(
+            "   Navdata Procedures: {}\n",
+            if self.destination.navdata_procedures_available {
+                "YES"
+            } else {
+                "NO"
+            }
+        );
         if !self.destination.navdata_note.is_empty() {
             out += &format!("   Navdata Notice:     {}\n", self.destination.navdata_note);
         }
         if let Some(m) = &self.destination.metar {
-            out += &format!("   Current METAR ({}): {}\n", m.flight_category.as_str(), m.raw_text);
+            out += &format!(
+                "   Current METAR ({}): {}\n",
+                m.flight_category.as_str(),
+                m.raw_text
+            );
         }
         if let Some(eta_fcst) = &self.destination.taf_at_eta {
-            out += &format!("   Forecast at ETA ({}): {}\n", eta_fcst.flight_category.as_str(), eta_fcst.raw_period);
+            out += &format!(
+                "   Forecast at ETA ({}): {}\n",
+                eta_fcst.flight_category.as_str(),
+                eta_fcst.raw_period
+            );
         } else if let Some(t) = &self.destination.taf {
             out += &format!("   TAF: {}\n", t.raw_text);
         }
         out += "\n";
 
         // 3. Route Hazards
-        out += &format!("3. ENROUTE HAZARDS (Route Corridor: 50 NM Width)\n");
-        out += &format!("   Active Intersecting SIGMETs: {}\n", self.route_sigmets.len());
+        out += "3. ENROUTE HAZARDS (Route Corridor: 50 NM Width)\n";
+        out += &format!(
+            "   Active Intersecting SIGMETs: {}\n",
+            self.route_sigmets.len()
+        );
         for s in &self.route_sigmets {
-            out += &format!("     - [{}] FIR: {}, Valid: {} to {}\n", s.hazard.as_str(), s.fir_id, s.valid_from.format("%H:%MZ"), s.valid_to.format("%H:%MZ"));
+            out += &format!(
+                "     - [{}] FIR: {}, Valid: {} to {}\n",
+                s.hazard.as_str(),
+                s.fir_id,
+                s.valid_from.format("%H:%MZ"),
+                s.valid_to.format("%H:%MZ")
+            );
             out += &format!("       Raw: {}\n", s.raw_text);
         }
-        out += &format!("   Recent PIREPs along Route:  {}\n", self.route_pireps.len());
+        out += &format!(
+            "   Recent PIREPs along Route:  {}\n",
+            self.route_pireps.len()
+        );
         for p in &self.route_pireps {
-            out += &format!("     - [{}] Type: {}, FL: {:?}, Turb: {:?}, Ice: {:?}\n", p.obs_time.format("%H:%MZ"), p.aircraft_type.as_deref().unwrap_or("?"), p.flight_level, p.turbulence, p.icing);
+            out += &format!(
+                "     - [{}] Type: {}, FL: {:?}, Turb: {:?}, Ice: {:?}\n",
+                p.obs_time.format("%H:%MZ"),
+                p.aircraft_type.as_deref().unwrap_or("?"),
+                p.flight_level,
+                p.turbulence,
+                p.icing
+            );
         }
         out += "\n";
 
@@ -127,7 +179,8 @@ impl FlightBriefing {
         html += "<div style='font-family: sans-serif; padding: 12px;'>";
         html += &format!(
             "<h2 style='margin-bottom: 4px;'>OpenAIRAC Flight Briefing: {} &rarr; {}</h2>",
-            escape(&self.departure_icao), escape(&self.destination_icao)
+            escape(&self.departure_icao),
+            escape(&self.destination_icao)
         );
         html += &format!(
             "<div style='color: #666; font-size: 12px; margin-bottom: 12px;'>Generated: {} | AIRAC: {} | Charts: {}</div>",
@@ -150,12 +203,20 @@ impl FlightBriefing {
         if let Some(t) = &self.departure.taf {
             html += &format!("<p><b>TAF</b>: <code>{}</code></p>", escape(&t.raw_text));
         }
-        html += &format!("<p style='font-size: 12px; color: #555;'>Charts: {} | Navdata: {}</p>", self.departure.charts_count, escape(&self.departure.navdata_note));
+        html += &format!(
+            "<p style='font-size: 12px; color: #555;'>Charts: {} | Navdata: {}</p>",
+            self.departure.charts_count,
+            escape(&self.departure.navdata_note)
+        );
         html += "</div>";
 
         // Destination Block
         html += "<div style='border: 1px solid #ccc; border-radius: 4px; padding: 8px; margin-bottom: 12px;'>";
-        html += &format!("<h3>Destination: {} (ETA {})</h3>", escape(&self.destination_icao), self.estimated_time_of_arrival.format("%H:%MZ"));
+        html += &format!(
+            "<h3>Destination: {} (ETA {})</h3>",
+            escape(&self.destination_icao),
+            self.estimated_time_of_arrival.format("%H:%MZ")
+        );
         if let Some(m) = &self.destination.metar {
             html += &format!(
                 "<p><b>Current METAR</b> <span style='background: {}; color: white; padding: 2px 6px; border-radius: 3px;'>{}</span>: <code>{}</code></p>",
@@ -172,12 +233,20 @@ impl FlightBriefing {
                 escape(&eta_fcst.raw_period)
             );
         }
-        html += &format!("<p style='font-size: 12px; color: #555;'>Charts: {} | Navdata: {}</p>", self.destination.charts_count, escape(&self.destination.navdata_note));
+        html += &format!(
+            "<p style='font-size: 12px; color: #555;'>Charts: {} | Navdata: {}</p>",
+            self.destination.charts_count,
+            escape(&self.destination.navdata_note)
+        );
         html += "</div>";
 
         // Hazards Block
         html += "<div style='border: 1px solid #e0a800; background: #fffdf5; border-radius: 4px; padding: 8px; margin-bottom: 12px;'>";
-        html += &format!("<h3>Route Hazards ({} Intersecting SIGMETs, {} PIREPs)</h3>", self.route_sigmets.len(), self.route_pireps.len());
+        html += &format!(
+            "<h3>Route Hazards ({} Intersecting SIGMETs, {} PIREPs)</h3>",
+            self.route_sigmets.len(),
+            self.route_pireps.len()
+        );
         for s in &self.route_sigmets {
             html += &format!(
                 "<p style='margin: 4px 0;'><b>SIGMET ({})</b> FIR: {} (Valid {} - {}):<br/><code>{}</code></p>",

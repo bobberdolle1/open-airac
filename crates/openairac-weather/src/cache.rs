@@ -28,7 +28,10 @@ impl WeatherCache {
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let p_str = path.as_ref().to_string_lossy().to_string();
         let conn = Connection::open(path)?;
-        let cache = Self { conn, path_str: p_str };
+        let cache = Self {
+            conn,
+            path_str: p_str,
+        };
         cache.init_schema()?;
         Ok(cache)
     }
@@ -192,7 +195,11 @@ impl WeatherCache {
         let rows = stmt.query_map([&now_str], |row| {
             let payload: String = row.get(0)?;
             let sig: Sigmet = serde_json::from_str(&payload).map_err(|e| {
-                rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
             })?;
             Ok(sig)
         })?;
@@ -207,19 +214,19 @@ impl WeatherCache {
     pub fn put_pireps(&self, pireps: &[PirepReport]) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         for p in pireps {
-            let id = format!("{}:{:.4}:{:.4}", p.obs_time.timestamp(), p.latitude, p.longitude);
+            let id = format!(
+                "{}:{:.4}:{:.4}",
+                p.obs_time.timestamp(),
+                p.latitude,
+                p.longitude
+            );
             let payload = serde_json::to_string(p)?;
             self.conn.execute(
                 r#"
                 INSERT OR REPLACE INTO pirep_cache (id, json_payload, obs_time, fetched_at)
                 VALUES (?1, ?2, ?3, ?4)
                 "#,
-                params![
-                    id,
-                    payload,
-                    p.obs_time.to_rfc3339(),
-                    now,
-                ],
+                params![id, payload, p.obs_time.to_rfc3339(), now,],
             )?;
         }
         Ok(())
@@ -233,7 +240,11 @@ impl WeatherCache {
         let rows = stmt.query_map([&threshold], |row| {
             let payload: String = row.get(0)?;
             let p: PirepReport = serde_json::from_str(&payload).map_err(|e| {
-                rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
             })?;
             Ok(p)
         })?;
@@ -248,17 +259,31 @@ impl WeatherCache {
     pub fn prune_expired(&self) -> Result<usize> {
         let now_str = Utc::now().to_rfc3339();
         let mut removed = 0usize;
-        removed += self.conn.execute("DELETE FROM metar_cache WHERE expires_at < ?1", [&now_str])?;
-        removed += self.conn.execute("DELETE FROM taf_cache WHERE expires_at < ?1", [&now_str])?;
-        removed += self.conn.execute("DELETE FROM sigmet_cache WHERE valid_to < ?1", [&now_str])?;
+        removed += self
+            .conn
+            .execute("DELETE FROM metar_cache WHERE expires_at < ?1", [&now_str])?;
+        removed += self
+            .conn
+            .execute("DELETE FROM taf_cache WHERE expires_at < ?1", [&now_str])?;
+        removed += self
+            .conn
+            .execute("DELETE FROM sigmet_cache WHERE valid_to < ?1", [&now_str])?;
         Ok(removed)
     }
 
     pub fn cache_status(&self) -> Result<WeatherCacheStatus> {
-        let metars: i64 = self.conn.query_row("SELECT COUNT(*) FROM metar_cache", [], |r| r.get(0))?;
-        let tafs: i64 = self.conn.query_row("SELECT COUNT(*) FROM taf_cache", [], |r| r.get(0))?;
-        let sigmets: i64 = self.conn.query_row("SELECT COUNT(*) FROM sigmet_cache", [], |r| r.get(0))?;
-        let pireps: i64 = self.conn.query_row("SELECT COUNT(*) FROM pirep_cache", [], |r| r.get(0))?;
+        let metars: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM metar_cache", [], |r| r.get(0))?;
+        let tafs: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM taf_cache", [], |r| r.get(0))?;
+        let sigmets: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM sigmet_cache", [], |r| r.get(0))?;
+        let pireps: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM pirep_cache", [], |r| r.get(0))?;
 
         Ok(WeatherCacheStatus {
             cached_metars: metars as usize,

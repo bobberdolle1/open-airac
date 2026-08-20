@@ -50,7 +50,10 @@ impl AviationWeatherProvider {
             let obs_time = if let Some(ts) = obs_timestamp {
                 Utc.timestamp_opt(ts, 0).single().unwrap_or(now)
             } else if let Some(rep) = item["reportTime"].as_str() {
-                DateTime::parse_from_rfc3339(rep).ok().map(|d| d.with_timezone(&Utc)).unwrap_or(now)
+                DateTime::parse_from_rfc3339(rep)
+                    .ok()
+                    .map(|d| d.with_timezone(&Utc))
+                    .unwrap_or(now)
             } else {
                 now
             };
@@ -65,7 +68,9 @@ impl AviationWeatherProvider {
             let visibility_sm = if vis_str.contains('+') {
                 Some(10.0)
             } else {
-                item["visib"].as_f64().or_else(|| vis_str.parse::<f64>().ok())
+                item["visib"]
+                    .as_f64()
+                    .or_else(|| vis_str.parse::<f64>().ok())
             };
 
             let altim_hpa = item["altim"].as_f64();
@@ -94,10 +99,10 @@ impl AviationWeatherProvider {
             }
 
             let mut phenomena = Vec::new();
-            if let Some(wx) = item["wxString"].as_str() {
-                if !wx.trim().is_empty() {
-                    phenomena.push(wx.trim().to_string());
-                }
+            if let Some(wx) = item["wxString"].as_str()
+                && !wx.trim().is_empty()
+            {
+                phenomena.push(wx.trim().to_string());
             }
 
             let mut report = MetarReport {
@@ -150,25 +155,34 @@ impl AviationWeatherProvider {
             }
 
             let raw_text = item["rawTAF"].as_str().unwrap_or("").trim().to_string();
-            let issue_time = item["issueTime"].as_str().and_then(|s| {
-                DateTime::parse_from_rfc3339(s).ok().map(|d| d.with_timezone(&Utc))
-            }).unwrap_or(now);
+            let issue_time = item["issueTime"]
+                .as_str()
+                .and_then(|s| {
+                    DateTime::parse_from_rfc3339(s)
+                        .ok()
+                        .map(|d| d.with_timezone(&Utc))
+                })
+                .unwrap_or(now);
 
-            let valid_from = item["validTimeFrom"].as_i64()
+            let valid_from = item["validTimeFrom"]
+                .as_i64()
                 .and_then(|ts| Utc.timestamp_opt(ts, 0).single())
                 .unwrap_or(issue_time);
 
-            let valid_to = item["validTimeTo"].as_i64()
+            let valid_to = item["validTimeTo"]
+                .as_i64()
                 .and_then(|ts| Utc.timestamp_opt(ts, 0).single())
                 .unwrap_or_else(|| valid_from + chrono::Duration::hours(24));
 
             let mut forecast_periods = Vec::new();
             if let Some(fcsts) = item["fcsts"].as_array() {
                 for f in fcsts {
-                    let f_from = f["timeFrom"].as_i64()
+                    let f_from = f["timeFrom"]
+                        .as_i64()
                         .and_then(|ts| Utc.timestamp_opt(ts, 0).single())
                         .unwrap_or(valid_from);
-                    let f_to = f["timeTo"].as_i64()
+                    let f_to = f["timeTo"]
+                        .as_i64()
                         .and_then(|ts| Utc.timestamp_opt(ts, 0).single())
                         .unwrap_or(valid_to);
 
@@ -184,16 +198,19 @@ impl AviationWeatherProvider {
                             let cover = c["cover"].as_str().unwrap_or("").to_string();
                             let base = c["base"].as_u64().map(|b| b as u32);
                             if !cover.is_empty() {
-                                clouds.push(CloudLayer { cover, base_ft: base });
+                                clouds.push(CloudLayer {
+                                    cover,
+                                    base_ft: base,
+                                });
                             }
                         }
                     }
 
                     let mut wx = Vec::new();
-                    if let Some(wxs) = f["wxString"].as_str() {
-                        if !wxs.trim().is_empty() {
-                            wx.push(wxs.trim().to_string());
-                        }
+                    if let Some(wxs) = f["wxString"].as_str()
+                        && !wxs.trim().is_empty()
+                    {
+                        wx.push(wxs.trim().to_string());
                     }
 
                     let fltcat = FlightCategory::compute(None, vis);
@@ -233,7 +250,8 @@ impl AviationWeatherProvider {
     /// Parse International SIGMET GeoJSON FeatureCollection.
     pub fn parse_isigmet_geojson(&self, geojson_str: &str) -> Result<Vec<Sigmet>> {
         let root: Value = serde_json::from_str(geojson_str)?;
-        let features = root["features"].as_array()
+        let features = root["features"]
+            .as_array()
             .ok_or_else(|| anyhow!("Expected GeoJSON FeatureCollection with 'features' array"))?;
 
         let now = Utc::now();
@@ -246,12 +264,22 @@ impl AviationWeatherProvider {
             let hazard_str = props["hazard"].as_str().unwrap_or("OTHER");
             let qualifier = props["qualifier"].as_str().map(|s| s.to_string());
 
-            let valid_from = props["validTimeFrom"].as_str()
-                .and_then(|s| DateTime::parse_from_rfc3339(s).ok().map(|d| d.with_timezone(&Utc)))
+            let valid_from = props["validTimeFrom"]
+                .as_str()
+                .and_then(|s| {
+                    DateTime::parse_from_rfc3339(s)
+                        .ok()
+                        .map(|d| d.with_timezone(&Utc))
+                })
                 .unwrap_or(now);
 
-            let valid_to = props["validTimeTo"].as_str()
-                .and_then(|s| DateTime::parse_from_rfc3339(s).ok().map(|d| d.with_timezone(&Utc)))
+            let valid_to = props["validTimeTo"]
+                .as_str()
+                .and_then(|s| {
+                    DateTime::parse_from_rfc3339(s)
+                        .ok()
+                        .map(|d| d.with_timezone(&Utc))
+                })
                 .unwrap_or_else(|| valid_from + chrono::Duration::hours(4));
 
             let base_alt = props["base"].as_u64().map(|a| a as u32);
@@ -269,12 +297,12 @@ impl AviationWeatherProvider {
                 };
 
                 for pt in ring {
-                    if let Some(pt_arr) = pt.as_array() {
-                        if pt_arr.len() >= 2 {
-                            let lon = pt_arr[0].as_f64().unwrap_or(0.0);
-                            let lat = pt_arr[1].as_f64().unwrap_or(0.0);
-                            polygon.push((lon, lat));
-                        }
+                    if let Some(pt_arr) = pt.as_array()
+                        && pt_arr.len() >= 2
+                    {
+                        let lon = pt_arr[0].as_f64().unwrap_or(0.0);
+                        let lat = pt_arr[1].as_f64().unwrap_or(0.0);
+                        polygon.push((lon, lat));
                     }
                 }
             }
@@ -306,7 +334,8 @@ impl AviationWeatherProvider {
     /// Parse US Domestic AIRMET/SIGMET GeoJSON FeatureCollection.
     pub fn parse_airsigmet_geojson(&self, geojson_str: &str) -> Result<Vec<Sigmet>> {
         let root: Value = serde_json::from_str(geojson_str)?;
-        let features = root["features"].as_array()
+        let features = root["features"]
+            .as_array()
             .ok_or_else(|| anyhow!("Expected GeoJSON FeatureCollection with 'features' array"))?;
 
         let now = Utc::now();
@@ -317,12 +346,22 @@ impl AviationWeatherProvider {
             let air_sig_type = props["airSigmetType"].as_str().unwrap_or("SIGMET");
             let hazard_str = props["hazard"].as_str().unwrap_or("CONVECTIVE");
 
-            let valid_from = props["validTimeFrom"].as_str()
-                .and_then(|s| DateTime::parse_from_rfc3339(s).ok().map(|d| d.with_timezone(&Utc)))
+            let valid_from = props["validTimeFrom"]
+                .as_str()
+                .and_then(|s| {
+                    DateTime::parse_from_rfc3339(s)
+                        .ok()
+                        .map(|d| d.with_timezone(&Utc))
+                })
                 .unwrap_or(now);
 
-            let valid_to = props["validTimeTo"].as_str()
-                .and_then(|s| DateTime::parse_from_rfc3339(s).ok().map(|d| d.with_timezone(&Utc)))
+            let valid_to = props["validTimeTo"]
+                .as_str()
+                .and_then(|s| {
+                    DateTime::parse_from_rfc3339(s)
+                        .ok()
+                        .map(|d| d.with_timezone(&Utc))
+                })
                 .unwrap_or_else(|| valid_from + chrono::Duration::hours(2));
 
             let top_alt = props["altitudeHi1"].as_u64().map(|a| a as u32);
@@ -337,12 +376,12 @@ impl AviationWeatherProvider {
                     coords_arr
                 };
                 for pt in ring {
-                    if let Some(pt_arr) = pt.as_array() {
-                        if pt_arr.len() >= 2 {
-                            let lon = pt_arr[0].as_f64().unwrap_or(0.0);
-                            let lat = pt_arr[1].as_f64().unwrap_or(0.0);
-                            polygon.push((lon, lat));
-                        }
+                    if let Some(pt_arr) = pt.as_array()
+                        && pt_arr.len() >= 2
+                    {
+                        let lon = pt_arr[0].as_f64().unwrap_or(0.0);
+                        let lat = pt_arr[1].as_f64().unwrap_or(0.0);
+                        polygon.push((lon, lat));
                     }
                 }
             }
@@ -395,8 +434,14 @@ impl AviationWeatherProvider {
 
             let ac_type = item["acType"].as_str().map(|s| s.to_string());
             let flt_lvl = item["fltLvl"].as_u64().map(|v| v as u32);
-            let turb = item["tbType"].as_str().or_else(|| item["tbInt"].as_str()).map(|s| s.to_string());
-            let ice = item["icgType"].as_str().or_else(|| item["icgInt"].as_str()).map(|s| s.to_string());
+            let turb = item["tbType"]
+                .as_str()
+                .or_else(|| item["tbInt"].as_str())
+                .map(|s| s.to_string());
+            let ice = item["icgType"]
+                .as_str()
+                .or_else(|| item["icgInt"].as_str())
+                .map(|s| s.to_string());
             let temp = item["temp"].as_f64();
             let raw = item["rawOb"].as_str().unwrap_or("").to_string();
 
@@ -429,7 +474,10 @@ impl AviationWeatherProvider {
             .timeout(std::time::Duration::from_secs(15))
             .build()?;
 
-        let resp = client.get(&url).send().with_context(|| format!("Fetching METARs from '{url}'"))?;
+        let resp = client
+            .get(&url)
+            .send()
+            .with_context(|| format!("Fetching METARs from '{url}'"))?;
         if !resp.status().is_success() {
             bail!("HTTP error {} fetching METARs", resp.status());
         }
@@ -450,7 +498,10 @@ impl AviationWeatherProvider {
             .timeout(std::time::Duration::from_secs(15))
             .build()?;
 
-        let resp = client.get(&url).send().with_context(|| format!("Fetching TAFs from '{url}'"))?;
+        let resp = client
+            .get(&url)
+            .send()
+            .with_context(|| format!("Fetching TAFs from '{url}'"))?;
         if !resp.status().is_success() {
             bail!("HTTP error {} fetching TAFs", resp.status());
         }
@@ -466,9 +517,15 @@ impl AviationWeatherProvider {
             .timeout(std::time::Duration::from_secs(20))
             .build()?;
 
-        let resp = client.get(&url).send().with_context(|| format!("Fetching International SIGMETs from '{url}'"))?;
+        let resp = client
+            .get(&url)
+            .send()
+            .with_context(|| format!("Fetching International SIGMETs from '{url}'"))?;
         if !resp.status().is_success() {
-            bail!("HTTP error {} fetching International SIGMETs", resp.status());
+            bail!(
+                "HTTP error {} fetching International SIGMETs",
+                resp.status()
+            );
         }
         let json_text = resp.text()?;
         self.parse_isigmet_geojson(&json_text)
@@ -482,7 +539,10 @@ impl AviationWeatherProvider {
             .timeout(std::time::Duration::from_secs(20))
             .build()?;
 
-        let resp = client.get(&url).send().with_context(|| format!("Fetching US AIRMET/SIGMETs from '{url}'"))?;
+        let resp = client
+            .get(&url)
+            .send()
+            .with_context(|| format!("Fetching US AIRMET/SIGMETs from '{url}'"))?;
         if !resp.status().is_success() {
             bail!("HTTP error {} fetching US AIRMET/SIGMETs", resp.status());
         }
@@ -492,13 +552,19 @@ impl AviationWeatherProvider {
 
     #[cfg(feature = "online")]
     pub fn fetch_pireps(&self, station: &str, distance_nm: u32) -> Result<Vec<PirepReport>> {
-        let url = format!("{}/pirep?id={station}&distance={distance_nm}&format=json", self.base_url);
+        let url = format!(
+            "{}/pirep?id={station}&distance={distance_nm}&format=json",
+            self.base_url
+        );
         let client = reqwest::blocking::Client::builder()
             .user_agent("OpenAIRAC/1.7 (open aviation weather client)")
             .timeout(std::time::Duration::from_secs(15))
             .build()?;
 
-        let resp = client.get(&url).send().with_context(|| format!("Fetching PIREPs from '{url}'"))?;
+        let resp = client
+            .get(&url)
+            .send()
+            .with_context(|| format!("Fetching PIREPs from '{url}'"))?;
         if !resp.status().is_success() {
             bail!("HTTP error {} fetching PIREPs", resp.status());
         }

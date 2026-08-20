@@ -2,12 +2,8 @@
 
 use chrono::{Duration, TimeZone, Utc};
 use openairac_weather::briefing::{AirportWeatherBriefing, FlightBriefing};
-use openairac_weather::cache::WeatherCache;
 use openairac_weather::corridor::RouteCorridor;
-use openairac_weather::model::{
-    CloudLayer, FlightCategory, MetarReport, PirepReport, Sigmet, SigmetHazard, TafForecastPeriod,
-    TafReport, WeatherStaleness,
-};
+use openairac_weather::model::{FlightCategory, MetarReport, SigmetHazard, WeatherStaleness};
 use openairac_weather::providers::AviationWeatherProvider;
 
 const SAMPLE_MULTI_METARS: &str = r#"[
@@ -149,10 +145,22 @@ fn test_weather_parsing_and_staleness() {
 
     // Staleness
     let now = Utc::now();
-    assert_eq!(WeatherStaleness::evaluate_metar(now - Duration::minutes(15), now), WeatherStaleness::Fresh);
-    assert_eq!(WeatherStaleness::evaluate_metar(now - Duration::minutes(45), now), WeatherStaleness::Aging);
-    assert_eq!(WeatherStaleness::evaluate_metar(now - Duration::minutes(90), now), WeatherStaleness::Stale);
-    assert_eq!(WeatherStaleness::evaluate_metar(now - Duration::minutes(150), now), WeatherStaleness::Expired);
+    assert_eq!(
+        WeatherStaleness::evaluate_metar(now - Duration::minutes(15), now),
+        WeatherStaleness::Fresh
+    );
+    assert_eq!(
+        WeatherStaleness::evaluate_metar(now - Duration::minutes(45), now),
+        WeatherStaleness::Aging
+    );
+    assert_eq!(
+        WeatherStaleness::evaluate_metar(now - Duration::minutes(90), now),
+        WeatherStaleness::Stale
+    );
+    assert_eq!(
+        WeatherStaleness::evaluate_metar(now - Duration::minutes(150), now),
+        WeatherStaleness::Expired
+    );
 }
 
 #[test]
@@ -190,13 +198,14 @@ fn test_sigmet_geojson_and_route_corridor_intersection() {
 
     // Route from KJFK to LFPG across North Atlantic track passing through Gander Oceanic
     let nat_route = RouteCorridor::new(vec![
-        (-73.778, 40.639),  // KJFK
+        (-73.778, 40.639), // KJFK
         (-60.000, 45.000),
-        (-45.000, 50.000),  // Directly through CZQX polygon (-50 to -40 lon, 48 to 54 lat)
+        (-45.000, 50.000), // Directly through CZQX polygon (-50 to -40 lon, 48 to 54 lat)
         (-30.000, 52.000),
         (-10.000, 50.000),
-        (2.550, 49.012),    // LFPG
-    ]).with_width(50.0);
+        (2.550, 49.012), // LFPG
+    ])
+    .with_width(50.0);
 
     let intersections = nat_route.filter_intersecting_sigmets(&sigmets);
     assert_eq!(intersections.len(), 1);
@@ -262,7 +271,8 @@ fn test_flight_briefing_generation() {
             taf_at_eta: None,
             charts_count: 9,
             navdata_procedures_available: false,
-            navdata_note: "Public SIA dataset contains 0 procedures; eAIP charts active".to_string(),
+            navdata_note: "Public SIA dataset contains 0 procedures; eAIP charts active"
+                .to_string(),
         },
         alternates: Vec::new(),
         route_sigmets: Vec::new(),

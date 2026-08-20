@@ -196,8 +196,93 @@ enum Commands {
         #[command(subcommand)]
         cmd: WeatherCmd,
     },
+    /// Real-time online flight simulation network integration (VATSIM)
+    Online {
+        #[command(subcommand)]
+        cmd: OnlineCmd,
+    },
 }
 
+#[derive(Subcommand)]
+enum OnlineCmd {
+    /// List supported online flight networks
+    Providers,
+    /// VATSIM online network operations
+    Vatsim {
+        #[command(subcommand)]
+        cmd: VatsimCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum VatsimCmd {
+    /// Display VATSIM network status and connected clients count
+    Status {
+        #[arg(long)]
+        json: bool,
+        #[arg(long, default_value = "./data/online.sqlite")]
+        cache_db: PathBuf,
+    },
+    /// List live pilots connected to VATSIM
+    Pilots {
+        #[arg(long)]
+        callsign: Option<String>,
+        #[arg(long)]
+        limit: Option<usize>,
+        #[arg(long)]
+        json: bool,
+        #[arg(long, default_value = "./data/online.sqlite")]
+        cache_db: PathBuf,
+    },
+    /// List live ATC controllers connected to VATSIM
+    Controllers {
+        #[arg(long)]
+        callsign: Option<String>,
+        #[arg(long)]
+        limit: Option<usize>,
+        #[arg(long)]
+        json: bool,
+        #[arg(long, default_value = "./data/online.sqlite")]
+        cache_db: PathBuf,
+    },
+    /// Inspect online ATC, ATIS, and traffic for an airport
+    Airport {
+        ident: String,
+        #[arg(long)]
+        json: bool,
+        #[arg(long, default_value = "./data/online.sqlite")]
+        cache_db: PathBuf,
+    },
+    /// Inspect active ATIS for an airport
+    Atis {
+        ident: String,
+        #[arg(long)]
+        json: bool,
+        #[arg(long, default_value = "./data/online.sqlite")]
+        cache_db: PathBuf,
+    },
+    /// Analyze active ATC, corridor traffic, and events along a flight plan route
+    Route {
+        /// Departure airport ICAO
+        departure: String,
+        /// Arrival airport ICAO
+        arrival: String,
+        /// Corridor half-width in NM (default 50.0)
+        #[arg(long, default_value = "50.0")]
+        corridor_width: f64,
+        #[arg(long)]
+        json: bool,
+        #[arg(long, default_value = "./data/online.sqlite")]
+        cache_db: PathBuf,
+    },
+    /// List active and upcoming VATSIM online events
+    Events {
+        #[arg(long)]
+        json: bool,
+        #[arg(long, default_value = "./data/online.sqlite")]
+        cache_db: PathBuf,
+    },
+}
 #[derive(Subcommand)]
 enum WeatherCmd {
     /// List available weather providers
@@ -2766,8 +2851,12 @@ fn main() -> Result<()> {
                 println!("OpenAIRAC Weather Providers:");
                 println!("  1. NOAA_AWC");
                 println!("     Name:         NOAA Aviation Weather Center (AviationWeather.gov)");
-                println!("     Authority:    National Oceanic and Atmospheric Administration (NOAA)");
-                println!("     Coverage:     Worldwide (METAR, TAF, International SIGMET, US AIRMET/SIGMET, PIREP)");
+                println!(
+                    "     Authority:    National Oceanic and Atmospheric Administration (NOAA)"
+                );
+                println!(
+                    "     Coverage:     Worldwide (METAR, TAF, International SIGMET, US AIRMET/SIGMET, PIREP)"
+                );
                 println!("     API Version:  Modern Data API (/api/data/*)");
                 println!("     Status:       Production / Authoritative");
                 println!();
@@ -2782,35 +2871,35 @@ fn main() -> Result<()> {
                 json,
                 cache_db,
             } => {
-                let parent = cache_db.parent().unwrap_or_else(|| std::path::Path::new("."));
+                let parent = cache_db
+                    .parent()
+                    .unwrap_or_else(|| std::path::Path::new("."));
                 std::fs::create_dir_all(parent)?;
                 let cache = openairac_weather::cache::WeatherCache::open(cache_db)?;
                 let prov = openairac_weather::providers::AviationWeatherProvider::new();
 
                 let icao = ident.trim().to_uppercase();
-                let metar = cache.get_metar(&icao)?
-                    .or_else(|| {
-                        prov.fetch_metars(&[&icao]).ok().and_then(|mut v| {
-                            if let Some(m) = v.pop() {
-                                let _ = cache.put_metar(&m, 15);
-                                Some(m)
-                            } else {
-                                None
-                            }
-                        })
-                    });
+                let metar = cache.get_metar(&icao)?.or_else(|| {
+                    prov.fetch_metars(&[&icao]).ok().and_then(|mut v| {
+                        if let Some(m) = v.pop() {
+                            let _ = cache.put_metar(&m, 15);
+                            Some(m)
+                        } else {
+                            None
+                        }
+                    })
+                });
 
-                let taf = cache.get_taf(&icao)?
-                    .or_else(|| {
-                        prov.fetch_tafs(&[&icao]).ok().and_then(|mut v| {
-                            if let Some(t) = v.pop() {
-                                let _ = cache.put_taf(&t, 60);
-                                Some(t)
-                            } else {
-                                None
-                            }
-                        })
-                    });
+                let taf = cache.get_taf(&icao)?.or_else(|| {
+                    prov.fetch_tafs(&[&icao]).ok().and_then(|mut v| {
+                        if let Some(t) = v.pop() {
+                            let _ = cache.put_taf(&t, 60);
+                            Some(t)
+                        } else {
+                            None
+                        }
+                    })
+                });
 
                 if *json {
                     let res = serde_json::json!({
@@ -2820,29 +2909,53 @@ fn main() -> Result<()> {
                     });
                     println!("{}", serde_json::to_string_pretty(&res)?);
                 } else {
-                    println!("================================================================================");
+                    println!(
+                        "================================================================================"
+                    );
                     println!("AIRPORT WEATHER: {}", icao);
-                    println!("================================================================================");
+                    println!(
+                        "================================================================================"
+                    );
                     if let Some(m) = metar {
-                        println!("METAR: [{}] (Age: {} min, Staleness: {:?})", m.flight_category.as_str(), m.age_minutes(chrono::Utc::now()), m.staleness(chrono::Utc::now()));
+                        println!(
+                            "METAR: [{}] (Age: {} min, Staleness: {:?})",
+                            m.flight_category.as_str(),
+                            m.age_minutes(chrono::Utc::now()),
+                            m.staleness(chrono::Utc::now())
+                        );
                         println!("  Raw:         {}", m.raw_text);
-                        println!("  Conditions:  Wind {}/{} kt, Temp {}°C, Dewp {}°C, Vis {} SM, Alt {} hPa",
-                            m.wind_dir_deg.map(|d| d.to_string()).unwrap_or_else(|| "VRB".to_string()),
+                        println!(
+                            "  Conditions:  Wind {}/{} kt, Temp {}°C, Dewp {}°C, Vis {} SM, Alt {} hPa",
+                            m.wind_dir_deg
+                                .map(|d| d.to_string())
+                                .unwrap_or_else(|| "VRB".to_string()),
                             m.wind_speed_kts.unwrap_or(0),
                             m.temp_c.unwrap_or(0.0),
                             m.dewpoint_c.unwrap_or(0.0),
                             m.visibility_sm.unwrap_or(10.0),
-                            m.altimeter_hpa.unwrap_or(1013.2));
+                            m.altimeter_hpa.unwrap_or(1013.2)
+                        );
                     } else {
                         println!("METAR: Not available for {}", icao);
                     }
                     println!();
                     if let Some(t) = taf {
-                        println!("TAF: Valid {} to {}", t.valid_from.format("%Y-%m-%d %H:%MZ"), t.valid_to.format("%Y-%m-%d %H:%MZ"));
+                        println!(
+                            "TAF: Valid {} to {}",
+                            t.valid_from.format("%Y-%m-%d %H:%MZ"),
+                            t.valid_to.format("%Y-%m-%d %H:%MZ")
+                        );
                         println!("  Raw: {}", t.raw_text);
                         println!("  Forecast Periods: {}", t.forecast_periods.len());
                         for (idx, p) in t.forecast_periods.iter().enumerate() {
-                            println!("    {}. [{}] ({} - {}): {}", idx + 1, p.flight_category.as_str(), p.valid_from.format("%H:%MZ"), p.valid_to.format("%H:%MZ"), p.raw_period);
+                            println!(
+                                "    {}. [{}] ({} - {}): {}",
+                                idx + 1,
+                                p.flight_category.as_str(),
+                                p.valid_from.format("%H:%MZ"),
+                                p.valid_to.format("%H:%MZ"),
+                                p.raw_period
+                            );
                         }
                     } else {
                         println!("TAF: No terminal forecast issued for {}", icao);
@@ -2854,13 +2967,16 @@ fn main() -> Result<()> {
                 json,
                 cache_db,
             } => {
-                let parent = cache_db.parent().unwrap_or_else(|| std::path::Path::new("."));
+                let parent = cache_db
+                    .parent()
+                    .unwrap_or_else(|| std::path::Path::new("."));
                 std::fs::create_dir_all(parent)?;
                 let cache = openairac_weather::cache::WeatherCache::open(cache_db)?;
                 let prov = openairac_weather::providers::AviationWeatherProvider::new();
 
                 let icao = ident.trim().to_uppercase();
-                let metar = cache.get_metar(&icao)?
+                let metar = cache
+                    .get_metar(&icao)?
                     .or_else(|| {
                         prov.fetch_metars(&[&icao]).ok().and_then(|mut v| {
                             if let Some(m) = v.pop() {
@@ -2876,17 +2992,39 @@ fn main() -> Result<()> {
                 if *json {
                     println!("{}", serde_json::to_string_pretty(&metar)?);
                 } else {
-                    println!("METAR for {} [{}]", metar.station_id, metar.flight_category.as_str());
-                    println!("  Observation: {}", metar.observation_time.format("%Y-%m-%d %H:%M:%SZ"));
+                    println!(
+                        "METAR for {} [{}]",
+                        metar.station_id,
+                        metar.flight_category.as_str()
+                    );
+                    println!(
+                        "  Observation: {}",
+                        metar.observation_time.format("%Y-%m-%d %H:%M:%SZ")
+                    );
                     println!("  Raw Text:    {}", metar.raw_text);
-                    println!("  Wind:        {}/{} kt{}",
-                        metar.wind_dir_deg.map(|d| d.to_string()).unwrap_or_else(|| "VRB".to_string()),
+                    println!(
+                        "  Wind:        {}/{} kt{}",
+                        metar
+                            .wind_dir_deg
+                            .map(|d| d.to_string())
+                            .unwrap_or_else(|| "VRB".to_string()),
                         metar.wind_speed_kts.unwrap_or(0),
-                        metar.wind_gust_kts.map(|g| format!(" G {g} kt")).unwrap_or_default()
+                        metar
+                            .wind_gust_kts
+                            .map(|g| format!(" G {g} kt"))
+                            .unwrap_or_default()
                     );
                     println!("  Visibility:  {} SM", metar.visibility_sm.unwrap_or(10.0));
-                    println!("  Temperature: {}°C / Dewpoint: {}°C", metar.temp_c.unwrap_or(0.0), metar.dewpoint_c.unwrap_or(0.0));
-                    println!("  Altimeter:   {} hPa / {:.2} inHg", metar.altimeter_hpa.unwrap_or(1013.2), metar.altimeter_inhg.unwrap_or(29.92));
+                    println!(
+                        "  Temperature: {}°C / Dewpoint: {}°C",
+                        metar.temp_c.unwrap_or(0.0),
+                        metar.dewpoint_c.unwrap_or(0.0)
+                    );
+                    println!(
+                        "  Altimeter:   {} hPa / {:.2} inHg",
+                        metar.altimeter_hpa.unwrap_or(1013.2),
+                        metar.altimeter_inhg.unwrap_or(29.92)
+                    );
                 }
             }
             WeatherCmd::Taf {
@@ -2894,13 +3032,16 @@ fn main() -> Result<()> {
                 json,
                 cache_db,
             } => {
-                let parent = cache_db.parent().unwrap_or_else(|| std::path::Path::new("."));
+                let parent = cache_db
+                    .parent()
+                    .unwrap_or_else(|| std::path::Path::new("."));
                 std::fs::create_dir_all(parent)?;
                 let cache = openairac_weather::cache::WeatherCache::open(cache_db)?;
                 let prov = openairac_weather::providers::AviationWeatherProvider::new();
 
                 let icao = ident.trim().to_uppercase();
-                let taf = cache.get_taf(&icao)?
+                let taf = cache
+                    .get_taf(&icao)?
                     .or_else(|| {
                         prov.fetch_tafs(&[&icao]).ok().and_then(|mut v| {
                             if let Some(t) = v.pop() {
@@ -2916,41 +3057,63 @@ fn main() -> Result<()> {
                 if *json {
                     println!("{}", serde_json::to_string_pretty(&taf)?);
                 } else {
-                    println!("TAF for {} (Issue: {})", taf.station_id, taf.issue_time.format("%Y-%m-%d %H:%MZ"));
-                    println!("  Valid: {} to {}", taf.valid_from.format("%Y-%m-%d %H:%MZ"), taf.valid_to.format("%Y-%m-%d %H:%MZ"));
+                    println!(
+                        "TAF for {} (Issue: {})",
+                        taf.station_id,
+                        taf.issue_time.format("%Y-%m-%d %H:%MZ")
+                    );
+                    println!(
+                        "  Valid: {} to {}",
+                        taf.valid_from.format("%Y-%m-%d %H:%MZ"),
+                        taf.valid_to.format("%Y-%m-%d %H:%MZ")
+                    );
                     println!("  Raw:   {}", taf.raw_text);
                     println!("  Forecast Periods ({}):", taf.forecast_periods.len());
                     for (idx, p) in taf.forecast_periods.iter().enumerate() {
-                        println!("    {}. [{}] ({} - {}): {}", idx + 1, p.flight_category.as_str(), p.valid_from.format("%H:%MZ"), p.valid_to.format("%H:%MZ"), p.raw_period);
+                        println!(
+                            "    {}. [{}] ({} - {}): {}",
+                            idx + 1,
+                            p.flight_category.as_str(),
+                            p.valid_from.format("%H:%MZ"),
+                            p.valid_to.format("%H:%MZ"),
+                            p.raw_period
+                        );
                     }
                 }
             }
-            WeatherCmd::Sigmet {
-                json,
-                cache_db,
-            } => {
-                let parent = cache_db.parent().unwrap_or_else(|| std::path::Path::new("."));
+            WeatherCmd::Sigmet { json, cache_db } => {
+                let parent = cache_db
+                    .parent()
+                    .unwrap_or_else(|| std::path::Path::new("."));
                 std::fs::create_dir_all(parent)?;
                 let cache = openairac_weather::cache::WeatherCache::open(cache_db)?;
                 let prov = openairac_weather::providers::AviationWeatherProvider::new();
 
                 let mut sigmets = cache.get_active_sigmets(chrono::Utc::now())?;
-                if sigmets.is_empty() {
-                    if let Ok(fetched) = prov.fetch_international_sigmets() {
-                        let _ = cache.put_sigmets(&fetched);
-                        sigmets = fetched;
-                    }
+                if sigmets.is_empty()
+                    && let Ok(fetched) = prov.fetch_international_sigmets()
+                {
+                    let _ = cache.put_sigmets(&fetched);
+                    sigmets = fetched;
                 }
 
                 if *json {
                     println!("{}", serde_json::to_string_pretty(&sigmets)?);
                 } else {
                     println!("Active International SIGMETs (Total: {}):", sigmets.len());
-                    println!("{:<14} {:<18} {:<8} {:<16} {:<16}", "ID", "HAZARD", "FIR", "VALID FROM", "VALID TO");
+                    println!(
+                        "{:<14} {:<18} {:<8} {:<16} {:<16}",
+                        "ID", "HAZARD", "FIR", "VALID FROM", "VALID TO"
+                    );
                     println!("{}", "-".repeat(78));
                     for s in sigmets.iter().take(40) {
-                        println!("{:<14} {:<18} {:<8} {:<16} {:<16}",
-                            if s.id.len() > 12 { format!("{}..", &s.id[..12]) } else { s.id.clone() },
+                        println!(
+                            "{:<14} {:<18} {:<8} {:<16} {:<16}",
+                            if s.id.len() > 12 {
+                                format!("{}..", &s.id[..12])
+                            } else {
+                                s.id.clone()
+                            },
                             s.hazard.as_str(),
                             s.fir_id,
                             s.valid_from.format("%d %H:%MZ"),
@@ -2966,7 +3129,9 @@ fn main() -> Result<()> {
                 json,
                 cache_db,
             } => {
-                let parent = cache_db.parent().unwrap_or_else(|| std::path::Path::new("."));
+                let parent = cache_db
+                    .parent()
+                    .unwrap_or_else(|| std::path::Path::new("."));
                 std::fs::create_dir_all(parent)?;
                 let _cache = openairac_weather::cache::WeatherCache::open(cache_db)?;
                 let prov = openairac_weather::providers::AviationWeatherProvider::new();
@@ -2978,12 +3143,23 @@ fn main() -> Result<()> {
                 let eta = now + chrono::Duration::minutes((*hours * 60.0) as i64);
 
                 // Fetch METARs & TAFs
-                let dep_metar = prov.fetch_metars(&[&dep_icao]).ok().and_then(|mut v| v.pop());
+                let dep_metar = prov
+                    .fetch_metars(&[&dep_icao])
+                    .ok()
+                    .and_then(|mut v| v.pop());
                 let dep_taf = prov.fetch_tafs(&[&dep_icao]).ok().and_then(|mut v| v.pop());
-                let dest_metar = prov.fetch_metars(&[&dest_icao]).ok().and_then(|mut v| v.pop());
-                let dest_taf = prov.fetch_tafs(&[&dest_icao]).ok().and_then(|mut v| v.pop());
+                let dest_metar = prov
+                    .fetch_metars(&[&dest_icao])
+                    .ok()
+                    .and_then(|mut v| v.pop());
+                let dest_taf = prov
+                    .fetch_tafs(&[&dest_icao])
+                    .ok()
+                    .and_then(|mut v| v.pop());
 
-                let dest_eta_fcst = dest_taf.as_ref().and_then(|t| t.forecast_at_eta(eta).cloned());
+                let dest_eta_fcst = dest_taf
+                    .as_ref()
+                    .and_then(|t| t.forecast_at_eta(eta).cloned());
 
                 // Fetch SIGMETs and evaluate route corridor
                 let sigmets = prov.fetch_international_sigmets().unwrap_or_default();
@@ -2997,11 +3173,19 @@ fn main() -> Result<()> {
 
                 let corridor = openairac_weather::corridor::RouteCorridor::new(vec![
                     dep_coords,
-                    ((dep_coords.0 + dest_coords.0) / 2.0, (dep_coords.1 + dest_coords.1) / 2.0 + 3.0),
+                    (
+                        (dep_coords.0 + dest_coords.0) / 2.0,
+                        (dep_coords.1 + dest_coords.1) / 2.0 + 3.0,
+                    ),
                     dest_coords,
-                ]).with_width(50.0);
+                ])
+                .with_width(50.0);
 
-                let route_sigmets: Vec<openairac_weather::model::Sigmet> = corridor.filter_intersecting_sigmets(&sigmets).into_iter().cloned().collect();
+                let route_sigmets: Vec<openairac_weather::model::Sigmet> = corridor
+                    .filter_intersecting_sigmets(&sigmets)
+                    .into_iter()
+                    .cloned()
+                    .collect();
 
                 let briefing = openairac_weather::briefing::FlightBriefing {
                     departure_icao: dep_icao.clone(),
@@ -3017,7 +3201,11 @@ fn main() -> Result<()> {
                         taf_at_eta: None,
                         charts_count: if dep_icao == "KJFK" { 38 } else { 0 },
                         navdata_procedures_available: dep_icao.starts_with('K'),
-                        navdata_note: if dep_icao.starts_with('K') { "FAA CIFP SIDs & STARs active".to_string() } else { "OpenAIRAC navdata".to_string() },
+                        navdata_note: if dep_icao.starts_with('K') {
+                            "FAA CIFP SIDs & STARs active".to_string()
+                        } else {
+                            "OpenAIRAC navdata".to_string()
+                        },
                     },
                     destination: openairac_weather::briefing::AirportWeatherBriefing {
                         icao: dest_icao.clone(),
@@ -3026,7 +3214,12 @@ fn main() -> Result<()> {
                         taf_at_eta: dest_eta_fcst,
                         charts_count: if dest_icao == "LFPG" { 9 } else { 0 },
                         navdata_procedures_available: dest_icao.starts_with('K'),
-                        navdata_note: if dest_icao == "LFPG" { "Public SIA dataset contains 0 procedures; eAIP charts active".to_string() } else { "OpenAIRAC navdata".to_string() },
+                        navdata_note: if dest_icao == "LFPG" {
+                            "Public SIA dataset contains 0 procedures; eAIP charts active"
+                                .to_string()
+                        } else {
+                            "OpenAIRAC navdata".to_string()
+                        },
                     },
                     alternates: Vec::new(),
                     route_sigmets,
@@ -3044,7 +3237,9 @@ fn main() -> Result<()> {
             }
             WeatherCmd::Cache { cmd } => match cmd {
                 WeatherCacheCmd::Status { cache_db } => {
-                    let parent = cache_db.parent().unwrap_or_else(|| std::path::Path::new("."));
+                    let parent = cache_db
+                        .parent()
+                        .unwrap_or_else(|| std::path::Path::new("."));
                     std::fs::create_dir_all(parent)?;
                     let cache = openairac_weather::cache::WeatherCache::open(cache_db)?;
                     let st = cache.cache_status()?;
@@ -3054,6 +3249,564 @@ fn main() -> Result<()> {
                     println!("  Cached TAFs:     {}", st.cached_tafs);
                     println!("  Cached SIGMETs:  {}", st.cached_sigmets);
                     println!("  Cached PIREPs:   {}", st.cached_pireps);
+                }
+            },
+        },
+        Commands::Online { cmd } => match cmd {
+            OnlineCmd::Providers => {
+                println!("OpenAIRAC Online Network Providers:");
+                println!("  1. VATSIM");
+                println!("     Name:         Virtual Air Traffic Simulation Network");
+                println!("     API Version:  Official Data API v3 (/v3/vatsim-data.json)");
+                println!("     Events API:   Official Events API v2 (/api/v2/events)");
+                println!("     Cadence:      15 seconds");
+                println!("     Status:       Production / Authoritative Real-Time");
+                println!();
+                println!("  2. IVAO");
+                println!("     Name:         International Virtual Aviation Organisation");
+                println!("     Status:       Planned / Architecture Supported");
+            }
+            OnlineCmd::Vatsim { cmd } => match cmd {
+                VatsimCmd::Status { json, cache_db } => {
+                    let parent = cache_db
+                        .parent()
+                        .unwrap_or_else(|| std::path::Path::new("."));
+                    std::fs::create_dir_all(parent)?;
+                    let cache = openairac_online::OnlineCache::open(cache_db)?;
+                    let prov = openairac_online::VatsimProvider::new();
+                    use openairac_online::provider::OnlineNetworkProvider;
+
+                    let snapshot = match prov.fetch_snapshot() {
+                        Ok(s) => {
+                            let _ = cache.put_snapshot(&s);
+                            s
+                        }
+                        Err(e) => {
+                            if let Ok(Some(cached)) = cache.get_snapshot("VATSIM") {
+                                cached
+                            } else {
+                                anyhow::bail!("failed to fetch live VATSIM status: {e}");
+                            }
+                        }
+                    };
+
+                    if *json {
+                        let res = serde_json::json!({
+                            "provider": snapshot.provider_name,
+                            "freshness": snapshot.freshness.as_str(),
+                            "generated_at": snapshot.generated_at,
+                            "received_at": snapshot.received_at,
+                            "age_seconds": snapshot.age_seconds,
+                            "connected_clients": snapshot.connected_clients,
+                            "pilots_count": snapshot.pilots.len(),
+                            "controllers_count": snapshot.controllers.len(),
+                            "atis_count": snapshot.atis.len(),
+                            "servers_count": snapshot.servers.len(),
+                            "prefiles_count": snapshot.prefiles.len(),
+                        });
+                        println!("{}", serde_json::to_string_pretty(&res)?);
+                    } else {
+                        println!("VATSIM Network Status (Data API v3):");
+                        println!(
+                            "  Freshness:          {} (Age: {}s)",
+                            snapshot.freshness.as_str(),
+                            snapshot.age_seconds
+                        );
+                        println!(
+                            "  Generated At:       {}",
+                            snapshot.generated_at.format("%Y-%m-%d %H:%M:%SZ")
+                        );
+                        println!("  Connected Clients:  {}", snapshot.connected_clients);
+                        println!("  Live Pilots:        {}", snapshot.pilots.len());
+                        println!("  Active Controllers: {}", snapshot.controllers.len());
+                        println!("  Active ATIS:        {}", snapshot.atis.len());
+                        println!("  Connected Servers:  {}", snapshot.servers.len());
+                        println!("  Prefiled Plans:     {}", snapshot.prefiles.len());
+                    }
+                }
+                VatsimCmd::Pilots {
+                    callsign,
+                    limit,
+                    json,
+                    cache_db,
+                } => {
+                    let parent = cache_db
+                        .parent()
+                        .unwrap_or_else(|| std::path::Path::new("."));
+                    std::fs::create_dir_all(parent)?;
+                    let cache = openairac_online::OnlineCache::open(cache_db)?;
+                    let prov = openairac_online::VatsimProvider::new();
+                    use openairac_online::provider::OnlineNetworkProvider;
+
+                    let snapshot = match prov.fetch_snapshot() {
+                        Ok(s) => {
+                            let _ = cache.put_snapshot(&s);
+                            s
+                        }
+                        Err(e) => {
+                            if let Ok(Some(cached)) = cache.get_snapshot("VATSIM") {
+                                cached
+                            } else {
+                                anyhow::bail!("failed to fetch live VATSIM pilots: {e}");
+                            }
+                        }
+                    };
+
+                    let mut pilots: Vec<_> = snapshot.pilots;
+                    if let Some(cs) = callsign {
+                        let upper = cs.trim().to_uppercase();
+                        pilots.retain(|p| p.callsign.contains(&upper));
+                    }
+                    if let Some(lim) = limit {
+                        pilots.truncate(*lim);
+                    }
+
+                    if *json {
+                        println!("{}", serde_json::to_string_pretty(&pilots)?);
+                    } else {
+                        println!("VATSIM Live Pilots (Displaying: {}):", pilots.len());
+                        println!(
+                            "{:<10} {:<8} {:<10} {:<8} {:<6} {:<6} {:<6} {:<30}",
+                            "CALLSIGN", "AIRCRAFT", "ALTITUDE", "GS", "HDG", "DEP", "ARR", "ROUTE"
+                        );
+                        println!("{}", "-".repeat(90));
+                        for p in &pilots {
+                            let alt_str = if p.altitude_ft >= 18000 {
+                                format!("FL{}", p.altitude_ft / 100)
+                            } else {
+                                format!("{} ft", p.altitude_ft)
+                            };
+                            let ac_str = p.aircraft_type.as_deref().unwrap_or("---");
+                            let dep_str = p.departure_icao.as_deref().unwrap_or("----");
+                            let arr_str = p.arrival_icao.as_deref().unwrap_or("----");
+                            let route_str = p.route.as_deref().unwrap_or("Direct / No FP");
+                            let route_display = if route_str.len() > 28 {
+                                format!("{}...", &route_str[..25])
+                            } else {
+                                route_str.to_string()
+                            };
+
+                            println!(
+                                "{:<10} {:<8} {:<10} {:<8} {:<6} {:<6} {:<6} {:<30}",
+                                p.callsign,
+                                ac_str,
+                                alt_str,
+                                format!("{} kt", p.groundspeed_kt),
+                                format!("{:03}°", p.heading_deg),
+                                dep_str,
+                                arr_str,
+                                route_display
+                            );
+                        }
+                    }
+                }
+                VatsimCmd::Controllers {
+                    callsign,
+                    limit,
+                    json,
+                    cache_db,
+                } => {
+                    let parent = cache_db
+                        .parent()
+                        .unwrap_or_else(|| std::path::Path::new("."));
+                    std::fs::create_dir_all(parent)?;
+                    let cache = openairac_online::OnlineCache::open(cache_db)?;
+                    let prov = openairac_online::VatsimProvider::new();
+                    use openairac_online::provider::OnlineNetworkProvider;
+
+                    let snapshot = match prov.fetch_snapshot() {
+                        Ok(s) => {
+                            let _ = cache.put_snapshot(&s);
+                            s
+                        }
+                        Err(e) => {
+                            if let Ok(Some(cached)) = cache.get_snapshot("VATSIM") {
+                                cached
+                            } else {
+                                anyhow::bail!("failed to fetch live VATSIM controllers: {e}");
+                            }
+                        }
+                    };
+
+                    let mut controllers = snapshot.controllers;
+                    if let Some(cs) = callsign {
+                        let upper = cs.trim().to_uppercase();
+                        controllers.retain(|c| c.callsign.contains(&upper));
+                    }
+                    if let Some(lim) = limit {
+                        controllers.truncate(*lim);
+                    }
+
+                    if *json {
+                        println!("{}", serde_json::to_string_pretty(&controllers)?);
+                    } else {
+                        println!(
+                            "VATSIM Active Controllers (Displaying: {}):",
+                            controllers.len()
+                        );
+                        println!(
+                            "{:<16} {:<10} {:<6} {:<8} {:<16}",
+                            "CALLSIGN", "FREQUENCY", "TYPE", "RATING", "STATION/AIRPORT"
+                        );
+                        println!("{}", "-".repeat(60));
+                        for c in &controllers {
+                            let apt = c.associated_airport.as_deref().unwrap_or(if c.is_enroute {
+                                "ENROUTE CENTER"
+                            } else {
+                                "---"
+                            });
+                            println!(
+                                "{:<16} {:<10} {:<6} {:<8} {:<16}",
+                                c.callsign,
+                                c.frequency,
+                                c.facility_type.as_str(),
+                                format!("S{}", c.rating),
+                                apt
+                            );
+                        }
+                    }
+                }
+                VatsimCmd::Airport {
+                    ident,
+                    json,
+                    cache_db,
+                } => {
+                    let parent = cache_db
+                        .parent()
+                        .unwrap_or_else(|| std::path::Path::new("."));
+                    std::fs::create_dir_all(parent)?;
+                    let cache = openairac_online::OnlineCache::open(cache_db)?;
+                    let prov = openairac_online::VatsimProvider::new();
+                    use openairac_online::provider::OnlineNetworkProvider;
+
+                    let snapshot = match prov.fetch_snapshot() {
+                        Ok(s) => {
+                            let _ = cache.put_snapshot(&s);
+                            s
+                        }
+                        Err(e) => {
+                            if let Ok(Some(cached)) = cache.get_snapshot("VATSIM") {
+                                cached
+                            } else {
+                                anyhow::bail!("failed to fetch live VATSIM snapshot: {e}");
+                            }
+                        }
+                    };
+
+                    let icao = ident.trim().to_uppercase();
+                    let summary =
+                        openairac_online::summarize_airport_online(&icao, None, &snapshot);
+
+                    if *json {
+                        println!("{}", serde_json::to_string_pretty(&summary)?);
+                    } else {
+                        println!(
+                            "================================================================================"
+                        );
+                        println!("OpenAIRAC Online Airport Summary: {} [VATSIM]", icao);
+                        println!(
+                            "================================================================================"
+                        );
+                        println!(
+                            "1. AIR TRAFFIC CONTROL STATIONS (Online: {})",
+                            summary.atc_controllers.len()
+                        );
+                        if summary.atc_controllers.is_empty() {
+                            println!("   No active ATC stations online for {}", icao);
+                        } else {
+                            for c in &summary.atc_controllers {
+                                println!(
+                                    "   - [{:<4}] {:<14} {:<10} ({})",
+                                    c.facility_type.as_str(),
+                                    c.callsign,
+                                    c.frequency,
+                                    c.facility_type.full_name()
+                                );
+                            }
+                        }
+                        println!();
+
+                        println!("2. AUTOMATIC TERMINAL INFORMATION SERVICE (ATIS)");
+                        if let Some(atis) = &summary.atis {
+                            let code = atis
+                                .atis_code
+                                .map(|c| format!("INFO {c}"))
+                                .unwrap_or_else(|| "INFO ---".to_string());
+                            println!("   Callsign:  {} ({})", atis.callsign, code);
+                            println!("   Frequency: {}", atis.frequency);
+                            println!("   ATIS Text:");
+                            for line in &atis.text_atis {
+                                println!("     {}", line);
+                            }
+                        } else {
+                            println!("   No ATIS broadcast currently online for {}", icao);
+                        }
+                        println!();
+
+                        println!("3. ACTIVE AIRPORT TRAFFIC");
+                        println!("   Filed Arrivals:    {}", summary.filed_arrivals.len());
+                        println!("   Filed Departures:  {}", summary.filed_departures.len());
+                        println!("   Traffic on Ground: {}", summary.on_ground_traffic.len());
+                        println!(
+                            "================================================================================"
+                        );
+                    }
+                }
+                VatsimCmd::Atis {
+                    ident,
+                    json,
+                    cache_db,
+                } => {
+                    let parent = cache_db
+                        .parent()
+                        .unwrap_or_else(|| std::path::Path::new("."));
+                    std::fs::create_dir_all(parent)?;
+                    let cache = openairac_online::OnlineCache::open(cache_db)?;
+                    let prov = openairac_online::VatsimProvider::new();
+                    use openairac_online::provider::OnlineNetworkProvider;
+
+                    let snapshot = match prov.fetch_snapshot() {
+                        Ok(s) => {
+                            let _ = cache.put_snapshot(&s);
+                            s
+                        }
+                        Err(e) => {
+                            if let Ok(Some(cached)) = cache.get_snapshot("VATSIM") {
+                                cached
+                            } else {
+                                anyhow::bail!("failed to fetch live VATSIM snapshot: {e}");
+                            }
+                        }
+                    };
+
+                    let icao = ident.trim().to_uppercase();
+                    let atis = snapshot.atis.into_iter().find(|a| a.airport_ident == icao);
+
+                    if *json {
+                        println!("{}", serde_json::to_string_pretty(&atis)?);
+                    } else if let Some(a) = atis {
+                        let code = a
+                            .atis_code
+                            .map(|c| format!("INFO {c}"))
+                            .unwrap_or_else(|| "INFO ---".to_string());
+                        println!("VATSIM ATIS Broadcast for {}:", icao);
+                        println!("  Station:   {} ({})", a.callsign, code);
+                        println!("  Frequency: {}", a.frequency);
+                        println!(
+                            "  Updated:   {}",
+                            a.last_updated
+                                .map(|dt| dt.format("%Y-%m-%d %H:%M:%SZ").to_string())
+                                .unwrap_or_else(|| "Unknown".to_string())
+                        );
+                        println!("  Text Broadcast:");
+                        for line in &a.text_atis {
+                            println!("    {}", line);
+                        }
+                    } else {
+                        println!("No active VATSIM ATIS broadcast online for {}", icao);
+                    }
+                }
+                VatsimCmd::Route {
+                    departure,
+                    arrival,
+                    corridor_width,
+                    json,
+                    cache_db,
+                } => {
+                    let parent = cache_db
+                        .parent()
+                        .unwrap_or_else(|| std::path::Path::new("."));
+                    std::fs::create_dir_all(parent)?;
+                    let cache = openairac_online::OnlineCache::open(cache_db)?;
+                    let prov = openairac_online::VatsimProvider::new();
+                    use openairac_online::provider::OnlineNetworkProvider;
+
+                    let mut snapshot = match prov.fetch_snapshot() {
+                        Ok(s) => {
+                            let _ = cache.put_snapshot(&s);
+                            s
+                        }
+                        Err(e) => {
+                            if let Ok(Some(cached)) = cache.get_snapshot("VATSIM") {
+                                cached
+                            } else {
+                                anyhow::bail!("failed to fetch live VATSIM snapshot: {e}");
+                            }
+                        }
+                    };
+
+                    if let Ok(events) = prov.fetch_events() {
+                        snapshot.events = events;
+                    }
+
+                    let dep = departure.trim().to_uppercase();
+                    let arr = arrival.trim().to_uppercase();
+
+                    let awareness = openairac_online::RouteOnlineAwareness::analyze(
+                        &dep,
+                        &arr,
+                        &[],
+                        *corridor_width,
+                        &snapshot,
+                    );
+
+                    if *json {
+                        println!("{}", serde_json::to_string_pretty(&awareness)?);
+                    } else {
+                        println!(
+                            "================================================================================"
+                        );
+                        println!(
+                            "OpenAIRAC Route Online Awareness: {} -> {} [VATSIM]",
+                            dep, arr
+                        );
+                        println!(
+                            "================================================================================"
+                        );
+                        println!("1. DEPARTURE ATC ({})", dep);
+                        if awareness.departure_atc.is_empty() {
+                            println!("   No active departure ATC online for {}", dep);
+                        } else {
+                            for rc in &awareness.departure_atc {
+                                println!(
+                                    "   - [{:<4}] {:<14} {:<10} ({}) [{}]",
+                                    rc.controller.facility_type.as_str(),
+                                    rc.controller.callsign,
+                                    rc.controller.frequency,
+                                    rc.controller.facility_type.full_name(),
+                                    rc.confidence.as_str()
+                                );
+                            }
+                        }
+                        if let Some(a) = &awareness.departure_atis {
+                            println!(
+                                "   Departure ATIS: {} (Code: {:?}, Freq: {})",
+                                a.callsign,
+                                a.atis_code.unwrap_or('-'),
+                                a.frequency
+                            );
+                        }
+                        println!();
+
+                        println!("2. ENROUTE ATC SECTORS ALONG ROUTE");
+                        if awareness.enroute_atc.is_empty() {
+                            println!("   No relevant enroute centers currently identified online");
+                        } else {
+                            for rc in &awareness.enroute_atc {
+                                println!(
+                                    "   - [{:<4}] {:<16} {:<10} - {} [{}]",
+                                    rc.controller.facility_type.as_str(),
+                                    rc.controller.callsign,
+                                    rc.controller.frequency,
+                                    rc.note.as_deref().unwrap_or("Enroute sector"),
+                                    rc.confidence.as_str()
+                                );
+                            }
+                        }
+                        println!();
+
+                        println!("3. ARRIVAL ATC ({})", arr);
+                        if awareness.arrival_atc.is_empty() {
+                            println!("   No active arrival ATC online for {}", arr);
+                        } else {
+                            for rc in &awareness.arrival_atc {
+                                println!(
+                                    "   - [{:<4}] {:<14} {:<10} ({}) [{}]",
+                                    rc.controller.facility_type.as_str(),
+                                    rc.controller.callsign,
+                                    rc.controller.frequency,
+                                    rc.controller.facility_type.full_name(),
+                                    rc.confidence.as_str()
+                                );
+                            }
+                        }
+                        if let Some(a) = &awareness.arrival_atis {
+                            println!(
+                                "   Arrival ATIS: {} (Code: {:?}, Freq: {})",
+                                a.callsign,
+                                a.atis_code.unwrap_or('-'),
+                                a.frequency
+                            );
+                        }
+                        println!();
+
+                        if !awareness.matching_events.is_empty() {
+                            println!(
+                                "4. MATCHING VATSIM ONLINE EVENTS (Total: {})",
+                                awareness.matching_events.len()
+                            );
+                            for ev in &awareness.matching_events {
+                                println!(
+                                    "   - Event: {} (Valid: {} to {})",
+                                    ev.name,
+                                    ev.start_time.format("%Y-%m-%d %H:%MZ"),
+                                    ev.end_time.format("%Y-%m-%d %H:%MZ")
+                                );
+                            }
+                            println!();
+                        }
+                        println!(
+                            "================================================================================"
+                        );
+                    }
+                }
+                VatsimCmd::Events { json, cache_db } => {
+                    let parent = cache_db
+                        .parent()
+                        .unwrap_or_else(|| std::path::Path::new("."));
+                    std::fs::create_dir_all(parent)?;
+                    let mut cache = openairac_online::OnlineCache::open(cache_db)?;
+                    let prov = openairac_online::VatsimProvider::new();
+                    use openairac_online::provider::OnlineNetworkProvider;
+
+                    let events = match prov.fetch_events() {
+                        Ok(evs) => {
+                            let _ = cache.put_events(&evs);
+                            evs
+                        }
+                        Err(e) => {
+                            if let Ok(cached) =
+                                cache.get_active_and_upcoming_events(chrono::Utc::now())
+                            {
+                                cached
+                            } else {
+                                anyhow::bail!("failed to fetch live VATSIM events: {e}");
+                            }
+                        }
+                    };
+
+                    if *json {
+                        println!("{}", serde_json::to_string_pretty(&events)?);
+                    } else {
+                        println!("VATSIM Active & Upcoming Events (Total: {}):", events.len());
+                        println!(
+                            "{:<8} {:<36} {:<18} {:<18} {:<16}",
+                            "ID", "EVENT NAME", "START (UTC)", "END (UTC)", "AIRPORTS"
+                        );
+                        println!("{}", "-".repeat(95));
+                        for ev in &events {
+                            let apts = ev.airports.join(", ");
+                            let apts_display = if apts.len() > 15 {
+                                format!("{}...", &apts[..12])
+                            } else {
+                                apts
+                            };
+                            let name_display = if ev.name.len() > 34 {
+                                format!("{}...", &ev.name[..31])
+                            } else {
+                                ev.name.clone()
+                            };
+
+                            println!(
+                                "{:<8} {:<36} {:<18} {:<18} {:<16}",
+                                ev.id,
+                                name_display,
+                                ev.start_time.format("%Y-%m-%d %H:%MZ").to_string(),
+                                ev.end_time.format("%Y-%m-%d %H:%MZ").to_string(),
+                                apts_display
+                            );
+                        }
+                    }
                 }
             },
         },
