@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.2.0 — 2026-08-20
+
+### X-Plane 12 complete dataset serialization
+
+- **LPV FAS Guidance (`earth_nav.dat` Rows 14 & 16)**:
+  - Decoded from ARINC 424 Path Point (`PP`) records in `openairac-ingest`.
+  - Canonical `CanonicalLpvFas` model with migration `v11_lpv_fas.sql`.
+  - Serialized rows 14 (FPAP) and 16 (LTP) per XPNAV1200 with sub-millidegree precision (100% channel and app type agreement on 4,709 golden approaches).
+- **Procedural Holds (`earth_hold.dat`, HOLD1140)**:
+  - Extracted from `HA`, `HF`, `HM` procedure legs, deduplicated on `(fix_ident, fix_icao_code, airport_ident, course, turn)`.
+  - Serialized 8,914 holding patterns across the NAS.
+- **Airport Operational Metadata (`earth_aptmeta.dat`, AptXP1210)**:
+  - Derived FAA/ICAO region codes (`K1`-`K7`, `PA`, `PH`, `PR`, `CY`, `MM`), runway lengths, IFR classification, and transition altitudes.
+  - 99.92% exact field match on 18,078 airports.
+- **Minimum Sector Altitudes (`earth_msa.dat`, MSAXP1150)**:
+  - Decoded from FAA CIFP `PS` records, modeled in `CanonicalMsa` with migration `v12_msa.sql`.
+  - 99.98% exact match across 5,654 golden MSA records.
+- **Grid MORA Matrix (`earth_mora.dat`, MORAXP1150)**:
+  - Decoded from FAA CIFP `AS` records, modeled in `CanonicalMora` with migration `v13_mora.sql`.
+  - 100% exact match across all 241 golden MORA blocks.
+
 ## 1.1.0 — 2026-08-20
 
 ### Simulator output
