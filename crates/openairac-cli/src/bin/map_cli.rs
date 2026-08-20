@@ -573,7 +573,9 @@ async fn main() -> Result<()> {
                 if cli.json {
                     println!("{}", serde_json::to_string_pretty(&res)?);
                 } else {
-                    println!("Procedures for UERS (Saskylakh 71°N):\n  SIDs: LENA 1A\n  STARs: SASKY 1A\n  Approaches: RNP 04");
+                    println!(
+                        "Procedures for UERS (Saskylakh 71°N):\n  SIDs: LENA 1A\n  STARs: SASKY 1A\n  Approaches: RNP 04"
+                    );
                 }
             } else if clean == "UHNA" {
                 let res = serde_json::json!({
@@ -588,7 +590,9 @@ async fn main() -> Result<()> {
                 if cli.json {
                     println!("{}", serde_json::to_string_pretty(&res)?);
                 } else {
-                    println!("Procedures for UHNA (Ayan Munuk):\n  SIDs: AYAN 1A\n  STARs: MUNUK 1A\n  Approaches: RNP 06");
+                    println!(
+                        "Procedures for UHNA (Ayan Munuk):\n  SIDs: AYAN 1A\n  STARs: MUNUK 1A\n  Approaches: RNP 06"
+                    );
                 }
             } else if cli.json {
                 println!("Procedures for {}: Query complete", clean);
