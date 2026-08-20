@@ -198,6 +198,61 @@ providers:
     source_uri_pattern: "http://data.cquest.org/dgac/aip/"
     notes: "French AIP / AIXM 4.5 aeronautical data under Etalab Licence Ouverte v2.0."
 
+  FR_SIA_PROCEDURES:
+    name: "FR_SIA_PROCEDURES"
+    namespace: "sia_proc"
+    jurisdiction: "FR"
+    authority: "Service de l'Information Aeronautique (DGAC France)"
+    format: "sia_data_pdf"
+    airac_cadence: "28-day AIRAC"
+    license_id: "Licence-Ouverte-v2.0"
+    redistribution: "public_redistribution"
+    derivative_work_allowed: true
+    attribution_required: true
+    attribution_notice: "Service de l'Information Aeronautique - DGAC France (Licence Ouverte v2.0)"
+    is_local_only: false
+    coverage:
+      airports: false
+      runways: false
+      navaids: false
+      fixes: true
+      airways: false
+      sids: true
+      stars: true
+      approaches: true
+      lpv_fas: false
+      msa: false
+      mora: false
+    source_uri_pattern: "https://www.sia.aviation-civile.gouv.fr/"
+    notes: "French SIA official structured procedure database tables (DATA SID/STAR/RNP) under Licence Ouverte v2.0."
+
+  ES_ENAIRE_PROCEDURES:
+    name: "ES_ENAIRE_PROCEDURES"
+    namespace: "enaire_proc"
+    jurisdiction: "ES"
+    authority: "ENAIRE (AIP Espana)"
+    format: "enaire_data_pdf"
+    airac_cadence: "28-day AIRAC"
+    license_id: "ENAIRE-AIP-TermsOfUse"
+    redistribution: "local_only"
+    derivative_work_allowed: true
+    attribution_required: true
+    attribution_notice: "ENAIRE AIP Espana"
+    is_local_only: true
+    coverage:
+      airports: false
+      runways: false
+      navaids: false
+      fixes: true
+      airways: false
+      sids: true
+      stars: true
+      approaches: true
+      lpv_fas: false
+      msa: false
+      mora: false
+    source_uri_pattern: "https://aip.enaire.es/"
+    notes: "Spanish ENAIRE AIP tabular procedure descriptions; redistribution restricted without prior written authorization, local use only."
   Eurocontrol_EAD:
     name: "Eurocontrol_EAD"
     namespace: "ead"

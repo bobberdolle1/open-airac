@@ -49,8 +49,48 @@ impl FrequencyKhz {
     }
 }
 
+/// Source Document Taxonomy classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceDocumentTaxonomy {
+    /// Complete structured machine-readable dataset (e.g. FAA CIFP, AIXM 4.5/5.1 XML).
+    StructuredNavDataset,
+    /// Official published procedure coding table / database requirements (e.g. SIA DATA SID/STAR/RNP, ENAIRE tabular descriptions).
+    StructuredProcedurePublication,
+    /// Human-readable graphical chart plate (e.g. IAC, VAC, SID/STAR graphical PDF plate).
+    HumanReadableChart,
+    /// Geometrically derived or reconstructed auxiliary layer (e.g. FIR polygon boundaries, magnetic variation grids).
+    DerivedGeometry,
+}
+
+impl SourceDocumentTaxonomy {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::StructuredNavDataset => "structured_nav_dataset",
+            Self::StructuredProcedurePublication => "structured_procedure_publication",
+            Self::HumanReadableChart => "human_readable_chart",
+            Self::DerivedGeometry => "derived_geometry",
+        }
+    }
+
+    pub fn display_badge(&self) -> &'static str {
+        match self {
+            Self::StructuredNavDataset => "[DATASET]",
+            Self::StructuredProcedurePublication => "[PROCEDURE_PUB]",
+            Self::HumanReadableChart => "[CHART]",
+            Self::DerivedGeometry => "[DERIVED]",
+        }
+    }
+
+    pub fn is_machine_readable_procedure_source(&self) -> bool {
+        matches!(
+            self,
+            Self::StructuredNavDataset | Self::StructuredProcedurePublication
+        )
+    }
+}
+
 /// Source Provenance tracking data origins & licenses
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourceSnapshot {
     pub id: SourceSnapshotId,
     pub provider: String,

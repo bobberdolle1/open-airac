@@ -75,6 +75,8 @@ pub enum DatasetFormat {
     CustomXml,
     /// Custom JSON format.
     CustomJson,
+    /// Official procedure coding publication table format (e.g. SIA DATA, ENAIRE tabular).
+    ProcedurePublicationPdf,
 }
 
 impl DatasetFormat {
@@ -87,6 +89,7 @@ impl DatasetFormat {
             Self::CustomCsv => "custom_csv",
             Self::CustomXml => "custom_xml",
             Self::CustomJson => "custom_json",
+            Self::ProcedurePublicationPdf => "procedure_pub_pdf",
         }
     }
 }
@@ -510,6 +513,76 @@ impl ProviderRegistry {
             ),
         });
 
+        // 5c. French SIA Structured Procedure Publications (DATA SID, DATA STAR, DATA RNP Approach)
+        reg.register(ProviderPolicy {
+            name: "FR_SIA_PROCEDURES".to_string(),
+            namespace: "sia_proc".to_string(),
+            jurisdiction: "FR".to_string(),
+            authority: "Service de l'Information Aeronautique (DGAC France)".to_string(),
+            format: DatasetFormat::ProcedurePublicationPdf,
+            airac_cadence: Some("28-day AIRAC".to_string()),
+            license_id: "Licence-Ouverte-v2.0".to_string(),
+            redistribution: RedistributionPermission::PublicRedistribution,
+            derivative_work_allowed: true,
+            attribution_required: true,
+            attribution_notice: Some(
+                "Service de l'Information Aeronautique - DGAC France (Licence Ouverte v2.0)"
+                    .to_string(),
+            ),
+            is_local_only: false,
+            coverage: ProviderEntityCoverage {
+                airports: false,
+                runways: false,
+                navaids: false,
+                fixes: true,
+                airways: false,
+                sids: true,
+                stars: true,
+                approaches: true,
+                lpv_fas: false,
+                msa: false,
+                mora: false,
+            },
+            source_uri_pattern: Some("https://www.sia.aviation-civile.gouv.fr/".to_string()),
+            notes: Some(
+                "French SIA official structured procedure database tables (DATA SID/STAR/RNP) under Licence Ouverte v2.0."
+                    .to_string(),
+            ),
+        });
+
+        // 5d. Spain ENAIRE AIP Tabular Procedures (Local-Only / BYOD)
+        reg.register(ProviderPolicy {
+            name: "ES_ENAIRE_PROCEDURES".to_string(),
+            namespace: "enaire_proc".to_string(),
+            jurisdiction: "ES".to_string(),
+            authority: "ENAIRE (AIP Espana)".to_string(),
+            format: DatasetFormat::ProcedurePublicationPdf,
+            airac_cadence: Some("28-day AIRAC".to_string()),
+            license_id: "ENAIRE-AIP-TermsOfUse".to_string(),
+            redistribution: RedistributionPermission::LocalOnly,
+            derivative_work_allowed: true,
+            attribution_required: true,
+            attribution_notice: Some("ENAIRE AIP Espana".to_string()),
+            is_local_only: true,
+            coverage: ProviderEntityCoverage {
+                airports: false,
+                runways: false,
+                navaids: false,
+                fixes: true,
+                airways: false,
+                sids: true,
+                stars: true,
+                approaches: true,
+                lpv_fas: false,
+                msa: false,
+                mora: false,
+            },
+            source_uri_pattern: Some("https://aip.enaire.es/".to_string()),
+            notes: Some(
+                "Spanish ENAIRE AIP tabular procedure descriptions; redistribution restricted without prior written authorization, local use only."
+                    .to_string(),
+            ),
+        });
         // 6. Eurocontrol EAD (European AIS Database) - Local-Only / BYOD
         reg.register(ProviderPolicy {
             name: "Eurocontrol_EAD".to_string(),

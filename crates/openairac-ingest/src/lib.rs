@@ -5,10 +5,12 @@ pub mod faa_cifp;
 pub mod ourairports;
 pub mod provider;
 pub mod registry;
+pub mod sia_procedures;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use openairac_store::WorldStore;
+pub use sia_procedures::{SiaParsedProcedure, SiaProcedureProvider, SiaRawLegRow};
 
 /// Automatic version-detecting AIXM ingest helper (supports AIXM 4.5 and AIXM 5.x).
 /// Options for version-detecting AIXM ingestion.

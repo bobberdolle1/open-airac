@@ -1,5 +1,34 @@
 # Changelog
 
+## 2.1.0 — 2026-08-20
+
+### Worldwide Procedures Expansion I: France Official Procedure Tables
+
+- **Source Document Taxonomy (`openairac-model`)**:
+  - Explicit classification into `StructuredNavDataset`, `StructuredProcedurePublication`, `HumanReadableChart`, and `DerivedGeometry`.
+  - Distinguishes authoritative structured procedure coding tables from non-navdata graphical charts.
+
+- **French SIA Official Procedure Publication Ingestion (`openairac-ingest::sia_procedures`)**:
+  - Parser for official DGAC / SIA France Section AD 2.24 database requirement tables (`DATA SID`, `DATA STAR`, `DATA RNP Approach`).
+  - Lossless extraction of ARINC 424 coding fields: path terminators (`IF`, `TF`, `CF`, `DF`), sequence numbers, fly-over flags, magnetic/true tracks, distances, turn directions, altitude constraint windows (`Between`, `AtOrAbove`, `AtOrBelow`, `At`), speed limits (`MAX IAS`), navigation specifications (`RNAV 1`, `RNP 1`, `RNP APCH`), vertical angle, and TCH.
+  - Scoped terminal fix coordinate resolution for French airports (e.g. `PG261`, `PG262`, `PG081`, `PG082`, `PO061`, `MN041`, `LL011`, `BO141`, `RW26L`, `RW08R`).
+  - Provenance tracked under `FR_SIA_PROCEDURES` with Etalab Licence Ouverte v2.0 for public redistribution.
+
+- **Spain ENAIRE Research & Legal Boundaries**:
+  - Audited Spanish ENAIRE AIP procedure descriptions; classified as `LocalOnly` (prohibited from unauthorized public distribution).
+
+- **Procedure Management CLI (`openairac procedures ...`)**:
+  - Added `procedures list <ICAO>`, `procedures show <ICAO> <PROC>`, `procedures provenance <ICAO> <PROC>`, `procedures validate <ICAO>`, and `procedures import-sia <file>` with full `--json` support.
+
+## 2.0.0 — 2026-08-20
+
+### Core 2.0 Readiness / Distribution / Productization
+
+- **Protocol v2 Compatibility Handshake (`openairac-service`)**:
+  - Client-Core version handshake (`check_client_compatibility`).
+  - `BootstrapIndex` publishing recommended downloadable bundles (`world-open`, `us`, `europe-open`) with cryptographic SHA-256 hashes.
+  - System diagnostics generator (`generate_diagnostic_report`) with sanitized path export.
+
 ## 1.9.0 — 2026-08-20
 
 ### Advanced EFB / Georeferenced Raster Foundation & Flight Automation
