@@ -26,6 +26,9 @@ pub struct WorldRevisionId(pub String);
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct LpvFasId(pub String);
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct MsaId(pub String);
+
 /// Frequency wrapper with explicit units (kHz)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrequencyKhz(pub u32);
@@ -114,6 +117,29 @@ pub struct CanonicalLpvFas {
     pub length_offset_m: f64,
     pub tch_ft: f64,
     pub gpa_deg: f64,
+    pub temporal: TemporalValidity,
+}
+
+/// One sector within a Minimum Sector Altitude (MSA) ring
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MsaSector {
+    pub bearing_deg: u32,
+    pub altitude_hundreds_ft: u32,
+    pub radius_nm: u32,
+}
+
+/// Canonical Minimum Sector Altitude (MSA / Section PS records)
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CanonicalMsa {
+    pub object_id: MsaId,
+    pub airport_ident: String,
+    pub icao_code: String,
+    pub center_fix: String,
+    pub center_icao_code: String,
+    pub center_section: String,
+    pub fix_type: u8,
+    pub magnetic_true_indicator: char,
+    pub sectors: Vec<MsaSector>,
     pub temporal: TemporalValidity,
 }
 
@@ -337,6 +363,7 @@ pub struct StoreStatus {
     pub total_airway_legs: usize,
     pub total_procedure_legs: usize,
     pub total_lpv_fas: usize,
+    pub total_msa: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -694,6 +721,7 @@ pub const PROVIDER_MANIFESTS: &[ProviderManifest] = &[
                 "airway_legs",
                 "procedure_legs",
                 "lpv_fas",
+                "msa",
             ],
         }],
     },

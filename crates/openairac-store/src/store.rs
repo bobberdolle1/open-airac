@@ -227,7 +227,12 @@ impl WorldStore {
                 .execute_batch(include_str!("../migrations/v11_lpv_fas.sql"))
                 .context("Failed to execute database migration v11_lpv_fas.sql")?;
         }
-        self.conn.pragma_update(None, "user_version", 11)?;
+        if version < 12 {
+            self.conn
+                .execute_batch(include_str!("../migrations/v12_msa.sql"))
+                .context("Failed to execute database migration v12_msa.sql")?;
+        }
+        self.conn.pragma_update(None, "user_version", 12)?;
         Ok(())
     }
 
@@ -301,6 +306,15 @@ impl WorldStore {
     /// Query LPV FAS records valid at a given UTC instant.
     pub fn query_lpv_fas_at(&self, date: DateTime<Utc>) -> Result<Vec<CanonicalLpvFas>> {
         query_lpv_fas_at_conn(&self.conn, date)
+    }
+
+    pub fn insert_msa(&self, record: &CanonicalMsa) -> Result<EntityWrite> {
+        insert_msa_conn(&self.conn, record)
+    }
+
+    /// Query MSA records valid at a given UTC instant.
+    pub fn query_msa_at(&self, date: DateTime<Utc>) -> Result<Vec<CanonicalMsa>> {
+        query_msa_at_conn(&self.conn, date)
     }
 }
 
@@ -1967,6 +1981,9 @@ impl WorldStore {
             total_lpv_fas: self
                 .conn
                 .query_row("SELECT COUNT(*) FROM lpv_fas;", [], |r| r.get(0))?,
+            total_msa: self
+                .conn
+                .query_row("SELECT COUNT(*) FROM msa;", [], |r| r.get(0))?,
         })
     }
 }
@@ -3187,6 +3204,158 @@ pub fn query_lpv_fas_at_conn(
     Ok(out)
 }
 
+pub fn insert_msa_conn(conn: &Connection, record: &CanonicalMsa) -> Result<EntityWrite> {
+    validate_temporal(&record.temporal)?;
+    let id = &record.object_id.0;
+    let vf = rfc3339(record.temporal.valid_from);
+    let vu = record.temporal.valid_until.map(rfc3339);
+
+    let existing = conn
+        .query_row(
+            "SELECT airport_ident, icao_code, center_fix, center_icao_code,
+                    center_section, fix_type, magnetic_true_indicator,
+                    sectors_json, source_snapshot_id, valid_from
+             FROM msa WHERE id = ?1 ORDER BY valid_from DESC LIMIT 1",
+            params![id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, u8>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, String>(9)?,
+                ))
+            },
+        )
+        .optional()?;
+
+    let write = if let Some((
+        airport_ident,
+        icao_code,
+        center_fix,
+        center_icao_code,
+        center_section,
+        fix_type,
+        mag_true,
+        sectors_json,
+        source_snapshot_id,
+        prev_vf,
+    )) = existing
+    {
+        let new_sectors_json = serde_json::to_string(&record.sectors).unwrap_or_default();
+        let unchanged = airport_ident == record.airport_ident
+            && icao_code == record.icao_code
+            && center_fix == record.center_fix
+            && center_icao_code == record.center_icao_code
+            && center_section == record.center_section
+            && fix_type == record.fix_type
+            && mag_true == record.magnetic_true_indicator.to_string()
+            && sectors_json == new_sectors_json
+            && source_snapshot_id == record.temporal.source_snapshot_id.0;
+
+        if unchanged {
+            EntityWrite::Unchanged
+        } else {
+            close_open_revision(conn, "msa", id, &prev_vf, &vf)?;
+            insert_msa_row(conn, record, &vf, &vu)?;
+            EntityWrite::Updated
+        }
+    } else {
+        insert_msa_row(conn, record, &vf, &vu)?;
+        EntityWrite::Created
+    };
+
+    record_observation(conn, "msa", id, &record.temporal.source_snapshot_id.0, &vf)?;
+
+    Ok(write)
+}
+
+fn insert_msa_row(
+    conn: &Connection,
+    record: &CanonicalMsa,
+    vf: &str,
+    vu: &Option<String>,
+) -> Result<()> {
+    let sectors_json = serde_json::to_string(&record.sectors)?;
+    conn.execute(
+        "INSERT INTO msa (
+            id, airport_ident, icao_code, center_fix, center_icao_code,
+            center_section, fix_type, magnetic_true_indicator, sectors_json,
+            source_snapshot_id, valid_from, valid_until
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        params![
+            record.object_id.0,
+            record.airport_ident,
+            record.icao_code,
+            record.center_fix,
+            record.center_icao_code,
+            record.center_section,
+            record.fix_type,
+            record.magnetic_true_indicator.to_string(),
+            sectors_json,
+            record.temporal.source_snapshot_id.0,
+            vf,
+            vu,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Query MSA records valid at a given UTC instant.
+pub fn query_msa_at_conn(conn: &Connection, date: DateTime<Utc>) -> Result<Vec<CanonicalMsa>> {
+    let date_str = rfc3339(date);
+    let mut stmt = conn.prepare(&format!(
+        "SELECT id, airport_ident, icao_code, center_fix, center_icao_code,
+                center_section, fix_type, magnetic_true_indicator, sectors_json,
+                source_snapshot_id, valid_from, valid_until
+         FROM msa WHERE {VALID_FROM_LE} AND {VALID_UNTIL_GT}
+         ORDER BY airport_ident, center_fix;"
+    ))?;
+
+    let rows = stmt.query_and_then(params![date_str], |row| -> Result<CanonicalMsa> {
+        let id: String = row.get(0).context("msa.id")?;
+        let sectors_json: String = row.get(8).context("msa.sectors_json")?;
+        let sectors: Vec<MsaSector> = serde_json::from_str(&sectors_json).unwrap_or_default();
+        let mag_true_str: String = row.get(7).context("msa.magnetic_true_indicator")?;
+        let magnetic_true_indicator = mag_true_str.chars().next().unwrap_or('M');
+
+        Ok(CanonicalMsa {
+            object_id: MsaId(id),
+            airport_ident: row.get(1).context("airport_ident")?,
+            icao_code: row.get(2).context("icao_code")?,
+            center_fix: row.get(3).context("center_fix")?,
+            center_icao_code: row.get(4).context("center_icao_code")?,
+            center_section: row.get(5).context("center_section")?,
+            fix_type: row.get(6).context("fix_type")?,
+            magnetic_true_indicator,
+            sectors,
+            temporal: TemporalValidity {
+                valid_from: parse_utc(
+                    &row.get::<_, String>(10).context("valid_from")?,
+                    "valid_from",
+                )?,
+                valid_until: row
+                    .get::<_, Option<String>>(11)
+                    .context("valid_until")?
+                    .map(|s| parse_utc(&s, "valid_until"))
+                    .transpose()?,
+                source_snapshot_id: SourceSnapshotId(row.get(9).context("source_snapshot_id")?),
+            },
+        })
+    })?;
+
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
 // ---------------------------------------------------------------------------
 // AIRAC lifecycle (v5) — connection-level implementation
 // ---------------------------------------------------------------------------
@@ -3526,6 +3695,7 @@ pub enum EntityTable {
     AirwayLegs,
     ProcedureLegs,
     LpvFas,
+    Msa,
 }
 
 impl EntityTable {
@@ -3538,6 +3708,7 @@ impl EntityTable {
             EntityTable::AirwayLegs => "airway_legs",
             EntityTable::ProcedureLegs => "procedure_legs",
             EntityTable::LpvFas => "lpv_fas",
+            EntityTable::Msa => "msa",
         }
     }
 
@@ -3550,6 +3721,7 @@ impl EntityTable {
             "airway_legs" => Some(EntityTable::AirwayLegs),
             "procedure_legs" => Some(EntityTable::ProcedureLegs),
             "lpv_fas" => Some(EntityTable::LpvFas),
+            "msa" => Some(EntityTable::Msa),
             _ => None,
         }
     }
@@ -3563,6 +3735,7 @@ impl EntityTable {
             EntityTable::AirwayLegs,
             EntityTable::ProcedureLegs,
             EntityTable::LpvFas,
+            EntityTable::Msa,
         ]
     }
 }
@@ -3857,6 +4030,7 @@ pub struct EntityPayloads {
     pub airway_legs: Vec<CanonicalAirwayLeg>,
     pub procedure_legs: Vec<CanonicalProcedureLeg>,
     pub lpv_fas: Vec<CanonicalLpvFas>,
+    pub msa: Vec<CanonicalMsa>,
 }
 
 /// A complete publication plan: what a provider published for one
@@ -4052,6 +4226,17 @@ fn apply_publication_payloads_conn(
             EntityWrite::Unchanged => report.unchanged += 1,
         }
     }
+    for record in &plan.payloads.msa {
+        let write =
+            insert_with_future_correction(conn, "msa", &record.object_id.0, vf, now, |c| {
+                insert_msa_conn(c, record)
+            })?;
+        match write {
+            EntityWrite::Created => report.created += 1,
+            EntityWrite::Updated => report.updated += 1,
+            EntityWrite::Unchanged => report.unchanged += 1,
+        }
+    }
 
     if failpoints.during_apply {
         anyhow::bail!("failpoint: during_apply");
@@ -4076,6 +4261,7 @@ fn apply_publication_payloads_conn(
             EntityTable::AirwayLegs,
             EntityTable::ProcedureLegs,
             EntityTable::LpvFas,
+            EntityTable::Msa,
         ];
         for table in tables {
             if plan.masked_tables.contains(&table) {
@@ -4121,6 +4307,12 @@ fn apply_publication_payloads_conn(
                 EntityTable::LpvFas => plan
                     .payloads
                     .lpv_fas
+                    .iter()
+                    .map(|e| e.object_id.0.clone())
+                    .collect(),
+                EntityTable::Msa => plan
+                    .payloads
+                    .msa
                     .iter()
                     .map(|e| e.object_id.0.clone())
                     .collect(),
@@ -4923,6 +5115,25 @@ pub fn rollback_cycle_conn(
                 },
                 insert_lpv_fas_row,
             )?,
+            EntityTable::Msa => rollback_table(
+                conn,
+                *table,
+                namespace,
+                eff,
+                at,
+                pre_instant,
+                cur_instant,
+                query_msa_at_conn,
+                |record: &CanonicalMsa| record.object_id.0.clone(),
+                |record: &CanonicalMsa| record.temporal.valid_from,
+                |record: &CanonicalMsa, vf: DateTime<Utc>| {
+                    let mut c = record.clone();
+                    c.temporal.valid_from = vf;
+                    c.temporal.valid_until = None;
+                    c
+                },
+                insert_msa_row,
+            )?,
         };
         added += a;
         changed += c;
@@ -5282,6 +5493,46 @@ pub fn query_airway_legs_at(
 mod tests {
 
     #[test]
+    fn test_msa_temporal_lifecycle() {
+        let store = WorldStore::open_in_memory().unwrap();
+        let snap = snapshot("snap-001");
+        store.insert_source_snapshot(&snap).unwrap();
+
+        let t0 = Utc::now();
+        let record = CanonicalMsa {
+            object_id: MsaId("faa:PS:K4:00R:DILKS".to_string()),
+            airport_ident: "00R".to_string(),
+            icao_code: "K4".to_string(),
+            center_fix: "DILKS".to_string(),
+            center_icao_code: "K4".to_string(),
+            center_section: "PC".to_string(),
+            fix_type: 11,
+            magnetic_true_indicator: 'M',
+            sectors: vec![MsaSector {
+                bearing_deg: 180,
+                altitude_hundreds_ft: 31,
+                radius_nm: 25,
+            }],
+            temporal: TemporalValidity {
+                valid_from: t0,
+                valid_until: None,
+                source_snapshot_id: SourceSnapshotId("snap-001".to_string()),
+            },
+        };
+
+        assert_eq!(store.insert_msa(&record).unwrap(), EntityWrite::Created);
+        let queried = store.query_msa_at(t0).unwrap();
+        assert_eq!(queried.len(), 1);
+        assert_eq!(queried[0].airport_ident, "00R");
+        assert_eq!(queried[0].center_fix, "DILKS");
+        assert_eq!(queried[0].sectors.len(), 1);
+        assert_eq!(queried[0].sectors[0].altitude_hundreds_ft, 31);
+
+        let status = store.status().unwrap();
+        assert_eq!(status.total_msa, 1);
+    }
+
+    #[test]
     fn test_lpv_fas_temporal_lifecycle() {
         let store = WorldStore::open_in_memory().unwrap();
         let snap = snapshot("snap-001");
@@ -5396,7 +5647,7 @@ mod tests {
         let store = WorldStore::open_in_memory().unwrap();
         let status = store.status().unwrap();
         assert!(status.integrity_ok);
-        assert_eq!(status.migration_version, 11);
+        assert_eq!(status.migration_version, 12);
         assert_eq!(status.total_airports, 0);
 
         let snap = snapshot("snap-001");
@@ -5834,7 +6085,7 @@ mod tests {
 
         // Opening with the current code must migrate v1 -> v3 in place.
         let store = WorldStore::open(&path).unwrap();
-        assert_eq!(store.migration_version().unwrap(), 11);
+        assert_eq!(store.migration_version().unwrap(), 12);
         let at = store.query_airports_at(Utc::now()).unwrap();
         assert_eq!(at.len(), 1);
         assert_eq!(at[0].ident, "KSFO");

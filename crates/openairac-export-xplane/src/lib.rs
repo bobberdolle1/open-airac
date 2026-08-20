@@ -44,6 +44,7 @@ pub struct ExportReport {
     pub lpv_fas_written: usize,
     pub holds_written: usize,
     pub airports_meta_written: usize,
+    pub msa_written: usize,
     /// Airway LEGS accepted for the layer (before merging).
     pub airway_legs_accepted: usize,
     /// Physical merged segment rows written to `earth_awy.dat`. This is the
@@ -802,7 +803,52 @@ impl XPlane12Exporter {
         Ok(())
     }
 
-    /// Full export from the temporal store: query at `date`, stage the five
+    /// Export Minimum Sector Altitudes into `earth_msa.dat` (MSAXP1150).
+    ///
+    /// Row format:
+    /// `FixType CenterIdent Region Airport CenterType [Sector1Bearing 000 0 Sector1Alt 000 0 ...]`
+    /// e.g. `11 DILKS K4 00R M 180 000  0 031 000  0`
+    pub fn export_earth_msa<W: Write>(
+        msa_records: &[CanonicalMsa],
+        cycle: &str,
+        build_date: &str,
+        mut writer: W,
+        report: &mut ExportReport,
+    ) -> Result<()> {
+        write_header(&mut writer, "1150", "MSAXP1150.", cycle, build_date)?;
+
+        let mut sorted: Vec<&CanonicalMsa> = msa_records.iter().collect();
+        sorted.sort_by_key(|m| (m.airport_ident.clone(), m.center_fix.clone()));
+
+        for msa in sorted {
+            if msa.sectors.is_empty() {
+                continue;
+            }
+            write!(
+                writer,
+                "{:>2} {:>5} {:<2} {:<4} {}",
+                msa.fix_type,
+                msa.center_fix,
+                msa.icao_code,
+                msa.airport_ident,
+                msa.magnetic_true_indicator,
+            )?;
+            for sec in &msa.sectors {
+                write!(
+                    writer,
+                    " {:>03} 000  0 {:>03} 000  0",
+                    sec.bearing_deg, sec.altitude_hundreds_ft,
+                )?;
+            }
+            writeln!(writer)?;
+            report.msa_written += 1;
+        }
+
+        writeln!(writer, "99")?;
+        Ok(())
+    }
+
+    /// Full export from the temporal store: query at `date`, stage the six
     /// dat files plus a manifest next to `out_dir`, validate, swap in.
     pub fn export_from_db<P: AsRef<Path>>(
         store: &WorldStore,
@@ -824,6 +870,7 @@ impl XPlane12Exporter {
         let airway_legs = store.query_airway_legs_at(date)?;
         let procedure_legs = store.query_procedure_legs_at(date).unwrap_or_default();
         let lpv_fas = store.query_lpv_fas_at(date).unwrap_or_default();
+        let msa = store.query_msa_at(date).unwrap_or_default();
 
         let mut report = ExportReport::default();
         let mut index = ExportedEntityIndex::default();
@@ -837,6 +884,7 @@ impl XPlane12Exporter {
         let staged_awy = staging.join("earth_awy.dat");
         let staged_hold = staging.join("earth_hold.dat");
         let staged_aptmeta = staging.join("earth_aptmeta.dat");
+        let staged_msa = staging.join("earth_msa.dat");
         let staged_manifest = staging.join("manifest.json");
 
         let fix_file = std::fs::File::create(&staged_fix)
@@ -877,6 +925,9 @@ impl XPlane12Exporter {
         let aptmeta_file = std::fs::File::create(&staged_aptmeta)
             .with_context(|| format!("creating staged {:?}", staged_aptmeta))?;
         Self::export_earth_aptmeta(&airports, &cycle, &build_date, aptmeta_file, &mut report)?;
+        let msa_file = std::fs::File::create(&staged_msa)
+            .with_context(|| format!("creating staged {:?}", staged_msa))?;
+        Self::export_earth_msa(&msa, &cycle, &build_date, msa_file, &mut report)?;
 
         // X-Plane loads the layer as a unit: an incomplete layer (missing
         // or empty file) destroys referential integrity on install.
@@ -917,6 +968,7 @@ impl XPlane12Exporter {
                 manifest_file_entry(&staged_awy, report.airway_rows_written)?,
                 manifest_file_entry(&staged_hold, report.holds_written)?,
                 manifest_file_entry(&staged_aptmeta, report.airports_meta_written)?,
+                manifest_file_entry(&staged_msa, report.msa_written)?,
             ],
             allow_empty,
             world_fingerprint: Some(world_fingerprint),
@@ -929,6 +981,7 @@ impl XPlane12Exporter {
         swap_file(&staged_awy, &dir.join("earth_awy.dat"))?;
         swap_file(&staged_hold, &dir.join("earth_hold.dat"))?;
         swap_file(&staged_aptmeta, &dir.join("earth_aptmeta.dat"))?;
+        swap_file(&staged_msa, &dir.join("earth_msa.dat"))?;
         swap_file(&staged_manifest, &dir.join("manifest.json"))?;
         let _ = std::fs::remove_dir_all(&staging);
 
@@ -3308,5 +3361,95 @@ I
             ]
         );
         assert_eq!(lines[4], "99");
+    }
+
+    #[test]
+    fn test_export_earth_msa_golden() {
+        let msa1 = CanonicalMsa {
+            object_id: MsaId("faa:PS:K4:00R:DILKS".to_string()),
+            airport_ident: "00R".to_string(),
+            icao_code: "K4".to_string(),
+            center_fix: "DILKS".to_string(),
+            center_icao_code: "K4".to_string(),
+            center_section: "PC".to_string(),
+            fix_type: 11,
+            magnetic_true_indicator: 'M',
+            sectors: vec![MsaSector {
+                bearing_deg: 180,
+                altitude_hundreds_ft: 31,
+                radius_nm: 25,
+            }],
+            temporal: TemporalValidity {
+                valid_from: Utc::now(),
+                valid_until: None,
+                source_snapshot_id: SourceSnapshotId("snap-1".to_string()),
+            },
+        };
+
+        let msa2 = CanonicalMsa {
+            object_id: MsaId("faa:PS:K3:04Y:FAR".to_string()),
+            airport_ident: "04Y".to_string(),
+            icao_code: "K3".to_string(),
+            center_fix: "FAR".to_string(),
+            center_icao_code: "K3".to_string(),
+            center_section: "D ".to_string(),
+            fix_type: 3,
+            magnetic_true_indicator: 'M',
+            sectors: vec![
+                MsaSector {
+                    bearing_deg: 180,
+                    altitude_hundreds_ft: 32,
+                    radius_nm: 25,
+                },
+                MsaSector {
+                    bearing_deg: 360,
+                    altitude_hundreds_ft: 36,
+                    radius_nm: 25,
+                },
+                MsaSector {
+                    bearing_deg: 90,
+                    altitude_hundreds_ft: 28,
+                    radius_nm: 25,
+                },
+            ],
+            temporal: TemporalValidity {
+                valid_from: Utc::now(),
+                valid_until: None,
+                source_snapshot_id: SourceSnapshotId("snap-1".to_string()),
+            },
+        };
+
+        let mut report = ExportReport::default();
+        let mut buf = Vec::new();
+        XPlane12Exporter::export_earth_msa(
+            &[msa1, msa2],
+            "2609",
+            "20260903",
+            &mut buf,
+            &mut report,
+        )
+        .unwrap();
+
+        assert_eq!(report.msa_written, 2);
+
+        let text = String::from_utf8(buf).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines[0], "I");
+        assert!(lines[1].starts_with("1150 Version"));
+
+        assert_eq!(
+            lines[3].split_whitespace().collect::<Vec<&str>>(),
+            vec![
+                "11", "DILKS", "K4", "00R", "M", "180", "000", "0", "031", "000", "0"
+            ]
+        );
+        assert_eq!(
+            lines[4].split_whitespace().collect::<Vec<&str>>(),
+            vec![
+                "3", "FAR", "K3", "04Y", "M", "180", "000", "0", "032", "000", "0", "360", "000",
+                "0", "036", "000", "0", "090", "000", "0", "028", "000", "0"
+            ]
+        );
+        assert_eq!(lines[5], "99");
     }
 }

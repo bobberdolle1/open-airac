@@ -2017,6 +2017,18 @@ fn main() -> Result<()> {
                     report.navaids_written
                 );
                 println!(
+                    "  Exported {} holding patterns to earth_hold.dat",
+                    report.holds_written
+                );
+                println!(
+                    "  Exported {} airport metadata rows to earth_aptmeta.dat",
+                    report.airports_meta_written
+                );
+                println!(
+                    "  Exported {} MSA records to earth_msa.dat",
+                    report.msa_written
+                );
+                println!(
                     "  Skipped {} fixes, {} navaids",
                     report.fixes_skipped, report.navaids_skipped
                 );

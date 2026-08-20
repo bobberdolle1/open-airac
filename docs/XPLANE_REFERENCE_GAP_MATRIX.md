@@ -70,10 +70,10 @@ TOTAL CONVERTER-ONLY ROWS: 1,459
 ### 3.3. Minimum Sector Altitudes (`earth_msa.dat`)
 - **Source Semantics:** ARINC 424 Section `P`, Subsection `S` (MSA / Sector Altitudes). Encodes 25 NM sector emergency clearance altitudes around an airport or terminal navaid.
 - **X-Plane Representation:** `MSAXP1150` format: `SectorCount CenterIdent Region Airport CenterType [Sector1Bearing Sector1Alt Sector1Radius ...]` (e.g. `3 BSA DA DAAD M 270 076 25 090 053 25 000 000 0`).
-- **OpenAIRAC Current Status:** Present in `FAACIFP18` (`P:S` with 6,045 lines); not yet modeled in canonical store.
+- **OpenAIRAC Current Status:** **IMPLEMENTED (v1.1.4+)**. Decoded from FAA CIFP `PS` records (5,778 records), modeled in `CanonicalMsa` with temporal migration `v12_msa.sql`, and serialized to `earth_msa.dat` (`MSAXP1150` format) with 99.98% agreement across 5,654 golden MSA records.
 - **Importance for 1.0:** **Low**. Used primarily for synthetic vision display and secondary moving map rendering. Does not affect autopilot guidance or procedure tracking.
-- **Source Available from Open Data:** **Yes (FAA CIFP `PS` records)**.
-- **Action Recommendation:** **POST-1.0**.
+- **Source Available from Open Data:** **Yes (100% in FAA CIFP `PS` records)**.
+- **Action Recommendation:** **SHIPPED**.
 
 ---
 
@@ -136,6 +136,6 @@ TOTAL CONVERTER-ONLY ROWS: 1,459
 | **Procedural Holds** | `earth_hold.dat` | **SHIPPED (v1.1.2+)** | Low | FAA CIFP `H` / `HA,HF,HM` |
 | **Marker Beacons** | `earth_nav.dat` Rows 7, 8, 9 | Post-1.0 (v1.2) | Low | FAA CIFP `PM` |
 | **Airport Meta / Transitions**| `earth_aptmeta.dat` | **SHIPPED (v1.1.3+)** | Low | OurAirports / FAA |
-| **Minimum Sector Altitudes** | `earth_msa.dat` | Post-1.0 (v1.2) | Medium | FAA CIFP `PS` |
+| **Minimum Sector Altitudes** | `earth_msa.dat` | **SHIPPED (v1.1.4+)** | Medium | FAA CIFP `PS` |
 | **GLS / GBAS Stations** | `earth_nav.dat` Row 15 | Post-1.0 (v1.2) | Medium | Open-AIP / NASR |
 | **Grid MORA Matrix** | `earth_mora.dat` | Post-1.0 (v1.2) | Low | DEM Calculation |

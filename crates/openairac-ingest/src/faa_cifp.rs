@@ -419,6 +419,18 @@ pub enum CifpRecord {
         gnss_channel: Option<u32>,
         raw: String,
     },
+    Msa {
+        record_type: String,
+        airport_ident: String,
+        icao_code: String,
+        center_fix: String,
+        center_icao_code: String,
+        center_section: String,
+        fix_type: u8,
+        magnetic_true_indicator: char,
+        sectors: Vec<MsaSector>,
+        raw: String,
+    },
     Unsupported {
         record_type: String,
         section: char,
@@ -910,6 +922,56 @@ pub fn decode_line(line: &str) -> Result<CifpRecord> {
                         raw: line.to_string(),
                     })
                 }
+            } else if kind_char == 'S' {
+                // PS Minimum Sector Altitude record (ARINC 424 §4.1.18.1).
+                let airport_ident = cifp.field(7, 10).trim().to_string();
+                let icao_code = cifp.field(11, 12).trim().to_string();
+                let center_fix = cifp.field(14, 18).trim().to_string();
+                let center_icao_code = cifp.field(19, 20).trim().to_string();
+                let center_section = cifp.field(21, 22).to_string();
+                let mag_true_str = cifp.field(120, 120);
+                let magnetic_true_indicator = mag_true_str.chars().next().unwrap_or('M');
+
+                let fix_type = match center_section.trim() {
+                    "PG" => 10,
+                    "D" | "V" => 3,
+                    "DB" | "PN" => 2,
+                    "PA" => 1,
+                    _ => 11,
+                };
+
+                let mut sectors = Vec::new();
+                let mut pos = 43; // 1-based col 43
+                while pos + 10 <= 119 {
+                    let b_to_str = cifp.field(pos + 3, pos + 5).trim();
+                    let alt_str = cifp.field(pos + 6, pos + 8).trim();
+                    let rad_str = cifp.field(pos + 9, pos + 10).trim();
+
+                    if let (Ok(bearing_deg), Ok(altitude_hundreds_ft)) =
+                        (b_to_str.parse::<u32>(), alt_str.parse::<u32>())
+                    {
+                        let radius_nm = rad_str.parse::<u32>().unwrap_or(25);
+                        sectors.push(MsaSector {
+                            bearing_deg,
+                            altitude_hundreds_ft,
+                            radius_nm,
+                        });
+                    }
+                    pos += 11;
+                }
+
+                Ok(CifpRecord::Msa {
+                    record_type,
+                    airport_ident,
+                    icao_code,
+                    center_fix,
+                    center_icao_code,
+                    center_section,
+                    fix_type,
+                    magnetic_true_indicator,
+                    sectors,
+                    raw: line.to_string(),
+                })
             } else if kind_char == 'G' {
                 // PG terminal runway END. Layout verified against real
                 // cycle 2608 records: ident 7-10, ICAO 11-12,
@@ -1045,6 +1107,7 @@ pub enum CifpInterpretation {
     ProcedureLeg(CanonicalProcedureLeg),
     Airport(CanonicalAirport),
     RunwayEnd(CifpRunwayEnd),
+    Msa(CanonicalMsa),
     Unsupported {
         reason: String,
         raw: String,
@@ -1503,6 +1566,31 @@ pub fn interpret(
             le_lon: *le_lon,
         })],
         CifpRecord::PathPoint { .. } => vec![],
+        CifpRecord::Msa {
+            record_type,
+            airport_ident,
+            icao_code,
+            center_fix,
+            center_icao_code,
+            center_section,
+            fix_type,
+            magnetic_true_indicator,
+            sectors,
+            ..
+        } => vec![CifpInterpretation::Msa(CanonicalMsa {
+            object_id: MsaId(format!(
+                "faa:{record_type}:{icao_code}:{airport_ident}:{center_fix}"
+            )),
+            airport_ident: airport_ident.clone(),
+            icao_code: icao_code.clone(),
+            center_fix: center_fix.clone(),
+            center_icao_code: center_icao_code.clone(),
+            center_section: center_section.clone(),
+            fix_type: *fix_type,
+            magnetic_true_indicator: *magnetic_true_indicator,
+            sectors: sectors.clone(),
+            temporal,
+        })],
         CifpRecord::Unsupported {
             reason,
             raw,
@@ -1529,6 +1617,7 @@ fn record_to_raw(record: &CifpRecord) -> String {
         | CifpRecord::Airway { raw, .. }
         | CifpRecord::ProcedureLeg { raw, .. }
         | CifpRecord::PathPoint { raw, .. }
+        | CifpRecord::Msa { raw, .. }
         | CifpRecord::Unsupported { raw, .. } => raw.clone(),
         CifpRecord::Airport { .. } | CifpRecord::Runway { .. } => String::new(),
     }
@@ -1554,6 +1643,7 @@ pub struct CifpScanReport {
     /// Runway ends whose reciprocal was missing (skipped, fail-closed).
     pub unpaired_runway_ends: usize,
     pub lpv_fas_decoded: usize,
+    pub msa_decoded: usize,
     pub unsupported_records: usize,
     pub decode_errors: usize,
     /// Duplicate object ids whose payloads CONFLICT (first occurrence
@@ -1590,6 +1680,7 @@ impl FaaCifpAdapter {
         Vec<CanonicalRunway>,
         Vec<IlsAssociation>,
         Vec<CanonicalLpvFas>,
+        Vec<CanonicalMsa>,
         CifpScanReport,
     ) {
         let mut waypoints = Vec::new();
@@ -1598,6 +1689,7 @@ impl FaaCifpAdapter {
         let mut procedure_legs = Vec::new();
         let mut airports = Vec::new();
         let mut runway_ends = Vec::new();
+        let mut msa = Vec::new();
         let mut pp_primaries: std::collections::HashMap<(String, String, String), CifpRecord> =
             std::collections::HashMap::new();
         let mut pp_conts: std::collections::HashMap<(String, String, String), CifpRecord> =
@@ -1763,6 +1855,11 @@ impl FaaCifpAdapter {
                                 report.records_decoded += 1;
                                 report.runway_ends_decoded += 1;
                                 runway_ends.push(end);
+                            }
+                            CifpInterpretation::Msa(record) => {
+                                report.records_decoded += 1;
+                                report.msa_decoded += 1;
+                                msa.push(record);
                             }
                             CifpInterpretation::Unsupported {
                                 reason,
@@ -2207,6 +2304,7 @@ impl FaaCifpAdapter {
                 runways,
                 ils_associations,
                 lpv_fas,
+                msa,
                 report,
             )
         }
@@ -2229,6 +2327,7 @@ impl FaaCifpAdapter {
             runways,
             ils_associations,
             lpv_fas,
+            msa,
             report,
         ) = Self::parse_cifp_content(content, snapshot_id, valid_from);
 
@@ -2245,6 +2344,9 @@ impl FaaCifpAdapter {
             }
             for fas in &lpv_fas {
                 openairac_store::insert_lpv_fas_conn(conn, fas)?;
+            }
+            for record in &msa {
+                openairac_store::insert_msa_conn(conn, record)?;
             }
             Ok(())
         })?;
@@ -2307,7 +2409,7 @@ pub fn masked_tables(scan: &CifpScanReport) -> BTreeSet<openairac_store::EntityT
     for &(section, subsection, kind) in &scan.unsupported_classes {
         match (section, subsection, kind) {
             // Terminal airports/runways: never entity rows in our tables.
-            ('P', ' ', 'A') | ('P', ' ', 'G') | ('P', ' ', 'P') => {}
+            ('P', ' ', 'A') | ('P', ' ', 'G') | ('P', ' ', 'P') | ('P', ' ', 'S') => {}
             // Terminal NDBs map to navaids.
             ('P', 'N', _) => {
                 masked.insert(EntityTable::Navaids);
@@ -2529,6 +2631,7 @@ impl crate::provider::DataProvider for CifpProvider {
             runways,
             ils_associations,
             lpv_fas,
+            msa,
             scan,
         ) = FaaCifpAdapter::parse_cifp_content(&dataset.raw_content, &snapshot_id, valid_from);
 
@@ -2562,6 +2665,10 @@ impl crate::provider::DataProvider for CifpProvider {
         push(
             openairac_store::EntityTable::LpvFas,
             lpv_fas.iter().map(|l| l.object_id.0.clone()).collect(),
+        );
+        push(
+            openairac_store::EntityTable::Msa,
+            msa.iter().map(|m| m.object_id.0.clone()).collect(),
         );
 
         let start = std::time::Instant::now();
@@ -2605,6 +2712,7 @@ impl crate::provider::DataProvider for CifpProvider {
                 airway_legs: airway_legs.clone(),
                 procedure_legs: procedure_legs.clone(),
                 lpv_fas: lpv_fas.clone(),
+                msa: msa.clone(),
             },
             tombstones: Vec::new(),
             ils_associations: ils_associations.clone(),
@@ -3143,7 +3251,7 @@ mod tests {
     fn test_parse_cifp_content_chains_airway_legs() {
         let content = format!("{ER_A315_1}\n{ER_A315_2}\n{ER_A315_3}\n{EA_AAARG}\n");
         let snapshot_id = SourceSnapshotId("snap-faa".to_string());
-        let (waypoints, _navaids, legs, _procedures, _airports, _runways, _ils, _lpv, report) =
+        let (waypoints, _navaids, legs, _procedures, _airports, _runways, _ils, _lpv, _msa, report) =
             FaaCifpAdapter::parse_cifp_content(&content, &snapshot_id, Utc::now());
 
         assert_eq!(waypoints.len(), 1);
@@ -3171,7 +3279,7 @@ mod tests {
     fn test_pi_merges_over_d_localizer() {
         let content = format!("{D_IAAD}\n{PI_IAAD}\n");
         let snapshot_id = SourceSnapshotId("snap-pi-merge".to_string());
-        let (_wp, navaids, _legs, _proc, _ap, _rwy, _ils, _lpv, _report) =
+        let (_wp, navaids, _legs, _proc, _ap, _rwy, _ils, _lpv, _msa, _report) =
             FaaCifpAdapter::parse_cifp_content(&content, &snapshot_id, Utc::now());
         let loc: Vec<&CanonicalNavaid> = navaids
             .iter()
@@ -3203,7 +3311,7 @@ mod tests {
     fn test_pi_only_localizer_survives_merge() {
         let content = PI_IAAD.to_string();
         let snapshot_id = SourceSnapshotId("snap-pi-only".to_string());
-        let (_wp, navaids, _legs, _proc, _ap, _rwy, _ils, _lpv, _report) =
+        let (_wp, navaids, _legs, _proc, _ap, _rwy, _ils, _lpv, _msa, _report) =
             FaaCifpAdapter::parse_cifp_content(&content, &snapshot_id, Utc::now());
         let loc: Vec<&CanonicalNavaid> = navaids
             .iter()
@@ -3837,7 +3945,7 @@ mod tests {
         ]
         .join("\n");
         let snapshot = SourceSnapshotId("snap-t".to_string());
-        let (_wp, _nav, _legs, _proc, _airports, runways, _ils, _lpv, report) =
+        let (_wp, _nav, _legs, _proc, _airports, runways, _ils, _lpv, _msa, report) =
             FaaCifpAdapter::parse_cifp_content(&content, &snapshot, Utc::now());
         assert_eq!(report.runway_ends_decoded, 2);
         assert_eq!(report.runways_decoded, 1);
@@ -3864,7 +3972,7 @@ mod tests {
         ]
         .join("\n");
         let snapshot = SourceSnapshotId("snap-t".to_string());
-        let (_wp, _nav, _legs, _proc, _airports, runways, _ils, _lpv, report) =
+        let (_wp, _nav, _legs, _proc, _airports, runways, _ils, _lpv, _msa, report) =
             FaaCifpAdapter::parse_cifp_content(&content, &snapshot, Utc::now());
         assert_eq!(report.runways_decoded, 1);
         assert_eq!(report.unpaired_runway_ends, 0);
@@ -3877,7 +3985,7 @@ mod tests {
         // Only one end of 10L/28R: fail closed, no half-runway.
         let content = "SUSAP KSFOK2GRW10L   0118701040 N37374346W122233621         -0030900006000055200R                                          146341707\n";
         let snapshot = SourceSnapshotId("snap-t".to_string());
-        let (_wp, _nav, _legs, _proc, _airports, runways, _ils, _lpv, report) =
+        let (_wp, _nav, _legs, _proc, _airports, runways, _ils, _lpv, _msa, report) =
             FaaCifpAdapter::parse_cifp_content(content, &snapshot, Utc::now());
         assert_eq!(report.runways_decoded, 0);
         assert_eq!(report.unpaired_runway_ends, 1);
@@ -3895,7 +4003,7 @@ mod tests {
         ]
         .join("\n");
         let snapshot = SourceSnapshotId("snap-t".to_string());
-        let (_wp, navaids, _legs, proc_legs, _ap, _rwy, assocs, _lpv, report) =
+        let (_wp, navaids, _legs, proc_legs, _ap, _rwy, assocs, _lpv, _msa, report) =
             FaaCifpAdapter::parse_cifp_content(&content, &snapshot, Utc::now());
         assert_eq!(report.procedure_legs_decoded, 3);
         assert_eq!(assocs.len(), 1);
@@ -3979,8 +4087,18 @@ mod tests {
 "
         );
         let snapshot_id = SourceSnapshotId("snap-pp".to_string());
-        let (_waypoints, _navaids, _legs, _procedures, _airports, _runways, _ils, lpv_fas, report) =
-            FaaCifpAdapter::parse_cifp_content(&content, &snapshot_id, Utc::now());
+        let (
+            _waypoints,
+            _navaids,
+            _legs,
+            _procedures,
+            _airports,
+            _runways,
+            _ils,
+            lpv_fas,
+            _msa,
+            report,
+        ) = FaaCifpAdapter::parse_cifp_content(&content, &snapshot_id, Utc::now());
 
         assert_eq!(report.lpv_fas_decoded, 1);
         assert_eq!(lpv_fas.len(), 1);
@@ -3994,5 +4112,62 @@ mod tests {
         assert_eq!(fas.app_type, "LPV");
         assert_eq!(fas.elevation_ft, 3005);
         assert!((fas.bearing_true_deg - 269.927).abs() < 0.001);
+    }
+
+    const PS_00R_DILKS: &str = "SUSAP 00R K4SDILKSK4PC                0   18018003125                                                                  M   785591310";
+    const PS_04Y_FAR: &str = "SUSAP 04Y K3SFAR  K3D                 0   090180032251803600362536009002825                                            M   789701707";
+
+    #[test]
+    fn test_decode_msa_single_and_multi_sector() {
+        let rec1 = decode_line(PS_00R_DILKS).unwrap();
+        match rec1 {
+            CifpRecord::Msa {
+                airport_ident,
+                icao_code,
+                center_fix,
+                center_icao_code,
+                center_section,
+                fix_type,
+                magnetic_true_indicator,
+                sectors,
+                ..
+            } => {
+                assert_eq!(airport_ident, "00R");
+                assert_eq!(icao_code, "K4");
+                assert_eq!(center_fix, "DILKS");
+                assert_eq!(center_icao_code, "K4");
+                assert_eq!(center_section, "PC");
+                assert_eq!(fix_type, 11);
+                assert_eq!(magnetic_true_indicator, 'M');
+                assert_eq!(sectors.len(), 1);
+                assert_eq!(sectors[0].bearing_deg, 180);
+                assert_eq!(sectors[0].altitude_hundreds_ft, 31);
+                assert_eq!(sectors[0].radius_nm, 25);
+            }
+            other => panic!("expected Msa, got {other:?}"),
+        }
+
+        let rec2 = decode_line(PS_04Y_FAR).unwrap();
+        match rec2 {
+            CifpRecord::Msa {
+                airport_ident,
+                center_fix,
+                fix_type,
+                sectors,
+                ..
+            } => {
+                assert_eq!(airport_ident, "04Y");
+                assert_eq!(center_fix, "FAR");
+                assert_eq!(fix_type, 3); // VOR
+                assert_eq!(sectors.len(), 3);
+                assert_eq!(sectors[0].bearing_deg, 180);
+                assert_eq!(sectors[0].altitude_hundreds_ft, 32);
+                assert_eq!(sectors[1].bearing_deg, 360);
+                assert_eq!(sectors[1].altitude_hundreds_ft, 36);
+                assert_eq!(sectors[2].bearing_deg, 90);
+                assert_eq!(sectors[2].altitude_hundreds_ft, 28);
+            }
+            other => panic!("expected Msa, got {other:?}"),
+        }
     }
 }
