@@ -518,23 +518,16 @@ fn test_russia_coverage_json_internal_consistency_self_check() {
         "ILS systems and LOC count must match"
     );
 
-    // 6. ATS Unique Points List Consistency: declared_count == unique_points_list.len()
-    let declared_pts = v["ats_enroute_network"]["unique_route_points"]
+    // 6. ATS Unique Points Consistency: unique_normalized_points == graph.nodes
+    let unique_pts = v["ats_enroute_network"]["unique_normalized_points"]
         .as_u64()
         .unwrap() as usize;
-    let list_len = v["ats_enroute_network"]["unique_points_list"]
-        .as_array()
-        .unwrap()
-        .len();
+    let graph_nodes = v["ats_enroute_network"]["graph"]["nodes"].as_u64().unwrap() as usize;
     assert_eq!(
-        declared_pts, list_len,
-        "Declared ATS unique points count must equal list length"
+        unique_pts, graph_nodes,
+        "Unique ATS points count must equal graph nodes"
     );
-    assert_eq!(
-        v["ats_enroute_network"]["graph"]["nodes"].as_u64().unwrap() as usize,
-        list_len
-    );
-
+    assert_eq!(unique_pts, 6443);
     // 7. Procedure Category Sum: sid + star + app == total_procedures
     let sid_p = v["national_procedures"]["sid_procedures"].as_u64().unwrap();
     let star_p = v["national_procedures"]["star_procedures"]
