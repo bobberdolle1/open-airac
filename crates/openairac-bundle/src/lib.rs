@@ -78,6 +78,7 @@ pub struct ReconciliationSummary {
 pub enum Authenticity {
     UnsignedDevelopment,
     SignedTrusted,
+    LocalDevelopment,
 }
 
 impl Authenticity {
@@ -85,6 +86,66 @@ impl Authenticity {
         match self {
             Authenticity::UnsignedDevelopment => "UnsignedDevelopment",
             Authenticity::SignedTrusted => "SignedTrusted",
+            Authenticity::LocalDevelopment => "LocalDevelopment",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "UnsignedDevelopment" => Some(Authenticity::UnsignedDevelopment),
+            "SignedTrusted" => Some(Authenticity::SignedTrusted),
+            "LocalDevelopment" => Some(Authenticity::LocalDevelopment),
+            _ => None,
+        }
+    }
+}
+
+/// Target release scope for bundle construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BundleScope {
+    /// Official public release bundle — requires all sources to have public redistribution permissions.
+    PublicRelease,
+    /// Local user compilation bundle — permits local-only BYOD sources, forbidden from public release.
+    LocalDevelopment,
+}
+
+/// Regional or provider filter for deterministic subset bundle construction.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct BundleFilter {
+    /// Filter to specific providers (e.g. `vec!["FAA_CIFP"]` or `vec!["DFS_Germany", "OpenFlightmaps"]`)
+    pub providers: Option<Vec<String>>,
+    /// Regional preset name (e.g. "world-open", "us", "europe-open")
+    pub region_name: Option<String>,
+}
+
+impl BundleFilter {
+    pub fn world_open() -> Self {
+        Self {
+            providers: Some(vec![
+                "FAA_CIFP".to_string(),
+                "OurAirports".to_string(),
+                "OpenFlightmaps".to_string(),
+                "DFS_Germany".to_string(),
+            ]),
+            region_name: Some("world-open".to_string()),
+        }
+    }
+
+    pub fn us_only() -> Self {
+        Self {
+            providers: Some(vec!["FAA_CIFP".to_string()]),
+            region_name: Some("us".to_string()),
+        }
+    }
+
+    pub fn europe_open() -> Self {
+        Self {
+            providers: Some(vec![
+                "DFS_Germany".to_string(),
+                "OpenFlightmaps".to_string(),
+                "OurAirports".to_string(),
+            ]),
+            region_name: Some("europe-open".to_string()),
         }
     }
 }
@@ -282,10 +343,13 @@ pub fn sign_bundle(bundle_dir: &Path, keypair: &SigningKeyPair) -> Result<()> {
         serde_json::from_str(&manifest_json).context("parsing bundle manifest")?;
     if manifest.core.authenticity != "UnsignedDevelopment" {
         bail!(
-            "cannot sign bundle with authenticity {}",
+            "cannot sign bundle with authenticity {} (only UnsignedDevelopment public release bundles may be signed)",
             manifest.core.authenticity
         );
     }
+    // Strict licensing gate: verify all source providers before signing production release!
+    openairac_model::validate_bundle_distribution_policy(&manifest.core.providers)
+        .context("cannot sign bundle: distribution policy violations detected")?;
     manifest.core.authenticity = "SignedTrusted".to_string();
     manifest.bundle_hash = manifest.compute_bundle_hash()?;
     let canonical = serde_json::to_string_pretty(&manifest).context("serializing manifest")?;
@@ -361,6 +425,36 @@ pub fn build_bundle(
     out_root: &Path,
     as_of: DateTime<Utc>,
 ) -> Result<(String, PathBuf)> {
+    build_bundle_with_scope(store, out_root, as_of, BundleScope::PublicRelease)
+}
+
+/// Build a local user bundle (allows local-only/BYOD sources, marked as LocalDevelopment).
+pub fn build_local_bundle(
+    store: &WorldStore,
+    out_root: &Path,
+    as_of: DateTime<Utc>,
+) -> Result<(String, PathBuf)> {
+    build_bundle_with_scope(store, out_root, as_of, BundleScope::LocalDevelopment)
+}
+
+/// Build a deterministic bundle with explicit scope enforcement.
+pub fn build_bundle_with_scope(
+    store: &WorldStore,
+    out_root: &Path,
+    as_of: DateTime<Utc>,
+    scope: BundleScope,
+) -> Result<(String, PathBuf)> {
+    build_bundle_with_filter(store, out_root, as_of, scope, None)
+}
+
+/// Build a deterministic bundle with scope and regional/provider filter.
+pub fn build_bundle_with_filter(
+    store: &WorldStore,
+    out_root: &Path,
+    as_of: DateTime<Utc>,
+    scope: BundleScope,
+    filter: Option<&BundleFilter>,
+) -> Result<(String, PathBuf)> {
     let status = store.status()?;
     let schema_version = status.migration_version;
 
@@ -384,7 +478,7 @@ pub fn build_bundle(
     }
 
     // Publications: every recorded dataset version.
-    let publications: Vec<PublicationRef> = store
+    let mut publications: Vec<PublicationRef> = store
         .query_dataset_versions()?
         .into_iter()
         .map(|v| PublicationRef {
@@ -400,7 +494,7 @@ pub fn build_bundle(
         .collect();
 
     // Provenance: all source snapshots.
-    let provenance: Vec<ProvenanceRef> = store
+    let mut provenance: Vec<ProvenanceRef> = store
         .query_source_snapshots()?
         .into_iter()
         .map(|s| ProvenanceRef {
@@ -411,6 +505,12 @@ pub fn build_bundle(
             effective_from: s.effective_from.map(|t| t.to_rfc3339()),
         })
         .collect();
+    if let Some(f) = filter
+        && let Some(allowed_provs) = &f.providers
+    {
+        publications.retain(|p| allowed_provs.contains(&p.provider));
+        provenance.retain(|p| allowed_provs.contains(&p.provider));
+    }
 
     let reconciliation = ReconciliationSummary {
         canonical_entities: store.query_canonical_identities()?.len(),
@@ -420,6 +520,22 @@ pub fn build_bundle(
 
     let providers_set: BTreeSet<String> = provenance.iter().map(|p| p.provider.clone()).collect();
     let providers: Vec<String> = providers_set.into_iter().collect();
+
+    // Policy enforcement:
+    match scope {
+        BundleScope::PublicRelease => {
+            openairac_model::validate_bundle_distribution_policy(&providers)?;
+        }
+        BundleScope::LocalDevelopment => {
+            for p in &providers {
+                if openairac_model::GLOBAL_PROVIDER_REGISTRY.is_forbidden(p) {
+                    bail!(
+                        "Provider '{p}' is legally forbidden and cannot be included in any OpenAIRAC bundle (even local)"
+                    );
+                }
+            }
+        }
+    }
 
     // Effective window: the newest baseline publication; falling back
     // to the newest source-snapshot effective date. The wall clock is
@@ -458,7 +574,10 @@ pub fn build_bundle(
         reconciliation,
         provenance,
         files: Vec::new(), // filled after copying the payload
-        authenticity: Authenticity::UnsignedDevelopment.as_str().to_string(),
+        authenticity: match scope {
+            BundleScope::PublicRelease => Authenticity::UnsignedDevelopment.as_str().to_string(),
+            BundleScope::LocalDevelopment => Authenticity::LocalDevelopment.as_str().to_string(),
+        },
     };
 
     // Compute a preliminary hash for the bundle id (files included).
@@ -600,6 +719,7 @@ pub fn verify_bundle_with_trust(
     let authenticity = match manifest.core.authenticity.as_str() {
         "UnsignedDevelopment" => Authenticity::UnsignedDevelopment,
         "SignedTrusted" => Authenticity::SignedTrusted,
+        "LocalDevelopment" => Authenticity::LocalDevelopment,
         other => bail!("unknown authenticity marker '{other}'"),
     };
     match authenticity {
@@ -611,6 +731,16 @@ pub fn verify_bundle_with_trust(
             }
             if bundle_dir.join(SIGNATURE_FILE).exists() {
                 bail!("UnsignedDevelopment bundle carries a signature file");
+            }
+        }
+        Authenticity::LocalDevelopment => {
+            if trust.is_some() {
+                bail!(
+                    "refusing LocalDevelopment bundle when trust root is required (production mode requires SignedTrusted bundle)"
+                );
+            }
+            if bundle_dir.join(SIGNATURE_FILE).exists() {
+                bail!("LocalDevelopment bundle carries a signature file");
             }
         }
         Authenticity::SignedTrusted => {
@@ -1571,5 +1701,164 @@ mod tests {
             decide_update(&installed, &index_old, &dir, 8, now),
             UpdateDecision::RejectIncompatible
         );
+    }
+
+    #[test]
+    fn test_bundle_distribution_policy_boundaries() {
+        use openairac_store::WorldStore;
+        let now = Utc::now();
+
+        // 1. Store with only FAA_CIFP snapshot (publicly redistributable)
+        let store_public = WorldStore::open_in_memory().unwrap();
+        let conn_pub = store_public.raw_conn();
+        let snap_pub = openairac_model::SourceSnapshot {
+            id: openairac_model::SourceSnapshotId("snap-faa".to_string()),
+            provider: "FAA_CIFP".to_string(),
+            dataset: "FAACIFP18".to_string(),
+            provider_revision: None,
+            airac_cycle: Some("2608".to_string()),
+            effective_from: Some(now),
+            effective_until: None,
+            retrieved_at: now,
+            source_uri: "https://nfdc.faa.gov/".to_string(),
+            content_sha256: "hash123".to_string(),
+            license_id: Some("PublicDomain-US-Gov".to_string()),
+            license_notes: None,
+            parser_version: "1.0.0".to_string(),
+        };
+        openairac_store::insert_source_snapshot_conn(conn_pub, &snap_pub).unwrap();
+
+        let out_dir = unique_dir("bndl_policy_pub");
+        let (hash, path) =
+            build_bundle(&store_public, &out_dir, now).expect("public bundle must succeed");
+        assert!(!hash.is_empty());
+        assert!(path.exists());
+
+        // 2. Store with Eurocontrol_EAD snapshot (LocalOnly)
+        let store_local = WorldStore::open_in_memory().unwrap();
+        let conn_loc = store_local.raw_conn();
+        let snap_loc = openairac_model::SourceSnapshot {
+            id: openairac_model::SourceSnapshotId("snap-ead".to_string()),
+            provider: "Eurocontrol_EAD".to_string(),
+            dataset: "EAD_AIXM".to_string(),
+            provider_revision: None,
+            airac_cycle: Some("2608".to_string()),
+            effective_from: Some(now),
+            effective_until: None,
+            retrieved_at: now,
+            source_uri: "https://www.ead.eurocontrol.int/".to_string(),
+            content_sha256: "hash456".to_string(),
+            license_id: Some("Eurocontrol-EAD-TermsOfUse".to_string()),
+            license_notes: None,
+            parser_version: "1.0.0".to_string(),
+        };
+        openairac_store::insert_source_snapshot_conn(conn_loc, &snap_loc).unwrap();
+
+        let out_dir_loc = unique_dir("bndl_policy_loc");
+        // Building public bundle MUST FAIL
+        let err = build_bundle(&store_local, &out_dir_loc, now);
+        assert!(
+            err.is_err(),
+            "Public bundle must fail on LocalOnly provider"
+        );
+        let err_msg = format!("{}", err.unwrap_err());
+        assert!(err_msg.contains("cannot be redistributed in public bundles"));
+
+        // Building local bundle MUST SUCCEED and mark authenticity as LocalDevelopment
+        let (loc_hash, loc_path) = build_local_bundle(&store_local, &out_dir_loc, now)
+            .expect("local bundle must succeed for local-only provider");
+        assert!(!loc_hash.is_empty());
+        let manifest_json = std::fs::read_to_string(loc_path.join("manifest.json")).unwrap();
+        assert!(manifest_json.contains("\"authenticity\": \"LocalDevelopment\""));
+
+        // Signing a LocalDevelopment bundle MUST FAIL
+        let keypair = SigningKeyPair::generate();
+        let sign_err = sign_bundle(&loc_path, &keypair);
+        assert!(
+            sign_err.is_err(),
+            "Signing LocalDevelopment bundle must fail"
+        );
+
+        // 3. Store with Forbidden provider (Navigraph_Forbidden)
+        let store_forbid = WorldStore::open_in_memory().unwrap();
+        let conn_forbid = store_forbid.raw_conn();
+        let snap_forbid = openairac_model::SourceSnapshot {
+            id: openairac_model::SourceSnapshotId("snap-forbid".to_string()),
+            provider: "Navigraph_Forbidden".to_string(),
+            dataset: "navigraph".to_string(),
+            provider_revision: None,
+            airac_cycle: Some("2608".to_string()),
+            effective_from: Some(now),
+            effective_until: None,
+            retrieved_at: now,
+            source_uri: "local".to_string(),
+            content_sha256: "hash789".to_string(),
+            license_id: Some("Proprietary-Restricted".to_string()),
+            license_notes: None,
+            parser_version: "1.0.0".to_string(),
+        };
+        openairac_store::insert_source_snapshot_conn(conn_forbid, &snap_forbid).unwrap();
+
+        let out_dir_forbid = unique_dir("bndl_policy_forbid");
+        assert!(build_bundle(&store_forbid, &out_dir_forbid, now).is_err());
+        assert!(build_local_bundle(&store_forbid, &out_dir_forbid, now).is_err());
+    }
+
+    #[test]
+    fn test_regional_bundle_filtering() {
+        use openairac_store::WorldStore;
+        let now = Utc::now();
+        let store = WorldStore::open_in_memory().unwrap();
+        let conn = store.raw_conn();
+
+        let snap_faa = openairac_model::SourceSnapshot {
+            id: openairac_model::SourceSnapshotId("snap-faa".to_string()),
+            provider: "FAA_CIFP".to_string(),
+            dataset: "FAACIFP18".to_string(),
+            provider_revision: None,
+            airac_cycle: Some("2608".to_string()),
+            effective_from: Some(now),
+            effective_until: None,
+            retrieved_at: now,
+            source_uri: "https://nfdc.faa.gov/".to_string(),
+            content_sha256: "hash123".to_string(),
+            license_id: Some("PublicDomain-US-Gov".to_string()),
+            license_notes: None,
+            parser_version: "1.0.0".to_string(),
+        };
+        openairac_store::insert_source_snapshot_conn(conn, &snap_faa).unwrap();
+
+        let snap_oa = openairac_model::SourceSnapshot {
+            id: openairac_model::SourceSnapshotId("snap-oa".to_string()),
+            provider: "OurAirports".to_string(),
+            dataset: "airports".to_string(),
+            provider_revision: None,
+            airac_cycle: None,
+            effective_from: Some(now),
+            effective_until: None,
+            retrieved_at: now,
+            source_uri: "https://davidmegginson.github.io/".to_string(),
+            content_sha256: "hash456".to_string(),
+            license_id: Some("CC0-1.0".to_string()),
+            license_notes: None,
+            parser_version: "1.0.0".to_string(),
+        };
+        openairac_store::insert_source_snapshot_conn(conn, &snap_oa).unwrap();
+
+        // Filter US-only
+        let out_us = unique_dir("bndl_reg_us");
+        let filter_us = BundleFilter::us_only();
+        let (_, path_us) = build_bundle_with_filter(
+            &store,
+            &out_us,
+            now,
+            BundleScope::PublicRelease,
+            Some(&filter_us),
+        )
+        .expect("US bundle build");
+        let manifest_us: BundleManifest =
+            serde_json::from_str(&std::fs::read_to_string(path_us.join("manifest.json")).unwrap())
+                .unwrap();
+        assert_eq!(manifest_us.core.providers, vec!["FAA_CIFP"]);
     }
 }

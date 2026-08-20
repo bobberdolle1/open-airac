@@ -18,6 +18,10 @@ use chrono::{DateTime, Utc};
 use openairac_store::WorldStore;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+pub mod gns430;
+pub mod kln90b;
+pub use gns430::Gns430Exporter;
+pub use kln90b::Kln90bExporter;
 
 // ---------------------------------------------------------------------------
 // Format families
@@ -66,6 +70,14 @@ pub mod families {
     /// PMDG classic text.
     pub fn pmdg_text() -> FormatFamilyId {
         FormatFamilyId::new("pmdg-text")
+    }
+    /// Garmin GNS430 / X-Plane legacy GNS430 navdata text.
+    pub fn gns430_text() -> FormatFamilyId {
+        FormatFamilyId::new("gns430-text")
+    }
+    /// Legacy KLN90B GPS database format (.DAT files).
+    pub fn kln90b_dat() -> FormatFamilyId {
+        FormatFamilyId::new("kln90b-dat")
     }
 }
 
@@ -799,6 +811,88 @@ pub mod registry {
                     },
                     validation_strategy: ValidationStrategy::HashVerify,
                     support_state: SupportState::Research,
+                },
+                TargetDescriptor {
+                    id: "xplane-gns430".to_string(),
+                    display_name: "Garmin GNS430 / Legacy GPS".to_string(),
+                    simulator: "X-Plane".to_string(),
+                    format_family: families::gns430_text(),
+                    detection_rules: vec![
+                        DetectionRule::DirContains("Custom Data".to_string()),
+                    ],
+                    install_roots: vec![
+                        InstallRoot {
+                            platform: "any".to_string(),
+                            path: "%XPLANE%".to_string(),
+                            subdir: "Custom Data/GNS430/navdata".to_string(),
+                        },
+                        InstallRoot {
+                            platform: "windows".to_string(),
+                            path: "F:\\SteamLibrary\\steamapps\\common\\X-Plane 12\\Custom Data\\GNS430\\navdata".to_string(),
+                            subdir: String::new(),
+                        },
+                        InstallRoot {
+                            platform: "windows".to_string(),
+                            path: "C:\\X-Plane 12\\Custom Data\\GNS430\\navdata".to_string(),
+                            subdir: String::new(),
+                        },
+                    ],
+                    required_artifacts: vec![
+                        "Airports.txt".to_string(),
+                        "Navaids.txt".to_string(),
+                        "Waypoints.txt".to_string(),
+                        "ATS.txt".to_string(),
+                        "cycle_info.txt".to_string(),
+                    ],
+                    optional_artifacts: vec![],
+                    version_constraints: vec![VersionConstraint {
+                        min: None,
+                        max: None,
+                        note: "Legacy Garmin GNS430 / X-Plane 430 navdata format".to_string(),
+                    }],
+                    install_strategy: InstallStrategy::Subdirectory {
+                        relative: String::new(),
+                    },
+                    validation_strategy: ValidationStrategy::HashVerify,
+                    support_state: SupportState::Supported,
+                },
+                TargetDescriptor {
+                    id: "kln90b".to_string(),
+                    display_name: "Bendix/King KLN90B GPS".to_string(),
+                    simulator: "Various (Tu-154, vasFMC, classic airliners)".to_string(),
+                    format_family: families::kln90b_dat(),
+                    detection_rules: vec![],
+                    install_roots: vec![
+                        InstallRoot {
+                            platform: "any".to_string(),
+                            path: "%KLN90B_NAVDATA%".to_string(),
+                            subdir: String::new(),
+                        },
+                        InstallRoot {
+                            platform: "windows".to_string(),
+                            path: "C:\\KLN90B\\navdata".to_string(),
+                            subdir: String::new(),
+                        },
+                    ],
+                    required_artifacts: vec![
+                        "APT.DAT".to_string(),
+                        "NAV.DAT".to_string(),
+                        "WPT.DAT".to_string(),
+                        "AWY.DAT".to_string(),
+                        "FAS.DAT".to_string(),
+                        "cycle.dat".to_string(),
+                    ],
+                    optional_artifacts: vec![],
+                    version_constraints: vec![VersionConstraint {
+                        min: None,
+                        max: None,
+                        note: "Legacy KLN90B GPS database format".to_string(),
+                    }],
+                    install_strategy: InstallStrategy::Subdirectory {
+                        relative: String::new(),
+                    },
+                    validation_strategy: ValidationStrategy::HashVerify,
+                    support_state: SupportState::Supported,
                 },
             ];
             v

@@ -155,16 +155,59 @@ enum Commands {
         cmd: UpdateCmd,
     },
 
-    /// Coverage report per provider and country
-    Coverage {
-        #[arg(short, long, default_value = "./data/world.openairac.sqlite")]
-        db: PathBuf,
+    /// Import local user aeronautical datasets (AIXM 5.x XML, ARINC 424, CSV)
+    Import {
+        #[command(subcommand)]
+        cmd: ImportCmd,
     },
 
-    /// Export canonical navigation data into simulator format
+    /// Coverage report per provider/country or airport-specific inspection
+    Coverage {
+        /// Optional airport ICAO ident (e.g. EDDF, KSEA, EGLL)
+        icao: Option<String>,
+        #[arg(short, long, default_value = "./data/world.openairac.sqlite")]
+        db: PathBuf,
+        /// Machine-readable JSON output
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+
+    /// Detailed terminal procedure diagnostics and airport health check
+    DoctorAirport {
+        /// Airport ICAO ident (e.g. EDDF, KSFO)
+        icao: String,
+        #[arg(short, long, default_value = "./data/world.openairac.sqlite")]
+        db: PathBuf,
+        /// Machine-readable JSON output
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
     Export {
         #[command(subcommand)]
         target: ExportTarget,
+    },
+}
+
+#[derive(Subcommand)]
+enum ImportCmd {
+    /// Import an AIXM 5.x XML file into the store (BYOD / local only)
+    Aixm {
+        /// Path to AIXM 5.x XML file
+        file: PathBuf,
+        #[arg(short, long, default_value = "./data/world.openairac.sqlite")]
+        db: PathBuf,
+        /// Provider name (default: BYOD_AIXM)
+        #[arg(short, long, default_value = "BYOD_AIXM")]
+        provider: String,
+        /// Object-id namespace prefix (default: byod)
+        #[arg(short, long, default_value = "byod")]
+        namespace: String,
+        /// AIRAC cycle ident (e.g. 2608)
+        #[arg(short, long)]
+        cycle: Option<String>,
+        /// License identifier
+        #[arg(short, long, default_value = "BYOD-Local-License")]
+        license: String,
     },
 }
 
@@ -380,7 +423,28 @@ enum ExportTarget {
         #[arg(long)]
         install_to: Option<PathBuf>,
     },
-    /// Export a Little Navmap nav database (open-source schema)
+    /// Export Garmin GNS430 / X-Plane legacy GPS text navigation data
+    Gns430 {
+        #[arg(short, long, default_value = "./data/world.openairac.sqlite")]
+        db: PathBuf,
+        #[arg(short, long, default_value = "./output/gns430")]
+        out: PathBuf,
+        #[arg(short, long)]
+        date: Option<String>,
+        #[arg(long)]
+        install_to: Option<PathBuf>,
+    },
+    /// Export legacy KLN90B GPS navigation database (.DAT files)
+    Kln90b {
+        #[arg(short, long, default_value = "./data/world.openairac.sqlite")]
+        db: PathBuf,
+        #[arg(short, long, default_value = "./output/kln90b")]
+        out: PathBuf,
+        #[arg(short, long)]
+        date: Option<String>,
+        #[arg(long)]
+        install_to: Option<PathBuf>,
+    },
     Lnm {
         #[arg(short, long, default_value = "./data/world.openairac.sqlite")]
         db: PathBuf,
@@ -1300,33 +1364,207 @@ fn main() -> Result<()> {
             );
         }
 
-        Commands::Coverage { db } => {
+        Commands::Import { cmd } => match cmd {
+            ImportCmd::Aixm {
+                file,
+                db,
+                provider,
+                namespace,
+                cycle,
+                license,
+            } => {
+                let mut store = WorldStore::open(db)?;
+                store.migrate()?;
+                let content = std::fs::read_to_string(file)
+                    .with_context(|| format!("reading AIXM file: {}", file.display()))?;
+                let aixm_prov =
+                    openairac_ingest::aixm::Aixm5Provider::new(provider, namespace, license);
+                let effective = chrono::Utc::now();
+                let report = aixm_prov.ingest_xml_content(
+                    &mut store,
+                    &content,
+                    effective,
+                    cycle.as_deref(),
+                    &format!("file://{}", file.display()),
+                )?;
+                println!(
+                    "Successfully imported AIXM 5 dataset from {}",
+                    file.display()
+                );
+                println!("  Provider: {} ({})", provider, namespace);
+                println!("  License: {}", license);
+                println!("  Records created: {}", report.records_created);
+                println!("  Warnings: {}", report.warnings.len());
+            }
+        },
+
+        Commands::Coverage { icao, db, json } => {
             let store = WorldStore::open(db)?;
             let service = openairac_service::WorldQuery::from_store(store);
-            let report = service.coverage_report(chrono::Utc::now())?;
-            println!("OpenAIRAC Coverage Report (as of {})", report.as_of);
-            for p in &report.providers {
-                println!(
-                    "  {}: {} ({}, {})",
-                    p.provider, p.coverage, p.temporal, p.update
-                );
-                println!(
-                    "    airports {} runways {} navaids {} waypoints {} airways {} procedure legs {} snapshots {}",
-                    p.airports,
-                    p.runways,
-                    p.navaids,
-                    p.waypoints,
-                    p.airway_legs,
-                    p.procedure_legs,
-                    p.snapshots
-                );
+            let now = chrono::Utc::now();
+
+            if let Some(ident) = icao {
+                let cov = service.airport_coverage(&ident.to_uppercase(), now)?;
+                match cov {
+                    Some(c) => {
+                        if *json {
+                            println!("{}", serde_json::to_string_pretty(&c)?);
+                        } else {
+                            println!("OpenAIRAC Airport Coverage: {} ({})", c.ident, c.name);
+                            println!("============================================");
+                            println!(
+                                "  Location: {:.4}°N, {:.4}°E (Elevation: {} ft)",
+                                c.latitude,
+                                c.longitude,
+                                c.elevation_ft.unwrap_or(0.0)
+                            );
+                            println!("  Country: {}", c.country.as_deref().unwrap_or("Unknown"));
+                            println!(
+                                "  Municipality: {}",
+                                c.municipality.as_deref().unwrap_or("Unknown")
+                            );
+                            println!("  Runways: {}", c.runways.len());
+                            for rwy in &c.runways {
+                                println!(
+                                    "    - Runway {}: {} ft (Surface: {})",
+                                    rwy.designator,
+                                    rwy.length_ft,
+                                    rwy.surface.as_deref().unwrap_or("Unknown")
+                                );
+                            }
+                            println!("  Terminal Procedures:");
+                            println!(
+                                "    SIDs ({}): {}",
+                                c.sids_count,
+                                if c.sids.is_empty() {
+                                    "none".to_string()
+                                } else {
+                                    c.sids.join(", ")
+                                }
+                            );
+                            println!(
+                                "    STARs ({}): {}",
+                                c.stars_count,
+                                if c.stars.is_empty() {
+                                    "none".to_string()
+                                } else {
+                                    c.stars.join(", ")
+                                }
+                            );
+                            println!(
+                                "    Approaches ({}): {}",
+                                c.approaches_count,
+                                if c.approaches.is_empty() {
+                                    "none".to_string()
+                                } else {
+                                    c.approaches.join(", ")
+                                }
+                            );
+                            println!("  Data Sources & Provenance:");
+                            for s in &c.sources {
+                                println!(
+                                    "    - {}: dataset '{}' (cycle: {}, license: {}, redistribution: {})",
+                                    s.provider,
+                                    s.dataset,
+                                    s.airac_cycle.as_deref().unwrap_or("continuous"),
+                                    s.license_id,
+                                    s.redistribution
+                                );
+                            }
+                        }
+                    }
+                    None => {
+                        if *json {
+                            println!(
+                                "{{\"error\": \"Airport '{}' not found in canonical store\"}}",
+                                ident
+                            );
+                        } else {
+                            println!("Airport '{}' not found in database.", ident);
+                        }
+                    }
+                }
+            } else {
+                let report = service.coverage_report(now)?;
+                if *json {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                } else {
+                    println!(
+                        "OpenAIRAC Worldwide Coverage Report (as of {})",
+                        report.as_of
+                    );
+                    println!("===========================================================");
+                    for p in &report.providers {
+                        println!(
+                            "  {}: {} ({}, {})",
+                            p.provider, p.coverage, p.temporal, p.update
+                        );
+                        println!(
+                            "    airports {} runways {} navaids {} waypoints {} airways {} procedure legs {} snapshots {}",
+                            p.airports,
+                            p.runways,
+                            p.navaids,
+                            p.waypoints,
+                            p.airway_legs,
+                            p.procedure_legs,
+                            p.snapshots
+                        );
+                    }
+                    let total: usize = report.airports_by_country.iter().map(|(_, n)| n).sum();
+                    println!(
+                        "  countries with airports: {} (total {})",
+                        report.airports_by_country.len(),
+                        total
+                    );
+                }
             }
-            let total: usize = report.airports_by_country.iter().map(|(_, n)| n).sum();
-            println!(
-                "  countries with airports: {} (total {})",
-                report.airports_by_country.len(),
-                total
-            );
+        }
+
+        Commands::DoctorAirport { icao, db, json } => {
+            let store = WorldStore::open(db)?;
+            let service = openairac_service::WorldQuery::from_store(store);
+            let now = chrono::Utc::now();
+            let doc = service.doctor_airport(&icao.to_uppercase(), now)?;
+
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&doc)?);
+            } else {
+                println!(
+                    "OpenAIRAC Terminal Doctor: {} ({})",
+                    doc.ident,
+                    doc.name.as_deref().unwrap_or("Unknown")
+                );
+                println!("==================================================");
+                println!("  Health Status: {}", doc.status);
+                println!("  Flyable: {}", if doc.is_flyable { "YES" } else { "NO" });
+                println!("  Runways: {}", doc.runway_count);
+                println!("  Procedures Analyzed: {}", doc.procedures_found);
+                if !doc.missing_elements.is_empty() {
+                    println!("  Missing Elements ({}):", doc.missing_elements.len());
+                    for m in &doc.missing_elements {
+                        println!("    - {}", m);
+                    }
+                }
+                if !doc.validation_issues.is_empty() {
+                    println!("  Validation Issues ({}):", doc.validation_issues.len());
+                    for issue in &doc.validation_issues {
+                        println!(
+                            "    [{}] ({:?}) trans: '{}', fix: {:?}, seq: {:?}: {}",
+                            issue.severity.as_str(),
+                            issue.category,
+                            issue.transition_ident,
+                            issue.fix_ident,
+                            issue.sequence_number,
+                            issue.message
+                        );
+                    }
+                }
+                if doc.missing_elements.is_empty() && doc.validation_issues.is_empty() {
+                    println!(
+                        "  All airport terminal procedures, runways, and legs passed structural and geometric validation."
+                    );
+                }
+            }
         }
         Commands::Reconcile { db, as_of } => {
             let as_of = match as_of {
@@ -1883,6 +2121,74 @@ fn main() -> Result<()> {
                         t.display_name,
                         t.format_family.as_str()
                     );
+                }
+            }
+            ExportTarget::Gns430 {
+                db,
+                out,
+                date,
+                install_to,
+            } => {
+                let export_date = parse_export_date(date)?;
+                let store = WorldStore::open(db)?;
+                let exporter = openairac_export::Gns430Exporter;
+                let set =
+                    openairac_export::FormatExporter::export(&exporter, &store, export_date, out)?;
+                println!("Exported GNS430 navigation dataset (cycle {}):", set.cycle);
+                for a in &set.artifacts {
+                    println!(
+                        "  {} ({} bytes, sha256 {})",
+                        a.path,
+                        a.size,
+                        &a.sha256[..16]
+                    );
+                }
+                if let Some(target_dir) = install_to {
+                    let desc = openairac_export::target("xplane-gns430")
+                        .expect("registered target xplane-gns430")
+                        .clone();
+                    let installer = openairac_export::GenericTargetInstaller::new(desc);
+                    let report = openairac_export::TargetInstaller::install(
+                        &installer, out, &set, target_dir,
+                    )?;
+                    println!("Installed GNS430 dataset into {}:", target_dir.display());
+                    for path in report.installed {
+                        println!("  installed {}", path);
+                    }
+                }
+            }
+            ExportTarget::Kln90b {
+                db,
+                out,
+                date,
+                install_to,
+            } => {
+                let export_date = parse_export_date(date)?;
+                let store = WorldStore::open(db)?;
+                let exporter = openairac_export::Kln90bExporter;
+                let set =
+                    openairac_export::FormatExporter::export(&exporter, &store, export_date, out)?;
+                println!("Exported KLN90B navigation dataset (cycle {}):", set.cycle);
+                for a in &set.artifacts {
+                    println!(
+                        "  {} ({} bytes, sha256 {})",
+                        a.path,
+                        a.size,
+                        &a.sha256[..16]
+                    );
+                }
+                if let Some(target_dir) = install_to {
+                    let desc = openairac_export::target("kln90b")
+                        .expect("registered target kln90b")
+                        .clone();
+                    let installer = openairac_export::GenericTargetInstaller::new(desc);
+                    let report = openairac_export::TargetInstaller::install(
+                        &installer, out, &set, target_dir,
+                    )?;
+                    println!("Installed KLN90B dataset into {}:", target_dir.display());
+                    for path in report.installed {
+                        println!("  installed {}", path);
+                    }
                 }
             }
             ExportTarget::Lnm { db, out, date } => {

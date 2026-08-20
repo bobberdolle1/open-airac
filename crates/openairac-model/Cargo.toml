@@ -9,3 +9,4 @@ repository.workspace = true
 serde.workspace = true
 chrono.workspace = true
 anyhow.workspace = true
+serde_yaml.workspace = true
