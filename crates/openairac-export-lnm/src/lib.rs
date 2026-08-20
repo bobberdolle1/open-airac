@@ -69,11 +69,7 @@ impl FormatExporter for LnmNavdataExporter {
             rusqlite::params![as_of.timestamp(), 0i64],
         )?;
 
-        // magdecl: single reference entry.
-        conn.execute(
-            "INSERT INTO magdecl (magdecl_id, reference_time, mag_var) VALUES (1, ?1, NULL)",
-            rusqlite::params![as_of.timestamp()],
-        )?;
+        // Note: magdecl table is created empty; LNM uses internal WMM fallback when magdecl is empty.
         // metadata: required for Little Navmap database compatibility.
         let cycle_str = openairac_export_xplane::airac_cycle(as_of);
         let has_procs = if procedure_legs.is_empty() {
