@@ -75,6 +75,28 @@ pub struct CaicaParsedProcedure {
     pub legs: Vec<CaicaRawLegRow>,
     pub source_doc_title: String,
 }
+/// Semantic classification of an entry in the CAICA collection index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaicaEntryKind {
+    Airport,
+    HeliportVertodrome,
+    OffshorePlatform,
+    OtherAviationObject,
+    NavigationNonData,
+}
+
+impl CaicaEntryKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Airport => "airport",
+            Self::HeliportVertodrome => "heliport_vertodrome",
+            Self::OffshorePlatform => "offshore_platform",
+            Self::OtherAviationObject => "other_aviation_object",
+            Self::NavigationNonData => "navigation_non_data",
+        }
+    }
+}
 
 /// Discovered Russian airport entry from official CAICA ProcedureList index.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -83,6 +105,7 @@ pub struct CaicaDiscoveredAirport {
     pub name_ru: String,
     pub name_en: Option<String>,
     pub source_page_url: String,
+    pub entry_kind: CaicaEntryKind,
     pub has_sids: bool,
     pub has_stars: bool,
     pub has_approaches: bool,
@@ -153,11 +176,23 @@ impl CaicaProcedureIndex {
                         None
                     };
 
+                    let up_text = ru_name.to_uppercase();
+                    let kind = if up_text.contains("МЛСП") || up_text.contains("ПРИРАЗЛОМНАЯ") || up_text.contains("МОЛИКПАК") || up_text.contains("ЛУНСКОЕ") || up_text.contains("Р-111") || up_text.contains("ТЕРЛЕЦКАЯ") {
+                        CaicaEntryKind::OffshorePlatform
+                    } else if up_text.contains("ВЕРТОДРОМ") || up_text.contains("ВАЛ") || up_text.contains("ВЕРТОЛЕТ") {
+                        CaicaEntryKind::HeliportVertodrome
+                    } else if icao == "NAV" || icao == "INDEX" || url.contains("nav.htm") {
+                        CaicaEntryKind::NavigationNonData
+                    } else {
+                        CaicaEntryKind::Airport
+                    };
+
                     let discovered = CaicaDiscoveredAirport {
                         icao: icao.clone(),
                         name_ru: ru_name,
                         name_en: en_name,
                         source_page_url: url,
+                        entry_kind: kind,
                         has_sids: procs_str.contains("SID"),
                         has_stars: procs_str.contains("STAR"),
                         has_approaches: procs_str.contains("APCH")
@@ -165,7 +200,6 @@ impl CaicaProcedureIndex {
                             || procs_str.contains("APP"),
                         airac_cycle: cycle,
                     };
-
                     if !self.airports.iter().any(|a| a.icao == icao) {
                         self.airports.push(discovered);
                         count += 1;
@@ -200,15 +234,26 @@ impl CaicaProcedureIndex {
                             .to_uppercase()
                     };
 
-                    if icao.len() == 4
-                        && icao.starts_with('U')
+                    if (icao.len() == 4 && (icao.starts_with('U') || icao.starts_with('X')) || icao == "NAV" || url.contains("nav.htm"))
                         && !self.airports.iter().any(|a| a.icao == icao)
                     {
+                        let up_text = link_text.to_uppercase();
+                        let kind = if up_text.contains("МЛСП") || up_text.contains("ПРИРАЗЛОМНАЯ") || up_text.contains("МОЛИКПАК") || up_text.contains("ЛУНСКОЕ") || up_text.contains("Р-111") || up_text.contains("ТЕРЛЕЦКАЯ") {
+                            CaicaEntryKind::OffshorePlatform
+                        } else if up_text.contains("ВЕРТОДРОМ") || up_text.contains("ВАЛ") || up_text.contains("ВЕРТОЛЕТ") {
+                            CaicaEntryKind::HeliportVertodrome
+                        } else if icao == "NAV" || icao == "INDEX" || url.contains("nav.htm") {
+                            CaicaEntryKind::NavigationNonData
+                        } else {
+                            CaicaEntryKind::Airport
+                        };
+
                         self.airports.push(CaicaDiscoveredAirport {
                             icao,
                             name_ru: link_text.to_string(),
                             name_en: None,
                             source_page_url: url,
+                            entry_kind: kind,
                             has_sids: true,
                             has_stars: true,
                             has_approaches: true,

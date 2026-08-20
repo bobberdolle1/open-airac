@@ -14,8 +14,8 @@ pub mod world_composer;
 
 pub use caica_ats::{AirwayDirectionality, CaicaAtsProvider, CaicaAtsSegment};
 pub use caica_procedures::{
-    CaicaAltitudeConstraint, CaicaDiscoveredAirport, CaicaNationalStatistics, CaicaParsedProcedure,
-    CaicaProcedureIndex, CaicaProcedureProvider, CaicaRawLegRow,
+    CaicaAltitudeConstraint, CaicaDiscoveredAirport, CaicaEntryKind, CaicaNationalStatistics,
+    CaicaParsedProcedure, CaicaProcedureIndex, CaicaProcedureProvider, CaicaRawLegRow,
 };
 pub use caica_rsbn::{CaicaRsbnProvider, ParsedRsbnStation};
 pub use local_vault::{LocalAipVault, VaultEntityCounts, VaultPackageManifest, VaultSourceFile};
