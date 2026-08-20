@@ -89,9 +89,7 @@ pub enum WeatherStaleness {
 impl WeatherStaleness {
     pub fn evaluate_metar(obs_time: DateTime<Utc>, now: DateTime<Utc>) -> Self {
         let age_mins = (now - obs_time).num_minutes();
-        if age_mins < 0 {
-            WeatherStaleness::Fresh
-        } else if age_mins <= 30 {
+        if age_mins <= 30 {
             WeatherStaleness::Fresh
         } else if age_mins <= 60 {
             WeatherStaleness::Aging

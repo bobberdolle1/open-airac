@@ -1450,6 +1450,7 @@ dependencies = [
  "openairac-ingest",
  "openairac-magnetic",
  "openairac-model",
+ "openairac-online",
  "openairac-procedures",
  "openairac-reconcile",
  "openairac-routing",
@@ -1599,6 +1600,25 @@ dependencies = [
  "chrono",
  "serde",
  "serde_yaml",
+]
+
+[[package]]
+name = "openairac-online"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "openairac-model",
+ "openairac-store",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

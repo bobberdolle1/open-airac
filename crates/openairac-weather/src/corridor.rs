@@ -57,7 +57,11 @@ impl RouteCorridor {
     }
 
     /// Calculate minimum distance from a point to a route line segment in nautical miles.
-    pub fn point_to_segment_distance_nm(point: (f64, f64), seg_start: (f64, f64), seg_end: (f64, f64)) -> f64 {
+    pub fn point_to_segment_distance_nm(
+        point: (f64, f64),
+        seg_start: (f64, f64),
+        seg_end: (f64, f64),
+    ) -> f64 {
         let seg_len = Self::distance_nm(seg_start, seg_end);
         if seg_len < 1e-4 {
             return Self::distance_nm(point, seg_start);
@@ -109,7 +113,12 @@ impl RouteCorridor {
     }
 
     /// Check if two line segments intersect.
-    pub fn segments_intersect(p1: (f64, f64), p2: (f64, f64), q1: (f64, f64), q2: (f64, f64)) -> bool {
+    pub fn segments_intersect(
+        p1: (f64, f64),
+        p2: (f64, f64),
+        q1: (f64, f64),
+        q2: (f64, f64),
+    ) -> bool {
         fn ccw(a: (f64, f64), b: (f64, f64), c: (f64, f64)) -> bool {
             (c.1 - a.1) * (b.0 - a.0) > (b.1 - a.1) * (c.0 - a.0)
         }
@@ -163,7 +172,8 @@ impl RouteCorridor {
 
         let mut min_dist = f64::MAX;
         for i in 0..self.waypoints.len() - 1 {
-            let d = Self::point_to_segment_distance_nm(point, self.waypoints[i], self.waypoints[i + 1]);
+            let d =
+                Self::point_to_segment_distance_nm(point, self.waypoints[i], self.waypoints[i + 1]);
             if d < min_dist {
                 min_dist = d;
             }
@@ -204,21 +214,11 @@ mod tests {
         ]);
 
         // 1. Polygon over Chicago directly intersecting route
-        let chicago_storm = vec![
-            (-88.5, 41.5),
-            (-87.5, 41.5),
-            (-87.5, 42.5),
-            (-88.5, 42.5),
-        ];
+        let chicago_storm = vec![(-88.5, 41.5), (-87.5, 41.5), (-87.5, 42.5), (-88.5, 42.5)];
         assert!(corridor.intersects_polygon(&chicago_storm));
 
         // 2. Polygon in Texas (far south, no intersection)
-        let texas_storm = vec![
-            (-98.0, 30.0),
-            (-96.0, 30.0),
-            (-96.0, 32.0),
-            (-98.0, 32.0),
-        ];
+        let texas_storm = vec![(-98.0, 30.0), (-96.0, 30.0), (-96.0, 32.0), (-98.0, 32.0)];
         assert!(!corridor.intersects_polygon(&texas_storm));
     }
 
