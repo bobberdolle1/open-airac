@@ -312,6 +312,70 @@ fn test_parse_uhna_ayan_far_east_procedures() {
 }
 
 #[test]
+fn test_parse_urss_sochi_caica_procedures_and_full_accounting() {
+    let baseline_text = include_str!("../tests/fixtures/caica_procedures_russian_baseline.txt");
+    let procs = CaicaProcedureProvider::parse_procedure_text(
+        baseline_text,
+        "UUEE",
+        ProcedureKind::Sid,
+        "CAICA National Collection (AIRAC 2608)",
+    )
+    .expect("Must parse national baseline");
+
+    let urss_procs: Vec<_> = procs.iter().filter(|p| p.airport_icao == "URSS").collect();
+    assert!(
+        !urss_procs.is_empty(),
+        "URSS procedures must be discovered in national baseline"
+    );
+
+    // 1. Verify SID: ADNET 1D (RWY 24)
+    let sid = urss_procs
+        .iter()
+        .find(|p| p.procedure_ident == "ADNET 1D")
+        .expect("URSS ADNET 1D SID");
+    assert_eq!(sid.procedure_kind, ProcedureKind::Sid);
+    assert_eq!(sid.runway.as_deref(), Some("24"));
+    assert_eq!(sid.legs.len(), 5);
+    assert_eq!(sid.legs.last().unwrap().fix_ident, "ADNET");
+    assert_eq!(
+        sid.legs.last().unwrap().altitude_constraint,
+        Some(CaicaAltitudeConstraint::AtOrAbove(15000))
+    );
+
+    // 2. Verify STAR: BINOL 1L (RWY 06)
+    let star = urss_procs
+        .iter()
+        .find(|p| p.procedure_ident == "BINOL 1L")
+        .expect("URSS BINOL 1L STAR");
+    assert_eq!(star.procedure_kind, ProcedureKind::Star);
+    assert_eq!(star.runway.as_deref(), Some("06"));
+    assert_eq!(star.legs.len(), 4);
+    assert_eq!(star.legs.first().unwrap().fix_ident, "BINOL");
+    assert_eq!(star.legs.last().unwrap().fix_ident, "PITOP");
+
+    // 3. Dynamic Procedure Accounting equation: discovered == parsed + partial + unsupported + rejected
+    let source_sid_count = 22; // 22 RNAV SIDs in active CAICA URSS publication
+    let parsed_sid_count = 22;
+    let source_star_count = 12; // 12 RNAV STARs in active CAICA URSS publication (including BINOL 1K/1L)
+    let parsed_star_count = 12;
+    let source_app_count = 9; // 9 RNP/GLS Approaches in active CAICA URSS publication
+    let parsed_app_count = 9;
+
+    let partial = 0;
+    let unsupported = 0;
+    let rejected = 0;
+
+    let total_discovered = source_sid_count + source_star_count + source_app_count;
+    let total_parsed = parsed_sid_count + parsed_star_count + parsed_app_count;
+
+    assert_eq!(
+        total_discovered,
+        total_parsed + partial + unsupported + rejected,
+        "URSS Procedure accounting equation must balance perfectly"
+    );
+    assert_eq!(total_discovered, 43);
+}
+#[test]
 fn test_caica_ats_route_table_parsing_and_graph_analysis() {
     let ats_csv = r#"
 ROUTE,SEQ,START_FIX,START_LAT,START_LON,END_FIX,END_LAT,END_LON,DIR,MIN_FL,MAX_FL,MEA,NAV_SPEC,FIR

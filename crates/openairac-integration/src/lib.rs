@@ -379,9 +379,33 @@ impl FlightPlanRequest {
         self.aircraft_profile = Some(profile);
         self
     }
-
     pub fn with_mode(mut self, mode: PlanningMode) -> Self {
         self.mode = mode;
+        self
+    }
+
+    pub fn with_sid(mut self, sid: impl Into<String>) -> Self {
+        self.sid_ident = Some(sid.into());
+        self
+    }
+
+    pub fn with_star(mut self, star: impl Into<String>) -> Self {
+        self.star_ident = Some(star.into());
+        self
+    }
+
+    pub fn with_approach(mut self, app: impl Into<String>) -> Self {
+        self.approach_ident = Some(app.into());
+        self
+    }
+
+    pub fn with_departure_runway(mut self, rwy: impl Into<String>) -> Self {
+        self.departure_runway = Some(rwy.into());
+        self
+    }
+
+    pub fn with_arrival_runway(mut self, rwy: impl Into<String>) -> Self {
+        self.arrival_runway = Some(rwy.into());
         self
     }
 }
@@ -931,8 +955,82 @@ impl<'a> Planner<'a> {
         if !dest_ok {
             validation_report.warnings.extend(dest_reasons);
         }
+        // Enforce Hard Procedure Invariants:
+        // 1. Explicitly requested SID must be successfully resolved as a valid SID
+        #[allow(clippy::collapsible_if)]
+        if let Some(req_sid) = &request.sid_ident {
+            if sid.is_none() {
+                validation_report.issues.push(format!(
+                    "Requested SID '{}' is not a valid departure procedure for origin airport {} (mismatched kind, wrong runway, or not published)",
+                    req_sid, origin.ident
+                ));
+                validation_report.status = FlightPlanValidationStatus::Invalid;
+                validation_report.is_flyable = false;
+            }
+        }
 
-        if !validation_report.warnings.is_empty() {
+        // 2. Explicitly requested STAR must be successfully resolved as a valid STAR
+        #[allow(clippy::collapsible_if)]
+        if let Some(req_star) = &request.star_ident {
+            if star.is_none() {
+                validation_report.issues.push(format!(
+                    "Requested STAR '{}' is not a valid arrival procedure for destination airport {} (mismatched kind, wrong runway, or not published)",
+                    req_star, destination.ident
+                ));
+                validation_report.status = FlightPlanValidationStatus::Invalid;
+                validation_report.is_flyable = false;
+            }
+        }
+
+        // 3. Explicitly requested Approach must be successfully resolved as a valid Approach
+        #[allow(clippy::collapsible_if)]
+        if let Some(req_app) = &request.approach_ident {
+            if approach.is_none() {
+                validation_report.issues.push(format!(
+                    "Requested Approach '{}' is not a valid instrument approach for destination airport {} (mismatched kind, wrong runway, or not published)",
+                    req_app, destination.ident
+                ));
+                validation_report.status = FlightPlanValidationStatus::Invalid;
+                validation_report.is_flyable = false;
+            }
+        }
+        #[allow(clippy::collapsible_if)]
+        if let Some(st) = &star {
+            if st.procedure.kind != ProcedureKind::Star
+                || !st
+                    .procedure
+                    .airport_ident
+                    .eq_ignore_ascii_case(&destination.ident)
+            {
+                validation_report.issues.push(format!(
+                    "Invalid STAR '{}': procedure kind is {:?}, expected STAR for {}",
+                    st.procedure.name, st.procedure.kind, destination.ident
+                ));
+                validation_report.status = FlightPlanValidationStatus::Invalid;
+                validation_report.is_flyable = false;
+            }
+        }
+
+        #[allow(clippy::collapsible_if)]
+        if let Some(app) = &approach {
+            if app.procedure.kind != ProcedureKind::Approach
+                || !app
+                    .procedure
+                    .airport_ident
+                    .eq_ignore_ascii_case(&destination.ident)
+            {
+                validation_report.issues.push(format!(
+                    "Invalid Approach '{}': procedure kind is {:?}, expected Approach for {}",
+                    app.procedure.name, app.procedure.kind, destination.ident
+                ));
+                validation_report.status = FlightPlanValidationStatus::Invalid;
+                validation_report.is_flyable = false;
+            }
+        }
+        if !validation_report.issues.is_empty() {
+            validation_report.status = FlightPlanValidationStatus::Invalid;
+            validation_report.is_flyable = false;
+        } else if !validation_report.warnings.is_empty() {
             validation_report.status = FlightPlanValidationStatus::Warning;
         }
 

@@ -430,10 +430,10 @@ impl CaicaProcedureProvider {
         let mut raw_rows = Vec::new();
 
         let mut current_proc = String::new();
+        let mut current_proc_kind = None;
         let mut current_rwy = None;
         let mut current_nav_spec = None;
         let mut airport_ru_name = None;
-
         for line in text.lines() {
             let trimmed = line.trim();
             if trimmed.is_empty() {
@@ -456,13 +456,24 @@ impl CaicaProcedureProvider {
                 continue;
             }
             // Check for header line: e.g. "PROCEDURE: EMGAS 1A | RWY: 24C | NAV: RNAV 1 | APT: ШЕРЕМЕТЬЕВО"
-            if trimmed.to_uppercase().starts_with("PROCEDURE:")
-                || trimmed.to_uppercase().starts_with("СХЕМА:")
-                || trimmed.to_uppercase().starts_with("SID:")
-                || trimmed.to_uppercase().starts_with("STAR:")
-                || trimmed.to_uppercase().starts_with("APPROACH:")
-                || trimmed.to_uppercase().starts_with("RNP:")
+            let up_trim = trimmed.to_uppercase();
+            if up_trim.starts_with("PROCEDURE:")
+                || up_trim.starts_with("СХЕМА:")
+                || up_trim.starts_with("SID:")
+                || up_trim.starts_with("STAR:")
+                || up_trim.starts_with("APPROACH:")
+                || up_trim.starts_with("RNP:")
             {
+                if up_trim.starts_with("STAR:") || up_trim.starts_with("ПРИЛЕТ:") {
+                    current_proc_kind = Some(ProcedureKind::Star);
+                } else if up_trim.starts_with("SID:") || up_trim.starts_with("ВЫЛЕТ:") {
+                    current_proc_kind = Some(ProcedureKind::Sid);
+                } else if up_trim.starts_with("APPROACH:") || up_trim.starts_with("RNP:") {
+                    current_proc_kind = Some(ProcedureKind::Approach);
+                } else {
+                    current_proc_kind = None;
+                }
+
                 let parts: Vec<&str> = trimmed.split('|').collect();
                 for part in parts {
                     let p_trim = part.trim();
@@ -477,6 +488,13 @@ impl CaicaProcedureProvider {
                             || key == "RNP"
                         {
                             current_proc = val;
+                            if key == "SID" || key == "ВЫЛЕТ" {
+                                current_proc_kind = Some(ProcedureKind::Sid);
+                            } else if key == "STAR" || key == "ПРИЛЕТ" {
+                                current_proc_kind = Some(ProcedureKind::Star);
+                            } else if key == "APP" || key == "RNP" || key == "APPROACH" {
+                                current_proc_kind = Some(ProcedureKind::Approach);
+                            }
                         } else if key.contains("RWY")
                             || key.contains("RUNWAY")
                             || key.contains("ВПП")
@@ -492,16 +510,51 @@ impl CaicaProcedureProvider {
                             || key.contains("АЭРОПОРТ")
                         {
                             let ru_name = val.clone();
+                            let up_ru = ru_name.to_uppercase();
                             let words: Vec<&str> = ru_name
                                 .split(|c: char| !c.is_ascii_alphanumeric())
                                 .collect();
+                            let mut found_icao = false;
                             for w in words {
                                 if w.len() == 4
                                     && w.starts_with('U')
                                     && w.chars().all(|c| c.is_ascii_uppercase())
                                 {
                                     clean_icao = w.to_string();
+                                    found_icao = true;
                                     break;
+                                }
+                            }
+                            if !found_icao {
+                                if up_ru.contains("СОЧИ") || up_ru.contains("АДЛЕР") {
+                                    clean_icao = "URSS".to_string();
+                                } else if up_ru.contains("ХАБАРОВСК") {
+                                    clean_icao = "UHHH".to_string();
+                                } else if up_ru.contains("ПЕТРОПАВЛОВСК") {
+                                    clean_icao = "UHPP".to_string();
+                                } else if up_ru.contains("ЯКУТСК") {
+                                    clean_icao = "UEEE".to_string();
+                                } else if up_ru.contains("САСКЫЛАХ") {
+                                    clean_icao = "UERS".to_string();
+                                } else if up_ru.contains("АЯН") {
+                                    clean_icao = "UHNA".to_string();
+                                } else if up_ru.contains("АНАДЫРЬ") {
+                                    clean_icao = "UHMA".to_string();
+                                } else if up_ru.contains("ШЕРЕМЕТЬЕВО") {
+                                    clean_icao = "UUEE".to_string();
+                                } else if up_ru.contains("ДОМОДЕДОВО") {
+                                    clean_icao = "UUDD".to_string();
+                                } else if up_ru.contains("ВНУКОВО") {
+                                    clean_icao = "UUWW".to_string();
+                                } else if up_ru.contains("ПУЛКОВО") {
+                                    clean_icao = "ULLI".to_string();
+                                } else if up_ru.contains("КОЛЬЦОВО") {
+                                    clean_icao = "USSS".to_string();
+                                } else if up_ru.contains("ТОЛМАЧЕВО") {
+                                    clean_icao = "UNNT".to_string();
+                                } else if up_ru.contains("ТОБОЛЬСК") || up_ru.contains("РЕМИЗОВ")
+                                {
+                                    clean_icao = "USTJ".to_string();
                                 }
                             }
                             airport_ru_name = Some(ru_name);
@@ -518,7 +571,12 @@ impl CaicaProcedureProvider {
                 current_rwy.as_deref(),
                 current_nav_spec.as_deref(),
             )? {
-                raw_rows.push((clean_icao.clone(), airport_ru_name.clone(), row));
+                raw_rows.push((
+                    clean_icao.clone(),
+                    airport_ru_name.clone(),
+                    current_proc_kind,
+                    row,
+                ));
             }
         }
 
@@ -526,24 +584,33 @@ impl CaicaProcedureProvider {
             return Ok(Vec::new());
         }
 
-        // Group rows by airport, procedure identifier, and runway
-        type GroupKey = (String, Option<String>, String, Option<String>);
+        // Group rows by airport, procedure identifier, kind, and runway
+        type GroupKey = (
+            String,
+            Option<String>,
+            String,
+            Option<ProcedureKind>,
+            Option<String>,
+        );
         let mut grouped: HashMap<GroupKey, Vec<CaicaRawLegRow>> = HashMap::new();
-        for (apt_icao, apt_name, row) in raw_rows {
+        for (apt_icao, apt_name, explicit_kind, row) in raw_rows {
             let key = (
                 apt_icao,
                 apt_name,
                 row.procedure_ident.clone(),
+                explicit_kind,
                 row.runway_transition.clone(),
             );
             grouped.entry(key).or_default().push(row);
         }
 
         let mut procedures = Vec::new();
-        for ((apt_icao, apt_name, proc_id, rwy), mut legs) in grouped {
+        for ((apt_icao, apt_name, proc_id, explicit_kind, rwy), mut legs) in grouped {
             legs.sort_by_key(|r| r.sequence_number);
 
-            let kind = if proc_id.to_uppercase().contains("RNP")
+            let kind = if let Some(k) = explicit_kind {
+                k
+            } else if proc_id.to_uppercase().contains("RNP")
                 || proc_id.to_uppercase().contains("APCH")
                 || proc_id.to_uppercase().contains("ILS")
                 || proc_id.to_uppercase().contains("RNAV") && proc_id.contains("RW")
@@ -557,7 +624,6 @@ impl CaicaProcedureProvider {
                 || proc_id.ends_with('F')
                 || proc_id.ends_with('G')
                 || proc_id.ends_with('W')
-                || proc_id.ends_with('D')
             {
                 if doc_title.to_uppercase().contains("STAR")
                     || doc_title.to_uppercase().contains("ПРИЛЕТ")
@@ -572,6 +638,10 @@ impl CaicaProcedureProvider {
                 } else {
                     default_kind
                 }
+            } else if default_kind == ProcedureKind::Star
+                || doc_title.to_uppercase().contains("STAR")
+            {
+                ProcedureKind::Star
             } else {
                 default_kind
             };

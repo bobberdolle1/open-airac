@@ -10,7 +10,7 @@
 //! 7. Crimea Golden E2E: UUEE -> URFF Simferopol (SID EMGAS 3E, Airways, STAR BURUD 2Y, Approach ILS 19R)
 //! 8. Crimea Multi-Identity Alias Resolution: Requesting UKFF resolves to physical Simferopol (URFF)
 //! 9. Southern Crimea Flight: URSS Sochi -> URFF Simferopol
-//! 10. Abkhazia Golden E2E: URSS Sochi -> URAS Sukhumi (Runway 12/30, SID GUKAN 1A, NDB SU)
+//! 10. Abkhazia Golden E2E: URSS Sochi -> URAS Sukhumi (Runway 12/30, SID ADNET 1D, NDB SU)
 //! 11. Abkhazia Multi-Identity Alias Resolution: Requesting UGSS resolves to physical Sukhumi (URAS)
 //! 12. Cross-Airport Collision Prevention: UG29 != Gudauta, UG28 != Pskhu, Sukhumi != Gudauta
 //! 13. Moscow -> Abkhazia Flight: UUEE -> URAS
@@ -363,7 +363,10 @@ fn setup_test_world_store() -> (WorldStore, DateTime<Utc>) {
         ("BURUD", 45.6000, 34.4000, "UR"),
         ("FF001", 45.1000, 34.0000, "UR"),
         ("FF080", 45.2000, 34.0500, "UR"),
-        ("BINOL", 43.3333, 39.7500, "UR"),
+        ("ADNET", 44.3692, 39.8400, "UR"),
+        ("NIDEP", 43.3876, 39.6255, "UR"),
+        ("BINOL", 43.6883, 40.1086, "UR"),
+        ("PITOP", 43.0389, 39.7736, "UR"),
         ("SU", 42.8600, 41.1300, "UR"),
         ("OPALE", 49.3000, 2.9000, "LF"),
         ("MN080", 43.6000, 7.1500, "LF"),
@@ -393,7 +396,7 @@ fn setup_test_world_store() -> (WorldStore, DateTime<Utc>) {
         ("B210", "BINBA", "UN", "IN", "UN", 2),
         ("W109", "EMGAS", "UU", "BURUD", "UR", 1),
         ("W109", "BURUD", "UR", "NL", "UR", 2),
-        ("G247", "BINOL", "UR", "SU", "UR", 1),
+        ("G247", "ADNET", "UR", "SU", "UR", 1),
     ];
 
     for (r_ident, f_ident, f_reg, t_ident, t_reg, seq) in airway_legs {
@@ -540,14 +543,26 @@ fn setup_test_world_store() -> (WorldStore, DateTime<Utc>) {
         (
             "URSS",
             'D',
-            "BINOL 1A",
-            "BINOL",
+            "ADNET 1D",
+            "ADNET",
             "TF",
             10,
-            Some(220.0),
-            Some(12.0),
+            Some(19.0),
+            Some(25.0),
+            Some(15000),
+            None,
+        ),
+        (
+            "URSS",
+            'E',
+            "BINOL 1L",
+            "PITOP",
+            "TF",
+            10,
+            Some(198.0),
+            Some(26.0),
             Some(10000),
-            Some(230),
+            None,
         ),
         (
             "LFPG",
@@ -851,6 +866,7 @@ fn test_abkhazia_golden_e2e_urss_to_uras_sukhumi() {
     let planner = Planner::new(&store);
 
     let req = FlightPlanRequest::new("URSS", "URAS")
+        .with_departure_runway("24")
         .with_aircraft(AircraftProfile::an24())
         .with_mode(PlanningMode::AllowDctGaps);
 
@@ -859,7 +875,47 @@ fn test_abkhazia_golden_e2e_urss_to_uras_sukhumi() {
     assert_eq!(plan.origin.ident, "URSS");
     assert_eq!(plan.destination.ident, "URAS");
 
-    // SID: BINOL 1A (Real CAICA SID for URSS Sochi)
+    // SID: ADNET 1D (Real CAICA SID for URSS Sochi RWY 24)
+    assert!(plan.sid.is_some());
+    assert_eq!(
+        plan.sid.as_ref().unwrap().procedure.kind,
+        openairac_procedures::ProcedureKind::Sid
+    );
+    assert!(
+        plan.sid
+            .as_ref()
+            .unwrap()
+            .procedure
+            .name
+            .contains("ADNET 1D")
+    );
+
+    // Destination URAS (Sukhumi) has no fabricated arrival procedures
+    assert!(plan.star.is_none(), "Sukhumi must have no fabricated STAR");
+    assert!(
+        plan.approach.is_none(),
+        "Sukhumi must have no fabricated Approach"
+    );
+
+    assert!(plan.validation.is_flyable);
+}
+
+#[test]
+fn test_crimea_flight_urss_sochi_to_urff_simferopol() {
+    let (store, _t) = setup_test_world_store();
+    let planner = Planner::new(&store);
+
+    let req = FlightPlanRequest::new("URSS", "URFF")
+        .with_departure_runway("24")
+        .with_aircraft(AircraftProfile::tu154())
+        .with_mode(PlanningMode::AllowDctGaps);
+
+    let plan = planner.plan(&req).expect("plan URSS to URFF");
+
+    assert_eq!(plan.origin.ident, "URSS");
+    assert_eq!(plan.destination.ident, "URFF");
+
+    // Real SID ADNET 1D
     assert!(plan.sid.is_some());
     assert!(
         plan.sid
@@ -867,11 +923,65 @@ fn test_abkhazia_golden_e2e_urss_to_uras_sukhumi() {
             .unwrap()
             .procedure
             .name
-            .contains("BINOL 1A")
+            .contains("ADNET 1D")
     );
+
+    // Real STAR BURUD 2Y
+    assert!(plan.star.is_some());
+    assert!(
+        plan.star
+            .as_ref()
+            .unwrap()
+            .procedure
+            .name
+            .contains("BURUD 2Y")
+    );
+
+    // Real Approach ILS 19R
+    assert!(plan.approach.is_some());
+    assert!(
+        plan.approach
+            .as_ref()
+            .unwrap()
+            .procedure
+            .name
+            .contains("ILS 19R")
+    );
+
     assert!(plan.validation.is_flyable);
+    assert_eq!(plan.validation.status, FlightPlanValidationStatus::Valid);
 }
 
+#[test]
+fn test_binol_star_as_sid_regression_canary() {
+    let (store, _t) = setup_test_world_store();
+    let planner = Planner::new(&store);
+
+    // Requesting BINOL 1L (which is an authentic CAICA STAR) as a departure SID must fail closed
+    let req = FlightPlanRequest::new("URSS", "URAS")
+        .with_aircraft(AircraftProfile::an24())
+        .with_sid("BINOL 1L")
+        .with_mode(PlanningMode::AllowDctGaps);
+
+    let plan = planner.plan(&req).expect("planner runs");
+    // SID must NOT be selected, plan must be invalid / not flyable
+    assert!(
+        plan.sid.is_none(),
+        "STAR procedure BINOL 1L must NEVER be selected as a SID"
+    );
+    assert!(
+        !plan.validation.is_flyable,
+        "Plan with invalid requested SID must not be flyable"
+    );
+    assert_eq!(plan.validation.status, FlightPlanValidationStatus::Invalid);
+    assert!(
+        plan.validation
+            .issues
+            .iter()
+            .any(|i| i.contains("BINOL 1L")),
+        "Validation report must diagnose BINOL 1L kind mismatch"
+    );
+}
 #[test]
 fn test_abkhazia_multi_identity_ugss_alias_resolution() {
     let (store, _t) = setup_test_world_store();

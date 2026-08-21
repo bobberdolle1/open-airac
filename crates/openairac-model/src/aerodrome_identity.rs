@@ -168,6 +168,7 @@ pub struct PhysicalAerodrome {
     pub elevation_ft: Option<f64>,
     pub primary_icao: String,
     pub identities: Vec<AerodromeIdentity>,
+    pub provider_statuses: BTreeMap<ProviderId, AerodromeIdentityStatus>,
 }
 
 impl PhysicalAerodrome {
@@ -186,6 +187,7 @@ impl PhysicalAerodrome {
             longitude,
             elevation_ft: None,
             identities: Vec::new(),
+            provider_statuses: BTreeMap::new(),
         }
     }
 
@@ -199,6 +201,26 @@ impl PhysicalAerodrome {
         self
     }
 
+    pub fn add_provider_status(
+        mut self,
+        provider_id: ProviderId,
+        status: AerodromeIdentityStatus,
+    ) -> Self {
+        self.provider_statuses.insert(provider_id, status);
+        self
+    }
+
+    pub fn get_provider_status(&self, provider_id: &ProviderId) -> AerodromeIdentityStatus {
+        if let Some(st) = self.provider_statuses.get(provider_id) {
+            return *st;
+        }
+        for id in &self.identities {
+            if id.provider_id == *provider_id {
+                return id.status;
+            }
+        }
+        AerodromeIdentityStatus::NotListedInProvider
+    }
     /// Returns the active ICAO indicator for a specific provider, or defaults to primary_icao.
     pub fn get_active_icao(&self, provider_id: Option<&ProviderId>) -> &str {
         if let Some(pid) = provider_id {
@@ -392,28 +414,28 @@ impl MultiIdentityRegistry {
                     .with_source_file("CAICA_AIM_12_URAS.pdf"),
             ),
         })
+        .add_provider_status(
+            ProviderId::caica_russia(),
+            AerodromeIdentityStatus::CurrentInProvider,
+        )
+        .add_provider_status(
+            ProviderId::ourairports(),
+            AerodromeIdentityStatus::CurrentInProvider,
+        )
+        .add_provider_status(
+            ProviderId::new("georgia_ais"),
+            AerodromeIdentityStatus::NotListedInProvider,
+        )
         .add_identity(AerodromeIdentity {
             entity_id: AerodromeEntityId::sukhumi_babushara(),
             provider_id: ProviderId::ourairports(),
             identifier: "UGSS".to_string(),
-            identifier_type: AerodromeIdentifierType::IcaoLegacy,
+            identifier_type: AerodromeIdentifierType::IcaoOfficial,
             status: AerodromeIdentityStatus::CurrentInProvider,
             name: "Sukhumi Babushara Airport".to_string(),
             valid_from: None,
             valid_to: None,
             source: "OurAirports Baseline Dataset (Current in OurAirports)".to_string(),
-            provenance: None,
-        })
-        .add_identity(AerodromeIdentity {
-            entity_id: AerodromeEntityId::sukhumi_babushara(),
-            provider_id: ProviderId::new("georgia_ais"),
-            identifier: "UGSS".to_string(),
-            identifier_type: AerodromeIdentifierType::IcaoLegacy,
-            status: AerodromeIdentityStatus::NotListedInProvider,
-            name: "Sukhumi (Not listed in active 2026 Georgian AIP GEN 2.4)".to_string(),
-            valid_from: None,
-            valid_to: None,
-            source: "Georgian AIP GEN 2.4 Location Indicators".to_string(),
             provenance: None,
         })
         .add_identity(AerodromeIdentity {
@@ -574,7 +596,48 @@ mod tests {
         assert_eq!(sukhum1.entity_id, sukhum4.entity_id);
         assert_eq!(sukhum1.entity_id, AerodromeEntityId::sukhumi_babushara());
 
-        // 3. Collision Prevention: UG29 must NOT resolve to Gudauta
+        // Verify Sukhumi provider semantics:
+        // - CAICA: URAS, ICAO, CurrentInProvider
+        // - OurAirports: UGSS, ICAO, CurrentInProvider
+        // - Georgia AIS: NotListedInProvider (status, with zero manufactured identity records)
+        let caica_id = sukhum1
+            .identities
+            .iter()
+            .find(|id| id.provider_id == ProviderId::caica_russia())
+            .expect("find CAICA identity for Sukhumi");
+        assert_eq!(caica_id.identifier, "URAS");
+        assert_eq!(
+            caica_id.identifier_type,
+            AerodromeIdentifierType::IcaoOfficial
+        );
+        assert_eq!(caica_id.status, AerodromeIdentityStatus::CurrentInProvider);
+
+        let ourairports_id = sukhum1
+            .identities
+            .iter()
+            .find(|id| id.provider_id == ProviderId::ourairports() && id.identifier == "UGSS")
+            .expect("find OurAirports UGSS identity for Sukhumi");
+        assert_eq!(ourairports_id.identifier, "UGSS");
+        assert_eq!(
+            ourairports_id.identifier_type,
+            AerodromeIdentifierType::IcaoOfficial
+        );
+        assert_eq!(
+            ourairports_id.status,
+            AerodromeIdentityStatus::CurrentInProvider
+        );
+
+        assert_eq!(
+            sukhum1.get_provider_status(&ProviderId::new("georgia_ais")),
+            AerodromeIdentityStatus::NotListedInProvider
+        );
+        assert!(
+            !sukhum1
+                .identities
+                .iter()
+                .any(|id| id.provider_id == ProviderId::new("georgia_ais")),
+            "Georgia AIS absence must be represented as provider status, never a manufactured UGSS identity record"
+        );
         let gudauta = reg.resolve("UGSG").expect("resolve UGSG");
         assert_eq!(gudauta.entity_id, AerodromeEntityId::gudauta());
         assert_ne!(gudauta.entity_id, sukhum4.entity_id);
