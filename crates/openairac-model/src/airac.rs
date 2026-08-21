@@ -208,4 +208,29 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn test_airac_boundary_2608_to_2609_transition() {
+        // 1. Exact boundary test: 2026-09-02 23:59:59 UTC -> 2608 is CURRENT
+        let end_2608 = Utc.from_utc_datetime(
+            &NaiveDate::from_ymd_opt(2026, 9, 2)
+                .unwrap()
+                .and_hms_opt(23, 59, 59)
+                .unwrap(),
+        );
+        let cycle_2608 = AiracCycleInfo::for_date(end_2608);
+        assert_eq!(cycle_2608.cycle, "2608");
+        assert_eq!(cycle_2608.next_cycle, "2609");
+
+        // 2. Exact boundary test: 2026-09-03 00:00:00 UTC -> 2609 is CURRENT
+        let start_2609 = Utc.from_utc_datetime(
+            &NaiveDate::from_ymd_opt(2026, 9, 3)
+                .unwrap()
+                .and_hms_opt(0, 0, 0)
+                .unwrap(),
+        );
+        let cycle_2609 = AiracCycleInfo::for_date(start_2609);
+        assert_eq!(cycle_2609.cycle, "2609");
+        assert_eq!(cycle_2609.previous_cycle, "2608");
+    }
 }
