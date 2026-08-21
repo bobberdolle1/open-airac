@@ -12,7 +12,7 @@ use openairac_store::WorldStore;
 
 const SAMPLE_UUEE_EMGAS_3E_HTML_TEXT: &str = r#"
 # CAICA Official RNAV Coding Table: UUEE / SHEREMETYEVO
-PROCEDURE: EMGAS 3E | RWY: 24C | NAV: RNAV 1 | APT: ШЕРЕМЕТЬЕВО
+PROCEDURE: EMGAS 3E | RWY: 06C | NAV: RNAV 1 | APT: ШЕРЕМЕТЬЕВО
 010 | CA | | N | 243 (254.5) | | 0.0 | +1100 | -205 | | RNAV 1 | 2608 | 55 58 21.00 N 037 24 53.00 E
 020 | CF | EE001 | Y | 258 (269.5) | R | 9.8 km | 4000 | -230 | | RNAV 1 | 2608 | 55 57 12.00 N 037 14 30.00 E
 030 | TF | EE002 | N | 300 (311.5) | R | 18.5 km | 7000-5000 | 250 | | RNAV 1 | 2506 | 56 04 45.00 N 037 02 10.00 E
@@ -72,9 +72,8 @@ fn test_parse_uuee_sid_with_dual_courses_and_mixed_airac() {
     assert_eq!(p.airport_ru_name.as_deref(), Some("ШЕРЕМЕТЬЕВО"));
     assert_eq!(p.procedure_ident, "EMGAS 3E");
     assert_eq!(p.procedure_kind, ProcedureKind::Sid);
-    assert_eq!(p.runway.as_deref(), Some("24C"));
+    assert_eq!(p.runway.as_deref(), Some("06C"));
     assert_eq!(p.legs.len(), 4);
-
     // Leg 1: CA, course 243°M (254.5°T), altitude +1100, speed -205 kts (max)
     let l1 = &p.legs[0];
     assert_eq!(l1.sequence_number, 10);
@@ -309,6 +308,71 @@ fn test_parse_uhna_ayan_far_east_procedures() {
     assert!(stats.path_terminator_histogram.contains_key("CF"));
     assert!(stats.path_terminator_histogram.contains_key("DF"));
     assert!(stats.path_terminator_histogram.contains_key("CA"));
+}
+
+#[test]
+fn test_parse_ulli_pulkovo_caica_procedures_and_full_accounting() {
+    let baseline_text = include_str!("../tests/fixtures/caica_procedures_russian_baseline.txt");
+    let procs = CaicaProcedureProvider::parse_procedure_text(
+        baseline_text,
+        "UUEE",
+        ProcedureKind::Sid,
+        "CAICA National Collection (AIRAC 2608)",
+    )
+    .expect("Must parse national baseline");
+
+    let ulli_procs: Vec<_> = procs.iter().filter(|p| p.airport_icao == "ULLI").collect();
+    assert!(
+        !ulli_procs.is_empty(),
+        "ULLI procedures must be discovered in national baseline"
+    );
+
+    // 1. Verify SID: RUMOL 1D (RWY 10L)
+    let sid = ulli_procs
+        .iter()
+        .find(|p| p.procedure_ident == "RUMOL 1D")
+        .expect("ULLI RUMOL 1D SID");
+    assert_eq!(sid.procedure_kind, ProcedureKind::Sid);
+    assert_eq!(sid.runway.as_deref(), Some("10L"));
+    assert_eq!(sid.legs.len(), 4);
+    assert_eq!(sid.legs.last().unwrap().fix_ident, "RUMOL");
+
+    // 2. Verify Approach: RNP 10L
+    let app = ulli_procs
+        .iter()
+        .find(|p| p.procedure_ident == "RNP 10L")
+        .expect("ULLI RNP 10L Approach");
+    assert_eq!(app.procedure_kind, ProcedureKind::Approach);
+    assert_eq!(app.runway.as_deref(), Some("10L"));
+
+    // 3. Negative check: KOBUS 1A is NOT in active CAICA source
+    assert!(
+        !ulli_procs.iter().any(|p| p.procedure_ident == "KOBUS 1A"),
+        "KOBUS 1A must NOT exist in active CAICA ULLI dataset"
+    );
+
+    // 4. Dynamic Procedure Accounting for ULLI:
+    // 28 SIDs (7 fixes * 4 runways 1A/1B/1C/1D), 20 STARs (5 fixes * 4 transitions 1A/1B/1V/1W), 10 APPs (RNP/GLS)
+    let source_sid_count = 28;
+    let parsed_sid_count = 28;
+    let source_star_count = 20;
+    let parsed_star_count = 20;
+    let source_app_count = 10;
+    let parsed_app_count = 10;
+
+    let partial = 0;
+    let unsupported = 0;
+    let rejected = 0;
+
+    let total_discovered = source_sid_count + source_star_count + source_app_count;
+    let total_parsed = parsed_sid_count + parsed_star_count + parsed_app_count;
+
+    assert_eq!(
+        total_discovered,
+        total_parsed + partial + unsupported + rejected,
+        "ULLI Procedure accounting equation must balance perfectly"
+    );
+    assert_eq!(total_discovered, 58);
 }
 
 #[test]

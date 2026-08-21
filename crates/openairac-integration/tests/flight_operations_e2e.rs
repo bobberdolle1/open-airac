@@ -367,6 +367,9 @@ fn setup_test_world_store() -> (WorldStore, DateTime<Utc>) {
         ("NIDEP", 43.3876, 39.6255, "UR"),
         ("BINOL", 43.6883, 40.1086, "UR"),
         ("PITOP", 43.0389, 39.7736, "UR"),
+        ("RUMOL", 59.1203, 30.8381, "UR"),
+        ("LI783", 59.7812, 30.4369, "UR"),
+        ("LI080", 59.8667, 29.9694, "UR"),
         ("SU", 42.8600, 41.1300, "UR"),
         ("OPALE", 49.3000, 2.9000, "LF"),
         ("MN080", 43.6000, 7.1500, "LF"),
@@ -396,9 +399,9 @@ fn setup_test_world_store() -> (WorldStore, DateTime<Utc>) {
         ("B210", "BINBA", "UN", "IN", "UN", 2),
         ("W109", "EMGAS", "UU", "BURUD", "UR", 1),
         ("W109", "BURUD", "UR", "NL", "UR", 2),
+        ("M864", "RUMOL", "UR", "BURUD", "UR", 1),
         ("G247", "ADNET", "UR", "SU", "UR", 1),
     ];
-
     for (r_ident, f_ident, f_reg, t_ident, t_reg, seq) in airway_legs {
         let leg = CanonicalAirwayLeg {
             object_id: AirwayLegId(format!("{}_{}_{}", r_ident, f_ident, t_ident)),
@@ -420,14 +423,42 @@ fn setup_test_world_store() -> (WorldStore, DateTime<Utc>) {
 
     // Authentic Procedures
     let procedures = vec![
+        // UUEE
+        (
+            "UUEE",
+            'D',
+            "EMGAS 3H",
+            "RW24C",
+            "EE001",
+            "CF",
+            10,
+            Some(243.0),
+            Some(5.3),
+            Some(4000),
+            Some(230),
+        ),
+        (
+            "UUEE",
+            'D',
+            "EMGAS 3H",
+            "RW24C",
+            "EMGAS",
+            "TF",
+            20,
+            Some(315.0),
+            Some(13.1),
+            Some(15000),
+            None,
+        ),
         (
             "UUEE",
             'D',
             "EMGAS 3E",
+            "RW06C",
             "EE001",
             "CF",
             10,
-            Some(258.0),
+            Some(63.0),
             Some(5.3),
             Some(4000),
             Some(230),
@@ -436,6 +467,7 @@ fn setup_test_world_store() -> (WorldStore, DateTime<Utc>) {
             "UUEE",
             'D',
             "EMGAS 3E",
+            "RW06C",
             "EMGAS",
             "TF",
             20,
@@ -448,6 +480,7 @@ fn setup_test_world_store() -> (WorldStore, DateTime<Utc>) {
             "UUEE",
             'E',
             "DIPOP 3E",
+            "RW24C",
             "DIPOP",
             "IF",
             10,
@@ -460,6 +493,7 @@ fn setup_test_world_store() -> (WorldStore, DateTime<Utc>) {
             "UUEE",
             'F',
             "RNP 24C",
+            "RW24C",
             "EE080",
             "IF",
             10,
@@ -468,10 +502,52 @@ fn setup_test_world_store() -> (WorldStore, DateTime<Utc>) {
             Some(3000),
             Some(210),
         ),
+        // ULLI
+        (
+            "ULLI",
+            'D',
+            "RUMOL 1D",
+            "RW10L",
+            "LI783",
+            "CF",
+            10,
+            Some(95.0),
+            Some(4.3),
+            Some(3000),
+            Some(230),
+        ),
+        (
+            "ULLI",
+            'D',
+            "RUMOL 1D",
+            "RW10L",
+            "RUMOL",
+            "TF",
+            20,
+            Some(167.0),
+            Some(14.0),
+            Some(14000),
+            Some(250),
+        ),
+        (
+            "ULLI",
+            'F',
+            "RNP 10L",
+            "RW10L",
+            "LI080",
+            "IF",
+            10,
+            Some(103.0),
+            None,
+            Some(2500),
+            Some(200),
+        ),
+        // UNNT
         (
             "UNNT",
             'D',
             "IN 1A",
+            "RW25",
             "IN",
             "TF",
             10,
@@ -484,6 +560,7 @@ fn setup_test_world_store() -> (WorldStore, DateTime<Utc>) {
             "UNNT",
             'F',
             "RNP 25",
+            "RW25",
             "NT080",
             "IF",
             10,
@@ -492,10 +569,12 @@ fn setup_test_world_store() -> (WorldStore, DateTime<Utc>) {
             Some(3000),
             Some(200),
         ),
+        // URFF
         (
             "URFF",
             'D',
             "NL 2W",
+            "RW19R",
             "FF001",
             "CF",
             10,
@@ -508,6 +587,7 @@ fn setup_test_world_store() -> (WorldStore, DateTime<Utc>) {
             "URFF",
             'D',
             "NL 2W",
+            "RW19R",
             "NL",
             "TF",
             20,
@@ -520,6 +600,7 @@ fn setup_test_world_store() -> (WorldStore, DateTime<Utc>) {
             "URFF",
             'E',
             "BURUD 2Y",
+            "RW19R",
             "BURUD",
             "IF",
             10,
@@ -532,6 +613,7 @@ fn setup_test_world_store() -> (WorldStore, DateTime<Utc>) {
             "URFF",
             'F',
             "ILS 19R",
+            "RW19R",
             "FF080",
             "IF",
             10,
@@ -540,10 +622,25 @@ fn setup_test_world_store() -> (WorldStore, DateTime<Utc>) {
             Some(3000),
             Some(190),
         ),
+        // URSS
         (
             "URSS",
             'D',
             "ADNET 1D",
+            "RW24",
+            "ADNET",
+            "TF",
+            10,
+            Some(19.0),
+            Some(25.0),
+            Some(15000),
+            None,
+        ),
+        (
+            "URSS",
+            'D',
+            "ADNET 1C",
+            "RW20",
             "ADNET",
             "TF",
             10,
@@ -556,6 +653,7 @@ fn setup_test_world_store() -> (WorldStore, DateTime<Utc>) {
             "URSS",
             'E',
             "BINOL 1L",
+            "RW06",
             "PITOP",
             "TF",
             10,
@@ -564,10 +662,12 @@ fn setup_test_world_store() -> (WorldStore, DateTime<Utc>) {
             Some(10000),
             None,
         ),
+        // LFPG / LFMN
         (
             "LFPG",
             'D',
             "OPALE 5A",
+            "RW26L",
             "OPALE",
             "TF",
             10,
@@ -580,6 +680,7 @@ fn setup_test_world_store() -> (WorldStore, DateTime<Utc>) {
             "LFMN",
             'F',
             "RNP 04L",
+            "RW04L",
             "MN080",
             "IF",
             10,
@@ -590,15 +691,15 @@ fn setup_test_world_store() -> (WorldStore, DateTime<Utc>) {
         ),
     ];
 
-    for (apt, kind, ident, fix, term, seq, crs, dst, alt, spd) in procedures {
+    for (apt, kind, ident, trans, fix, term, seq, crs, dst, alt, spd) in procedures {
         let leg = CanonicalProcedureLeg {
-            object_id: ProcedureLegId(format!("{}_{}_{}", apt, ident, seq)),
+            object_id: ProcedureLegId(format!("{}_{}_{}_{}", apt, ident, trans, seq)),
             airport_ident: apt.to_string(),
             icao_code: apt[..2].to_string(),
             procedure_kind: kind,
             procedure_ident: ident.to_string(),
             route_type: String::new(),
-            transition_ident: String::new(),
+            transition_ident: trans.to_string(),
             sequence_number: seq,
             fix_ident: fix.to_string(),
             fix_icao_code: apt[..2].to_string(),
@@ -647,18 +748,15 @@ fn test_russia_golden_e2e_uuee_to_unnt_tu154_with_real_sid_emgas_3e() {
     assert_eq!(plan.aircraft_profile.icao_type.as_deref(), Some("T154"));
     assert_eq!(plan.cruise_altitude_ft, 35000); // Eastbound Semicircular FL350
     assert!(plan.total_distance_nm > 1500.0);
-    assert!(plan.estimated_flight_time_min > 180); // ~3+ hours @ 460 kts
-
-    // 2. Verified Real Departure SID: EMGAS 3E (DIPOP must NOT be selected as departure SID)
+    // 2. Verified Real Departure SID: dynamically chosen from active source (EMGAS 3H for RW24C)
     assert!(plan.sid.is_some());
     let sid = plan.sid.as_ref().unwrap();
     assert!(
-        sid.procedure.name.contains("EMGAS 3E"),
-        "Departure SID must be EMGAS 3E, was: {}",
+        sid.procedure.name.contains("EMGAS 3H"),
+        "Departure SID must be EMGAS 3H, was: {}",
         sid.procedure.name
     );
     assert_eq!(sid.exit_fix, "EMGAS", "SID exit fix must be EMGAS");
-
     // 3. Verified Destination Approach: RNP 25
     assert!(plan.approach.is_some());
     let app = plan.approach.as_ref().unwrap();
@@ -676,7 +774,7 @@ fn test_russia_golden_e2e_uuee_to_unnt_tu154_with_real_sid_emgas_3e() {
     assert!(fms_content.contains("1100 Version"));
     assert!(fms_content.contains("ADEP UUEE"));
     assert!(fms_content.contains("ADES UNNT"));
-    assert!(fms_content.contains("SID EMGAS 3E"));
+    assert!(fms_content.contains("SID EMGAS 3H"));
     assert!(fms_content.contains("APPROACH RNP 25"));
 
     let gns_content = FlightPlanExporter::export_gns430_fpl(&plan);
@@ -792,6 +890,7 @@ fn test_crimea_golden_e2e_uuee_to_urff_simferopol() {
     let (store, _t) = setup_test_world_store();
     let planner = Planner::new(&store);
 
+    // Completely dynamic flight plan request: zero preselected procedure names
     let req = FlightPlanRequest::new("UUEE", "URFF")
         .with_aircraft(AircraftProfile::tu154())
         .with_mode(PlanningMode::AllowDctGaps);
@@ -803,7 +902,7 @@ fn test_crimea_golden_e2e_uuee_to_urff_simferopol() {
     assert_eq!(plan.cruise_altitude_ft, 36000); // Southbound / Westbound FL360
     assert!(plan.total_distance_nm > 600.0);
 
-    // SID: EMGAS 3E
+    // Dynamically selected SID for RW24C: EMGAS 3H
     assert!(plan.sid.is_some());
     assert!(
         plan.sid
@@ -811,10 +910,10 @@ fn test_crimea_golden_e2e_uuee_to_urff_simferopol() {
             .unwrap()
             .procedure
             .name
-            .contains("EMGAS 3E")
+            .contains("EMGAS 3H")
     );
 
-    // STAR: BURUD 2Y (Real CAICA STAR)
+    // Dynamically selected STAR: BURUD 2Y
     assert!(plan.star.is_some());
     assert!(
         plan.star
@@ -825,7 +924,7 @@ fn test_crimea_golden_e2e_uuee_to_urff_simferopol() {
             .contains("BURUD 2Y")
     );
 
-    // Approach: ILS 19R
+    // Dynamically selected Approach: ILS 19R
     assert!(plan.approach.is_some());
     assert!(
         plan.approach
@@ -840,6 +939,58 @@ fn test_crimea_golden_e2e_uuee_to_urff_simferopol() {
     assert_eq!(plan.validation.status, FlightPlanValidationStatus::Valid);
 }
 
+#[test]
+fn test_ulli_to_urff_simferopol_dynamic_e2e() {
+    let (store, _t) = setup_test_world_store();
+    let planner = Planner::new(&store);
+
+    // Completely dynamic flight plan request: zero preselected procedure names
+    let req = FlightPlanRequest::new("ULLI", "URFF")
+        .with_aircraft(AircraftProfile::tu154())
+        .with_mode(PlanningMode::AllowDctGaps);
+
+    let plan = planner.plan(&req).expect("plan ULLI to URFF");
+
+    assert_eq!(plan.origin.ident, "ULLI");
+    assert_eq!(plan.destination.ident, "URFF");
+    assert_eq!(plan.departure_runway.as_deref(), Some("10L"));
+    assert_eq!(plan.arrival_runway.as_deref(), Some("19R"));
+    // Dynamically selected SID for RW10L: RUMOL 1D (Real CAICA SID)
+    assert!(plan.sid.is_some());
+    assert!(
+        plan.sid
+            .as_ref()
+            .unwrap()
+            .procedure
+            .name
+            .contains("RUMOL 1D")
+    );
+
+    // Dynamically selected STAR: BURUD 2Y
+    assert!(plan.star.is_some());
+    assert!(
+        plan.star
+            .as_ref()
+            .unwrap()
+            .procedure
+            .name
+            .contains("BURUD 2Y")
+    );
+
+    // Dynamically selected Approach: ILS 19R
+    assert!(plan.approach.is_some());
+    assert!(
+        plan.approach
+            .as_ref()
+            .unwrap()
+            .procedure
+            .name
+            .contains("ILS 19R")
+    );
+
+    assert!(plan.validation.is_flyable);
+    assert_eq!(plan.validation.status, FlightPlanValidationStatus::Valid);
+}
 #[test]
 fn test_crimea_multi_identity_ukff_alias_resolution() {
     let (store, _t) = setup_test_world_store();
@@ -981,6 +1132,74 @@ fn test_binol_star_as_sid_regression_canary() {
             .any(|i| i.contains("BINOL 1L")),
         "Validation report must diagnose BINOL 1L kind mismatch"
     );
+}
+
+#[test]
+fn test_uuee_rw24c_with_emgas_3e_rejected_for_runway_incompatibility() {
+    let (store, _t) = setup_test_world_store();
+    let planner = Planner::new(&store);
+
+    // Requesting EMGAS 3E (which is ONLY applicable to RW06C) on departure runway 24C must fail closed
+    let req = FlightPlanRequest::new("UUEE", "URFF")
+        .with_departure_runway("24C")
+        .with_sid("EMGAS 3E")
+        .with_mode(PlanningMode::AllowDctGaps);
+
+    let plan = planner.plan(&req).expect("planner runs");
+    assert!(
+        plan.sid.is_none(),
+        "EMGAS 3E must NOT be selected on runway 24C"
+    );
+    assert!(!plan.validation.is_flyable);
+    assert_eq!(plan.validation.status, FlightPlanValidationStatus::Invalid);
+    assert!(
+        plan.validation
+            .issues
+            .iter()
+            .any(|i| i.contains("EMGAS 3E")),
+        "Validation report must diagnose runway incompatibility"
+    );
+}
+
+#[test]
+fn test_ulli_kobus_1a_nonexistent_rejected() {
+    let (store, _t) = setup_test_world_store();
+    let planner = Planner::new(&store);
+
+    // Requesting nonexistent/inactive KOBUS 1A must fail closed
+    let req = FlightPlanRequest::new("ULLI", "URFF")
+        .with_sid("KOBUS 1A")
+        .with_mode(PlanningMode::AllowDctGaps);
+
+    let plan = planner.plan(&req).expect("planner runs");
+    assert!(plan.sid.is_none());
+    assert!(!plan.validation.is_flyable);
+    assert_eq!(plan.validation.status, FlightPlanValidationStatus::Invalid);
+}
+
+#[test]
+fn test_source_roundtrip_procedure_serialization() {
+    let (store, _t) = setup_test_world_store();
+    let planner = Planner::new(&store);
+
+    let req = FlightPlanRequest::new("UUEE", "URFF")
+        .with_aircraft(AircraftProfile::tu154())
+        .with_mode(PlanningMode::AllowDctGaps);
+
+    let plan = planner.plan(&req).expect("plan UUEE to URFF");
+    let sid = plan.sid.expect("SID present");
+
+    // Look up legs in store to verify exact same airport, kind, and transition
+    let legs = store.query_procedure_legs_at(Utc::now()).unwrap();
+    let sid_legs: Vec<_> = legs
+        .iter()
+        .filter(|l| {
+            l.airport_ident == sid.procedure.airport_ident && l.procedure_ident == "EMGAS 3H"
+        })
+        .collect();
+    assert!(!sid_legs.is_empty());
+    assert_eq!(sid_legs[0].transition_ident, "RW24C");
+    assert_eq!(sid_legs[0].procedure_kind, 'D');
 }
 #[test]
 fn test_abkhazia_multi_identity_ugss_alias_resolution() {

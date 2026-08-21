@@ -219,8 +219,8 @@ impl FlightPlan {
     }
 
     /// Revalidate this flight plan against current world store state and active providers.
+    #[allow(clippy::collapsible_if)]
     pub fn revalidate(&mut self, _current_time: DateTime<Utc>, current_providers: &[String]) {
-        self.validation.issues.clear();
         self.validation.warnings.clear();
         // 1. Check active provider dataset consistency
         for p in &self.active_provider_datasets {
@@ -260,7 +260,6 @@ impl FlightPlan {
                 ));
             }
         }
-
         // 4. Hard Procedure Invariants
         if let Some(sid) = &self.sid {
             if sid.procedure.kind != ProcedureKind::Sid {
@@ -278,6 +277,14 @@ impl FlightPlan {
                     "Departure SID '{}' belongs to airport '{}', not origin '{}'",
                     sid.procedure.name, sid.procedure.airport_ident, self.origin.ident
                 ));
+            }
+            if let Some(rwy) = &self.departure_runway {
+                if !Planner::is_runway_name_compatible(&sid.procedure.name, rwy) {
+                    self.validation.issues.push(format!(
+                        "Departure SID '{}' is not compatible with departure runway {}",
+                        sid.procedure.name, rwy
+                    ));
+                }
             }
         }
 
@@ -297,6 +304,14 @@ impl FlightPlan {
                     "Arrival STAR '{}' belongs to airport '{}', not destination '{}'",
                     star.procedure.name, star.procedure.airport_ident, self.destination.ident
                 ));
+            }
+            if let Some(rwy) = &self.arrival_runway {
+                if !Planner::is_runway_name_compatible(&star.procedure.name, rwy) {
+                    self.validation.issues.push(format!(
+                        "Arrival STAR '{}' is not compatible with arrival runway {}",
+                        star.procedure.name, rwy
+                    ));
+                }
             }
         }
 
@@ -460,17 +475,159 @@ impl<'a> Planner<'a> {
         }
     }
 
-    /// Select optimal runway suggestion for departure or arrival.
+    /// Select optimal runway suggestion for departure or arrival based on published procedures.
     pub fn suggest_runway(&self, airport: &CanonicalAirport, is_departure: bool) -> Option<String> {
         let longest = airport.runways.iter().max_by_key(|r| r.length_ft)?;
-        if is_departure {
-            Some(longest.le_ident.clone())
-        } else {
-            Some(longest.he_ident.clone())
+        if let Ok(legs) = self.store.query_procedure_legs_at(chrono::Utc::now()) {
+            let target_kinds = if is_departure {
+                vec!['D']
+            } else {
+                vec!['F', 'E']
+            };
+            let apt_legs: Vec<&CanonicalProcedureLeg> = legs
+                .iter()
+                .filter(|l| {
+                    l.airport_ident.eq_ignore_ascii_case(&airport.ident)
+                        && target_kinds.contains(&l.procedure_kind)
+                })
+                .collect();
+            if !apt_legs.is_empty() {
+                let le_compatible = apt_legs.iter().any(|l| {
+                    Self::is_runway_compatible(&l.procedure_ident, &[&**l], &longest.le_ident)
+                });
+                let he_compatible = apt_legs.iter().any(|l| {
+                    Self::is_runway_compatible(&l.procedure_ident, &[&**l], &longest.he_ident)
+                });
+                if le_compatible && !he_compatible {
+                    return Some(longest.le_ident.clone());
+                }
+                if he_compatible && !le_compatible {
+                    return Some(longest.he_ident.clone());
+                }
+            }
         }
+        Some(longest.le_ident.clone())
+    }
+
+    /// Check whether a string represents a valid ICAO runway designator (e.g. 24C, 06, 19R, 04L).
+    #[allow(clippy::collapsible_if)]
+    pub fn is_valid_runway_designator(s: &str) -> bool {
+        let clean = s.trim().to_ascii_uppercase();
+        let no_rw = clean.trim_start_matches("RW");
+        if no_rw.len() < 2 || no_rw.len() > 3 {
+            return false;
+        }
+        let digits = &no_rw[..2];
+        if let Ok(num) = digits.parse::<u32>() {
+            if (1..=36).contains(&num) {
+                if no_rw.len() == 3 {
+                    let suffix = no_rw.chars().nth(2).unwrap();
+                    return matches!(suffix, 'L' | 'R' | 'C' | 'A' | 'B');
+                }
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Extract applicable runways from a procedure identifier or its legs.
+    pub fn procedure_applicable_runways(
+        proc_ident: &str,
+        legs: &[&CanonicalProcedureLeg],
+    ) -> Vec<String> {
+        let mut rwys = Vec::new();
+        for l in legs {
+            let tr = l.transition_ident.trim().to_ascii_uppercase();
+            if Self::is_valid_runway_designator(&tr) {
+                let r = tr.trim_start_matches("RW").to_string();
+                rwys.push(r);
+            }
+        }
+        let words: Vec<&str> = proc_ident.split_whitespace().collect();
+        for w in &words {
+            if Self::is_valid_runway_designator(w) {
+                let r = w
+                    .trim()
+                    .to_ascii_uppercase()
+                    .trim_start_matches("RW")
+                    .to_string();
+                rwys.push(r);
+            }
+        }
+        rwys.sort();
+        rwys.dedup();
+        rwys
+    }
+
+    /// Check whether a procedure name itself asserts runway compatibility.
+    pub fn is_runway_name_compatible(proc_name: &str, target_rwy: &str) -> bool {
+        let clean_target = target_rwy.trim().to_ascii_uppercase();
+        let target_no_rw = clean_target.trim_start_matches("RW");
+        let words: Vec<&str> = proc_name.split_whitespace().collect();
+        let mut rwys = Vec::new();
+        for w in &words {
+            if Self::is_valid_runway_designator(w) {
+                let r = w
+                    .trim()
+                    .to_ascii_uppercase()
+                    .trim_start_matches("RW")
+                    .to_string();
+                rwys.push(r);
+            }
+        }
+        if rwys.is_empty() {
+            return true;
+        }
+        for rwy in &rwys {
+            let rwy_no_rw = rwy.trim_start_matches("RW");
+            if rwy_no_rw == target_no_rw {
+                return true;
+            }
+            if target_no_rw.chars().all(|c| c.is_ascii_digit())
+                && rwy_no_rw.starts_with(target_no_rw)
+            {
+                return true;
+            }
+            if rwy_no_rw.chars().all(|c| c.is_ascii_digit()) && target_no_rw.starts_with(rwy_no_rw)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Check whether a procedure is compatible with a target runway.
+    pub fn is_runway_compatible(
+        proc_ident: &str,
+        legs: &[&CanonicalProcedureLeg],
+        target_rwy: &str,
+    ) -> bool {
+        let applicable = Self::procedure_applicable_runways(proc_ident, legs);
+        if applicable.is_empty() {
+            return true;
+        }
+        let clean_target = target_rwy.trim().to_ascii_uppercase();
+        let target_no_rw = clean_target.trim_start_matches("RW");
+        for rwy in &applicable {
+            let rwy_no_rw = rwy.trim_start_matches("RW");
+            if rwy_no_rw == target_no_rw {
+                return true;
+            }
+            if target_no_rw.chars().all(|c| c.is_ascii_digit())
+                && rwy_no_rw.starts_with(target_no_rw)
+            {
+                return true;
+            }
+            if rwy_no_rw.chars().all(|c| c.is_ascii_digit()) && target_no_rw.starts_with(rwy_no_rw)
+            {
+                return true;
+            }
+        }
+        false
     }
 
     /// Plan a complete operational flight plan.
+    #[allow(clippy::collapsible_if)]
     pub fn plan(&self, request: &FlightPlanRequest) -> Result<FlightPlan> {
         let mut diagnostics = Vec::new();
         let t = request.departure_time;
@@ -544,11 +701,12 @@ impl<'a> Planner<'a> {
             n.map(|n| (n.latitude, n.longitude))
         };
 
-        // Select SID procedure
+        // Select procedure with runway compatibility
         let select_proc = |airport: &str,
                            kind: ProcedureKind,
                            ident: Option<&str>,
                            transition: Option<&str>,
+                           target_runway: Option<&str>,
                            diag: &mut Vec<String>|
          -> Result<Option<PlannedProcedure>> {
             let candidates: Vec<&CanonicalProcedureLeg> = legs
@@ -584,11 +742,50 @@ impl<'a> Planner<'a> {
                         ));
                         return Ok(None);
                     }
+                    let cand_legs: Vec<&CanonicalProcedureLeg> = candidates
+                        .iter()
+                        .filter(|l| l.procedure_ident.eq_ignore_ascii_case(i))
+                        .copied()
+                        .collect();
+                    if let Some(rwy) = target_runway {
+                        if !Self::is_runway_compatible(i, &cand_legs, rwy) {
+                            diag.push(format!(
+                                "{} procedure '{}' is incompatible with runway {}",
+                                airport, i, rwy
+                            ));
+                            return Ok(None);
+                        }
+                    }
                     i.to_string()
                 }
-                None => available[0].to_string(),
+                None => {
+                    let mut compatible_available = Vec::new();
+                    for &cand in &available {
+                        let cand_legs: Vec<&CanonicalProcedureLeg> = candidates
+                            .iter()
+                            .filter(|l| l.procedure_ident.eq_ignore_ascii_case(cand))
+                            .copied()
+                            .collect();
+                        if let Some(rwy) = target_runway {
+                            if Self::is_runway_compatible(cand, &cand_legs, rwy) {
+                                compatible_available.push(cand);
+                            }
+                        } else {
+                            compatible_available.push(cand);
+                        }
+                    }
+                    if compatible_available.is_empty() {
+                        diag.push(format!(
+                            "{}: no {} procedures compatible with runway {}",
+                            airport,
+                            kind.as_str(),
+                            target_runway.unwrap_or("ALL")
+                        ));
+                        return Ok(None);
+                    }
+                    compatible_available[0].to_string()
+                }
             };
-
             let chosen_legs: Vec<CanonicalProcedureLeg> = candidates
                 .iter()
                 .filter(|l| l.procedure_ident.eq_ignore_ascii_case(&chosen_ident))
@@ -624,9 +821,23 @@ impl<'a> Planner<'a> {
                     seq.extend(trans.map(|tr| tr.legs.clone()).unwrap_or_default());
                     (seq, trans.map(|tr| tr.transition_ident.clone()))
                 }
-                ProcedureKind::Approach => (procedure.main_legs.clone(), None),
+                ProcedureKind::Approach => {
+                    let trans = procedure
+                        .transitions
+                        .iter()
+                        .find(|tr| {
+                            Some(tr.transition_ident.as_str()) == transition_ident.as_deref()
+                        })
+                        .or_else(|| procedure.transitions.first());
+                    if !procedure.main_legs.is_empty() {
+                        (procedure.main_legs.clone(), None)
+                    } else if let Some(tr) = trans {
+                        (tr.legs.clone(), Some(tr.transition_ident.clone()))
+                    } else {
+                        (Vec::new(), None)
+                    }
+                }
             };
-
             if legs_seq.is_empty() {
                 return Ok(None);
             }
@@ -660,6 +871,7 @@ impl<'a> Planner<'a> {
             ProcedureKind::Sid,
             request.sid_ident.as_deref(),
             request.sid_transition.as_deref(),
+            dep_rwy.as_deref(),
             &mut diagnostics,
         )?;
         let star = select_proc(
@@ -667,6 +879,7 @@ impl<'a> Planner<'a> {
             ProcedureKind::Star,
             request.star_ident.as_deref(),
             request.star_transition.as_deref(),
+            arr_rwy.as_deref(),
             &mut diagnostics,
         )?;
         let approach = select_proc(
@@ -674,9 +887,9 @@ impl<'a> Planner<'a> {
             ProcedureKind::Approach,
             request.approach_ident.as_deref(),
             None,
+            arr_rwy.as_deref(),
             &mut diagnostics,
         )?;
-
         // Build airway graph and calculate enroute segment
         let (graph, graph_diag) = AirwayGraph::build(
             &self.store.query_waypoints_at(t)?,
