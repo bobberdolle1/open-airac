@@ -220,8 +220,8 @@ impl FlightPlan {
 
     /// Revalidate this flight plan against current world store state and active providers.
     pub fn revalidate(&mut self, _current_time: DateTime<Utc>, current_providers: &[String]) {
+        self.validation.issues.clear();
         self.validation.warnings.clear();
-
         // 1. Check active provider dataset consistency
         for p in &self.active_provider_datasets {
             if !current_providers.contains(p) {
@@ -247,7 +247,12 @@ impl FlightPlan {
         for i in 1..self.all_legs.len() {
             let prev = &self.all_legs[i - 1];
             let curr = &self.all_legs[i];
-            if prev.to_fix != curr.from_fix && !prev.to_fix.is_empty() && !curr.from_fix.is_empty()
+            let is_connector = prev.kind == FlightPlanLegKind::AirportConnector
+                || curr.kind == FlightPlanLegKind::AirportConnector;
+            if !is_connector
+                && prev.to_fix != curr.from_fix
+                && !prev.to_fix.is_empty()
+                && !curr.from_fix.is_empty()
             {
                 self.validation.warnings.push(format!(
                     "Route leg discontinuity at step {}: '{}' -> '{}'",
@@ -256,6 +261,63 @@ impl FlightPlan {
             }
         }
 
+        // 4. Hard Procedure Invariants
+        if let Some(sid) = &self.sid {
+            if sid.procedure.kind != ProcedureKind::Sid {
+                self.validation.issues.push(format!(
+                    "Departure procedure '{}' has kind '{:?}', expected SID",
+                    sid.procedure.name, sid.procedure.kind
+                ));
+            }
+            if !sid
+                .procedure
+                .airport_ident
+                .eq_ignore_ascii_case(&self.origin.ident)
+            {
+                self.validation.issues.push(format!(
+                    "Departure SID '{}' belongs to airport '{}', not origin '{}'",
+                    sid.procedure.name, sid.procedure.airport_ident, self.origin.ident
+                ));
+            }
+        }
+
+        if let Some(star) = &self.star {
+            if star.procedure.kind != ProcedureKind::Star {
+                self.validation.issues.push(format!(
+                    "Arrival procedure '{}' has kind '{:?}', expected STAR",
+                    star.procedure.name, star.procedure.kind
+                ));
+            }
+            if !star
+                .procedure
+                .airport_ident
+                .eq_ignore_ascii_case(&self.destination.ident)
+            {
+                self.validation.issues.push(format!(
+                    "Arrival STAR '{}' belongs to airport '{}', not destination '{}'",
+                    star.procedure.name, star.procedure.airport_ident, self.destination.ident
+                ));
+            }
+        }
+
+        if let Some(app) = &self.approach {
+            if app.procedure.kind != ProcedureKind::Approach {
+                self.validation.issues.push(format!(
+                    "Approach procedure '{}' has kind '{:?}', expected Approach",
+                    app.procedure.name, app.procedure.kind
+                ));
+            }
+            if !app
+                .procedure
+                .airport_ident
+                .eq_ignore_ascii_case(&self.destination.ident)
+            {
+                self.validation.issues.push(format!(
+                    "Approach '{}' belongs to airport '{}', not destination '{}'",
+                    app.procedure.name, app.procedure.airport_ident, self.destination.ident
+                ));
+            }
+        }
         if self.validation.issues.is_empty() {
             if self.validation.warnings.is_empty() {
                 self.validation.status = FlightPlanValidationStatus::Valid;
@@ -615,6 +677,7 @@ impl<'a> Planner<'a> {
 
         // 2. SID legs
         if let Some(sid_p) = &sid {
+            let mut prev_fix = origin.ident.clone();
             for pl in &sid_p.legs {
                 let coord = pl
                     .fix_latitude
@@ -623,7 +686,7 @@ impl<'a> Planner<'a> {
                 all_legs.push(FlightPlanLeg {
                     leg_index: leg_counter,
                     kind: FlightPlanLegKind::Sid,
-                    from_fix: origin.ident.clone(),
+                    from_fix: prev_fix.clone(),
                     to_fix: pl.fix_ident.clone(),
                     from_coordinate: Some(origin_coord),
                     to_coordinate: coord,
@@ -643,6 +706,7 @@ impl<'a> Planner<'a> {
                     airac_cycle: sid_p.airac_cycle.clone(),
                     source_provenance: None,
                 });
+                prev_fix = pl.fix_ident.clone();
                 leg_counter += 1;
             }
         }
@@ -709,8 +773,8 @@ impl<'a> Planner<'a> {
             let dct_leg = FlightPlanLeg {
                 leg_index: leg_counter,
                 kind: FlightPlanLegKind::Dct,
-                from_fix: origin.ident.clone(),
-                to_fix: destination.ident.clone(),
+                from_fix: join_from.to_string(),
+                to_fix: join_to.to_string(),
                 from_coordinate: Some(origin_coord),
                 to_coordinate: Some(dest_coord),
                 distance_nm: direct.distance_nm,
@@ -735,6 +799,10 @@ impl<'a> Planner<'a> {
 
         // 4. STAR legs
         if let Some(star_p) = &star {
+            let mut prev_fix = enroute_legs
+                .last()
+                .map(|l| l.to_fix.clone())
+                .unwrap_or_else(|| star_p.entry_fix.clone());
             for pl in &star_p.legs {
                 let coord = pl
                     .fix_latitude
@@ -743,7 +811,7 @@ impl<'a> Planner<'a> {
                 all_legs.push(FlightPlanLeg {
                     leg_index: leg_counter,
                     kind: FlightPlanLegKind::Star,
-                    from_fix: star_p.entry_fix.clone(),
+                    from_fix: prev_fix.clone(),
                     to_fix: pl.fix_ident.clone(),
                     from_coordinate: coord,
                     to_coordinate: coord,
@@ -763,12 +831,17 @@ impl<'a> Planner<'a> {
                     airac_cycle: star_p.airac_cycle.clone(),
                     source_provenance: None,
                 });
+                prev_fix = pl.fix_ident.clone();
                 leg_counter += 1;
             }
         }
 
         // 5. Approach legs
         if let Some(app_p) = &approach {
+            let mut prev_fix = all_legs
+                .last()
+                .map(|l| l.to_fix.clone())
+                .unwrap_or_else(|| app_p.entry_fix.clone());
             for pl in &app_p.legs {
                 let coord = pl
                     .fix_latitude
@@ -777,7 +850,7 @@ impl<'a> Planner<'a> {
                 all_legs.push(FlightPlanLeg {
                     leg_index: leg_counter,
                     kind: FlightPlanLegKind::Approach,
-                    from_fix: app_p.entry_fix.clone(),
+                    from_fix: prev_fix.clone(),
                     to_fix: pl.fix_ident.clone(),
                     from_coordinate: coord,
                     to_coordinate: coord,
@@ -797,6 +870,7 @@ impl<'a> Planner<'a> {
                     airac_cycle: app_p.airac_cycle.clone(),
                     source_provenance: None,
                 });
+                prev_fix = pl.fix_ident.clone();
                 leg_counter += 1;
             }
         }
