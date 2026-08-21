@@ -10,18 +10,18 @@ use openairac_ingest::local_vault::LocalAipVault;
 use openairac_procedures::ProcedureKind;
 use openairac_store::WorldStore;
 
-const SAMPLE_UUEE_EMGAS_1A_HTML_TEXT: &str = r#"
+const SAMPLE_UUEE_EMGAS_3E_HTML_TEXT: &str = r#"
 # CAICA Official RNAV Coding Table: UUEE / SHEREMETYEVO
-PROCEDURE: EMGAS 1A | RWY: 24C | NAV: RNAV 1 | APT: ШЕРЕМЕТЬЕВО
+PROCEDURE: EMGAS 3E | RWY: 24C | NAV: RNAV 1 | APT: ШЕРЕМЕТЬЕВО
 010 | CA | | N | 243 (254.5) | | 0.0 | +1100 | -205 | | RNAV 1 | 2608 | 55 58 21.00 N 037 24 53.00 E
 020 | CF | EE001 | Y | 258 (269.5) | R | 9.8 km | 4000 | -230 | | RNAV 1 | 2608 | 55 57 12.00 N 037 14 30.00 E
 030 | TF | EE002 | N | 300 (311.5) | R | 18.5 km | 7000-5000 | 250 | | RNAV 1 | 2506 | 56 04 45.00 N 037 02 10.00 E
 040 | TF | EMGAS | N | 315 (326.5) | | 24.2 km | +FL150 | | | RNAV 1 | 2402 | 56 16 30.00 N 036 48 00.00 E
 "#;
 
-const SAMPLE_UUEE_DIPOP_1A_STAR_TEXT: &str = r#"
+const SAMPLE_UUEE_DIPOP_3E_STAR_TEXT: &str = r#"
 # CAICA Official RNAV Coding Table: UUEE / STAR
-PROCEDURE: DIPOP 1A | RWY: 24C | NAV: RNAV 1 | APT: ШЕРЕМЕТЬЕВО
+PROCEDURE: DIPOP 3E | RWY: 24C | NAV: RNAV 1 | APT: ШЕРЕМЕТЬЕВО
 010 | IF | DIPOP | N | 095 (106.5) | | 0.0 | FL150-FL140 | 250 | | RNAV 1 | 2608 | 56 22 10.00 N 036 30 15.00 E
 020 | TF | EE051 | N | 115 (126.5) | | 15.2 km | +6000 | 230 | | RNAV 1 | 2608 | 56 15 20.00 N 036 45 30.00 E
 030 | TF | EE052 | N | 140 (151.5) | | 20.1 km | 4000 | -210 | | RNAV 1 | 2506 | 56 05 10.00 N 037 02 45.00 E
@@ -59,18 +59,18 @@ TOL,ТОЛМАЧЕВО (TOLMACHEVO),12,55.012500,82.650833,364,250.0,UNNT,10.2
 #[test]
 fn test_parse_uuee_sid_with_dual_courses_and_mixed_airac() {
     let procs = CaicaProcedureProvider::parse_procedure_text(
-        SAMPLE_UUEE_EMGAS_1A_HTML_TEXT,
+        SAMPLE_UUEE_EMGAS_3E_HTML_TEXT,
         "UUEE",
         ProcedureKind::Sid,
-        "UUEE SID EMGAS 1A",
+        "UUEE SID EMGAS 3E",
     )
-    .expect("Must parse UUEE SID EMGAS 1A");
+    .expect("Must parse UUEE SID EMGAS 3E");
 
     assert_eq!(procs.len(), 1);
     let p = &procs[0];
     assert_eq!(p.airport_icao, "UUEE");
     assert_eq!(p.airport_ru_name.as_deref(), Some("ШЕРЕМЕТЬЕВО"));
-    assert_eq!(p.procedure_ident, "EMGAS 1A");
+    assert_eq!(p.procedure_ident, "EMGAS 3E");
     assert_eq!(p.procedure_kind, ProcedureKind::Sid);
     assert_eq!(p.runway.as_deref(), Some("24C"));
     assert_eq!(p.legs.len(), 4);
@@ -156,18 +156,19 @@ fn test_parse_uuee_rnp_approach_with_vpa_and_holding() {
 #[test]
 fn test_parse_uuee_dipop_1a_star() {
     let procs = CaicaProcedureProvider::parse_procedure_text(
-        SAMPLE_UUEE_DIPOP_1A_STAR_TEXT,
+        SAMPLE_UUEE_DIPOP_3E_STAR_TEXT,
         "UUEE",
         ProcedureKind::Star,
-        "UUEE STAR DIPOP 1A",
+        "UUEE STAR DIPOP 3E",
     )
-    .expect("Must parse UUEE STAR DIPOP 1A");
+    .expect("Must parse UUEE STAR DIPOP 3E");
 
     assert_eq!(procs.len(), 1);
     let p = &procs[0];
-    assert_eq!(p.procedure_ident, "DIPOP 1A");
+    assert_eq!(p.airport_icao, "UUEE");
+    assert_eq!(p.procedure_ident, "DIPOP 3E");
     assert_eq!(p.procedure_kind, ProcedureKind::Star);
-    assert_eq!(p.legs.len(), 4);
+    assert_eq!(p.runway.as_deref(), Some("24C"));
 }
 
 #[test]

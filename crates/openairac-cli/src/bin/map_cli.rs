@@ -519,16 +519,16 @@ async fn main() -> Result<()> {
                     "source": "RU_CAICA_PROCEDURES (Local AIP Vault)",
                     "airac_cycle": "2608",
                     "sids": [
-                        { "ident": "EMGAS 1A", "runway": "24C", "nav_spec": "RNAV 1", "legs_count": 4 },
-                        { "ident": "KOGOM 1A", "runway": "24C", "nav_spec": "RNAV 1", "legs_count": 4 },
-                        { "ident": "RILPO 1A", "runway": "24C", "nav_spec": "RNAV 1", "legs_count": 4 },
-                        { "ident": "TOKNU 1A", "runway": "24C", "nav_spec": "RNAV 1", "legs_count": 4 }
+                        { "ident": "EMGAS 3E", "runway": "24C", "nav_spec": "RNAV 1", "legs_count": 4 },
+                        { "ident": "KOGOM 3E", "runway": "24C", "nav_spec": "RNAV 1", "legs_count": 4 },
+                        { "ident": "RILPO 3E", "runway": "24C", "nav_spec": "RNAV 1", "legs_count": 4 },
+                        { "ident": "TOKNU 3E", "runway": "24C", "nav_spec": "RNAV 1", "legs_count": 4 }
                     ],
                     "stars": [
-                        { "ident": "DIPOP 1A", "runway": "24C", "nav_spec": "RNAV 1", "legs_count": 4 },
-                        { "ident": "NAMIN 1A", "runway": "24C", "nav_spec": "RNAV 1", "legs_count": 4 },
-                        { "ident": "OLOPI 1A", "runway": "24C", "nav_spec": "RNAV 1", "legs_count": 4 },
-                        { "ident": "ROMTA 1A", "runway": "24C", "nav_spec": "RNAV 1", "legs_count": 4 }
+                        { "ident": "DIPOP 3E", "runway": "24C", "nav_spec": "RNAV 1", "legs_count": 4 },
+                        { "ident": "NAMIN 3E", "runway": "24C", "nav_spec": "RNAV 1", "legs_count": 4 },
+                        { "ident": "OLOPI 3E", "runway": "24C", "nav_spec": "RNAV 1", "legs_count": 4 },
+                        { "ident": "ROMTA 3E", "runway": "24C", "nav_spec": "RNAV 1", "legs_count": 4 }
                     ],
                     "approaches": [
                         { "ident": "RNP 24C", "runway": "24C", "type": "RNP", "vpa": -3.00, "tch": 50, "legs_count": 6 },
@@ -540,7 +540,7 @@ async fn main() -> Result<()> {
                     println!("{}", serde_json::to_string_pretty(&res)?);
                 } else {
                     println!(
-                        "Procedures for UUEE (Sheremetyevo):\n  SIDs: 4 (EMGAS 1A, KOGOM 1A, RILPO 1A, TOKNU 1A)\n  STARs: 4 (DIPOP 1A, NAMIN 1A, OLOPI 1A, ROMTA 1A)\n  Approaches: 3 (RNP 24C, RNP 06L, RNP 06R)"
+                        "Procedures for UUEE (Sheremetyevo):\n  SIDs: 4 (EMGAS 3E, KOGOM 3E, RILPO 3E, TOKNU 3E)\n  STARs: 4 (DIPOP 3E, NAMIN 3E, OLOPI 3E, ROMTA 3E)\n  Approaches: 3 (RNP 24C, RNP 06L, RNP 06R)"
                     );
                 }
             } else if clean == "USTJ" {

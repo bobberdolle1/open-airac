@@ -83,22 +83,27 @@ pub enum AerodromeIdentifierType {
     IcaoLegacy,
     /// IATA 3-letter commercial airport code (e.g. SIP, SVO, AER, CDG).
     Iata,
+    /// GPS location code in aeronautical GPS databases (e.g. UGSG).
+    GpsCode,
     /// National domestic location code (e.g. Russian Cyrillic index УРФФ / УРАС).
     NationalCode,
     /// Flight simulator scenery alias (e.g. legacy add-on scenery bgl/apt.dat code).
     SimulatorAlias,
+    /// Community / historical search alias keyword (e.g. UG29 for Sukhumi, UG23 for Gudauta).
+    CommunityAlias,
     /// Local AIP / regional civil aviation authority index.
     LocalAipCode,
 }
-
 impl AerodromeIdentifierType {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::IcaoOfficial => "icao_official",
             Self::IcaoLegacy => "icao_legacy",
             Self::Iata => "iata",
+            Self::GpsCode => "gps_code",
             Self::NationalCode => "national_code",
             Self::SimulatorAlias => "simulator_alias",
+            Self::CommunityAlias => "community_alias",
             Self::LocalAipCode => "local_aip_code",
         }
     }
@@ -409,14 +414,26 @@ impl MultiIdentityRegistry {
             valid_to: None,
             source: "IATA".to_string(),
             provenance: None,
+        })
+        .add_identity(AerodromeIdentity {
+            entity_id: AerodromeEntityId::sukhumi_babushara(),
+            provider_id: ProviderId::ourairports(),
+            identifier: "UG29".to_string(),
+            identifier_type: AerodromeIdentifierType::CommunityAlias,
+            status: AerodromeIdentityStatus::Historical,
+            name: "Sukhumi Historical Keyword / Secondary Code".to_string(),
+            valid_from: None,
+            valid_to: None,
+            source: "OurAirports Secondary Identifier".to_string(),
+            provenance: None,
         });
         reg.register(sukhumi);
 
-        // 5. Gudauta Bamboura (UG29 / Bombora Air Base)
+        // 5. Gudauta (Bombora Air Base / UGSG / UG23)
         let gudauta = PhysicalAerodrome::new(
             AerodromeEntityId::gudauta(),
-            "Gudauta Bamboura Air Base",
-            "UG29",
+            "Gudauta Bombora Air Base",
+            "UGSG",
             43.1033,
             40.5800,
         )
@@ -424,13 +441,25 @@ impl MultiIdentityRegistry {
         .add_identity(AerodromeIdentity {
             entity_id: AerodromeEntityId::gudauta(),
             provider_id: ProviderId::ourairports(),
-            identifier: "UG29".to_string(),
-            identifier_type: AerodromeIdentifierType::LocalAipCode,
+            identifier: "UGSG".to_string(),
+            identifier_type: AerodromeIdentifierType::GpsCode,
             status: AerodromeIdentityStatus::CurrentInProvider,
-            name: "Bamboura Airfield".to_string(),
+            name: "Gudauta Bombora Airfield".to_string(),
             valid_from: None,
             valid_to: None,
-            source: "Regional Airfield Record".to_string(),
+            source: "OurAirports GPS Identifier".to_string(),
+            provenance: None,
+        })
+        .add_identity(AerodromeIdentity {
+            entity_id: AerodromeEntityId::gudauta(),
+            provider_id: ProviderId::ourairports(),
+            identifier: "UG23".to_string(),
+            identifier_type: AerodromeIdentifierType::CommunityAlias,
+            status: AerodromeIdentityStatus::Historical,
+            name: "Gudauta Historical Keyword".to_string(),
+            valid_from: None,
+            valid_to: None,
+            source: "OurAirports Historical Keyword".to_string(),
             provenance: None,
         });
         reg.register(gudauta);
@@ -458,6 +487,28 @@ impl MultiIdentityRegistry {
         });
         reg.register(kerch);
 
+        // 7. Bolshiye Shiraki (Kakheti, Georgia / UG28)
+        let shiraki = PhysicalAerodrome::new(
+            AerodromeEntityId::new("aerodrome_bolshiye_shiraki"),
+            "Bolshiye Shiraki Air Base",
+            "UG28",
+            41.3800,
+            46.3600,
+        )
+        .with_elevation(1640.0)
+        .add_identity(AerodromeIdentity {
+            entity_id: AerodromeEntityId::new("aerodrome_bolshiye_shiraki"),
+            provider_id: ProviderId::ourairports(),
+            identifier: "UG28".to_string(),
+            identifier_type: AerodromeIdentifierType::IcaoLegacy,
+            status: AerodromeIdentityStatus::Historical,
+            name: "Bolshiye Shiraki Airfield (Kakheti)".to_string(),
+            valid_from: None,
+            valid_to: None,
+            source: "OurAirports / Historical Military Airfield Record".to_string(),
+            provenance: None,
+        });
+        reg.register(shiraki);
         reg
     }
 }
@@ -478,13 +529,28 @@ mod tests {
         assert_eq!(simf1.entity_id, simf3.entity_id);
         assert_eq!(simf1.entity_id, AerodromeEntityId::simferopol_intl());
 
-        // 2. Query Sukhumi by URAS or UGSS -> Resolves to the same physical entity
+        // 2. Query Sukhumi by URAS, UGSS, SUI, or historical keyword UG29 -> Resolves to the same physical entity
         let sukhum1 = reg.resolve("URAS").expect("resolve URAS");
         let sukhum2 = reg.resolve("UGSS").expect("resolve UGSS");
+        let sukhum3 = reg.resolve("SUI").expect("resolve SUI");
+        let sukhum4 = reg.resolve("UG29").expect("resolve UG29");
         assert_eq!(sukhum1.entity_id, sukhum2.entity_id);
+        assert_eq!(sukhum1.entity_id, sukhum3.entity_id);
+        assert_eq!(sukhum1.entity_id, sukhum4.entity_id);
         assert_eq!(sukhum1.entity_id, AerodromeEntityId::sukhumi_babushara());
 
-        // 3. Ensure Zavodskoye (URFW) is distinct from Simferopol Intl (URFF)
+        // 3. Collision Prevention: UG29 must NOT resolve to Gudauta
+        let gudauta = reg.resolve("UGSG").expect("resolve UGSG");
+        assert_eq!(gudauta.entity_id, AerodromeEntityId::gudauta());
+        assert_ne!(gudauta.entity_id, sukhum4.entity_id);
+
+        // 4. Collision Prevention: UG28 must NOT resolve to Pskhu or Gudauta (resolves to Bolshiye Shiraki)
+        let shiraki = reg.resolve("UG28").expect("resolve UG28");
+        assert_eq!(shiraki.entity_id.as_str(), "aerodrome_bolshiye_shiraki");
+        assert_ne!(shiraki.entity_id, gudauta.entity_id);
+        assert_ne!(shiraki.entity_id, sukhum1.entity_id);
+
+        // 5. Ensure Zavodskoye (URFW) is distinct from Simferopol Intl (URFF)
         let zavodskoye = reg.resolve("URFW").expect("resolve URFW");
         assert_ne!(simf1.entity_id, zavodskoye.entity_id);
     }

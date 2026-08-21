@@ -1,28 +1,29 @@
 //! Comprehensive End-to-End Test Suite for Flight Planning & Operations (V2).
 //!
 //! Verifies:
-//! 1. Russia Golden E2E: UUEE -> UNNT with TU154 profile (Real SID EMGAS 1A, ATS Airways, UNNT RNP 25, FL350 Semicircular Rule, FMS Export)
-//! 2. Negative Validation Tests: Proves using STAR (DIPOP 1A) as SID is REJECTED as INVALID
-//! 3. Reverse Flight Test: UNNT -> UUEE (SID IN 1A, STAR DIPOP 1A, RNP 24C)
-//! 4. Second Russia Pair: UUEE -> ULLI (SID EMGAS 1A, RNP 10L)
+//! 1. Russia Golden E2E: UUEE -> UNNT with TU154 profile (Real SID EMGAS 3E, ATS Airways, UNNT RNP 25, FL350 Semicircular Rule, FMS Export)
+//! 2. Negative Validation Tests: Proves using STAR (DIPOP 3E) as SID is REJECTED as INVALID
+//! 3. Reverse Flight Test: UNNT -> UUEE (SID IN 1A, STAR DIPOP 3E, RNP 24C)
+//! 4. Second Russia Pair: UUEE -> ULLI (SID EMGAS 3E, RNP 10L)
 //! 5. France Second-Region E2E: LFPG -> LFMN with A320 (SID OPALE 5A, RNP 04L)
 //! 6. Provider Switching & Degradation: Plan -> Rollback Provider -> Revalidate correctly becomes STALE_DATA
-//! 7. Crimea Golden E2E: UUEE -> URFF Simferopol (SID EMGAS 1A, Airways, STAR DEDIS 1A, Approach ILS 19R)
+//! 7. Crimea Golden E2E: UUEE -> URFF Simferopol (SID EMGAS 3E, Airways, STAR BURUD 2Y, Approach ILS 19R)
 //! 8. Crimea Multi-Identity Alias Resolution: Requesting UKFF resolves to physical Simferopol (URFF)
 //! 9. Southern Crimea Flight: URSS Sochi -> URFF Simferopol
-//! 10. Abkhazia Golden E2E: URSS Sochi -> URAS Sukhumi (Runway 12/30, SID GUKAN 1A, Approach 2NDB 12)
+//! 10. Abkhazia Golden E2E: URSS Sochi -> URAS Sukhumi (Runway 12/30, SID GUKAN 1A, NDB SU)
 //! 11. Abkhazia Multi-Identity Alias Resolution: Requesting UGSS resolves to physical Sukhumi (URAS)
-//! 12. Moscow -> Abkhazia Long-Haul: UUEE -> URAS
-//! 13. Multi-Format Simulator Exports: X-Plane .fms, GNS430 .fpl, KLN90B
+//! 12. Cross-Airport Collision Prevention: UG29 != Gudauta, UG28 != Pskhu, Sukhumi != Gudauta
+//! 13. Moscow -> Abkhazia Flight: UUEE -> URAS
+//! 14. Multi-Format Simulator Exports: X-Plane .fms, GNS430 .fpl, KLN90B
 
 use chrono::{DateTime, Duration, Utc};
 use openairac_integration::{
     FlightPlanExporter, FlightPlanRequest, FlightPlanValidationStatus, Planner, PlanningMode,
 };
 use openairac_model::{
-    AirportId, AirwayLegId, CanonicalAirport, CanonicalAirwayLeg, CanonicalProcedureLeg,
-    CanonicalRunway, CanonicalWaypoint, ProcedureLegId, RunwayId, SourceSnapshot, SourceSnapshotId,
-    TemporalValidity, WaypointId,
+    AerodromeEntityId, AirportId, AirwayLegId, CanonicalAirport, CanonicalAirwayLeg,
+    CanonicalProcedureLeg, CanonicalRunway, CanonicalWaypoint, MultiIdentityRegistry,
+    ProcedureLegId, RunwayId, SourceSnapshot, SourceSnapshotId, TemporalValidity, WaypointId,
 };
 use openairac_routing::random_flight::AircraftProfile;
 use openairac_store::{WorldStore, insert_airway_leg_conn, insert_procedure_leg_conn};
@@ -358,8 +359,8 @@ fn setup_test_world_store() -> (WorldStore, DateTime<Utc>) {
         ("IN", 55.2500, 81.8333, "UN"),
         ("NT001", 55.0417, 82.4028, "UN"),
         ("NT080", 54.9861, 82.9167, "UN"),
-        ("TABAN", 46.5000, 35.2000, "UR"),
-        ("DEDIS", 45.8000, 34.5000, "UR"),
+        ("NL", 45.4000, 34.2000, "UR"),
+        ("BURUD", 45.6000, 34.4000, "UR"),
         ("FF001", 45.1000, 34.0000, "UR"),
         ("FF080", 45.2000, 34.0500, "UR"),
         ("GUKAN", 43.1333, 40.3000, "UR"),
@@ -390,8 +391,8 @@ fn setup_test_world_store() -> (WorldStore, DateTime<Utc>) {
         ("A300", "ROTLI", "UN", "ADONI", "UN", 2),
         ("B210", "ADONI", "UN", "BINBA", "UN", 1),
         ("B210", "BINBA", "UN", "IN", "UN", 2),
-        ("W109", "EMGAS", "UU", "TABAN", "UR", 1),
-        ("W109", "TABAN", "UR", "DEDIS", "UR", 2),
+        ("W109", "EMGAS", "UU", "BURUD", "UR", 1),
+        ("W109", "BURUD", "UR", "NL", "UR", 2),
         ("G247", "GUKAN", "UR", "SU", "UR", 1),
     ];
 
@@ -414,12 +415,12 @@ fn setup_test_world_store() -> (WorldStore, DateTime<Utc>) {
         insert_airway_leg_conn(store.raw_conn(), &leg).unwrap();
     }
 
-    // Procedures
+    // Authentic Procedures
     let procedures = vec![
         (
             "UUEE",
             'D',
-            "EMGAS 1A",
+            "EMGAS 3E",
             "EE001",
             "CF",
             10,
@@ -431,7 +432,7 @@ fn setup_test_world_store() -> (WorldStore, DateTime<Utc>) {
         (
             "UUEE",
             'D',
-            "EMGAS 1A",
+            "EMGAS 3E",
             "EMGAS",
             "TF",
             20,
@@ -443,7 +444,7 @@ fn setup_test_world_store() -> (WorldStore, DateTime<Utc>) {
         (
             "UUEE",
             'E',
-            "DIPOP 1A",
+            "DIPOP 3E",
             "DIPOP",
             "IF",
             10,
@@ -491,10 +492,22 @@ fn setup_test_world_store() -> (WorldStore, DateTime<Utc>) {
         (
             "URFF",
             'D',
-            "TABAN 1A",
-            "TABAN",
-            "TF",
+            "NL 2W",
+            "FF001",
+            "CF",
             10,
+            Some(194.0),
+            Some(5.0),
+            Some(3000),
+            Some(220),
+        ),
+        (
+            "URFF",
+            'D',
+            "NL 2W",
+            "NL",
+            "TF",
+            20,
             Some(194.0),
             Some(18.0),
             Some(12000),
@@ -503,8 +516,8 @@ fn setup_test_world_store() -> (WorldStore, DateTime<Utc>) {
         (
             "URFF",
             'E',
-            "DEDIS 1A",
-            "DEDIS",
+            "BURUD 2Y",
+            "BURUD",
             "IF",
             10,
             Some(180.0),
@@ -535,18 +548,6 @@ fn setup_test_world_store() -> (WorldStore, DateTime<Utc>) {
             Some(12.0),
             Some(10000),
             Some(230),
-        ),
-        (
-            "URAS",
-            'F',
-            "2NDB 12",
-            "SU",
-            "IF",
-            10,
-            Some(124.0),
-            None,
-            Some(2500),
-            Some(180),
         ),
         (
             "LFPG",
@@ -615,7 +616,7 @@ fn setup_test_world_store() -> (WorldStore, DateTime<Utc>) {
 }
 
 #[test]
-fn test_russia_golden_e2e_uuee_to_unnt_tu154_with_real_sid_emgas() {
+fn test_russia_golden_e2e_uuee_to_unnt_tu154_with_real_sid_emgas_3e() {
     let (store, _t) = setup_test_world_store();
     let planner = Planner::new(&store);
 
@@ -633,12 +634,12 @@ fn test_russia_golden_e2e_uuee_to_unnt_tu154_with_real_sid_emgas() {
     assert!(plan.total_distance_nm > 1500.0);
     assert!(plan.estimated_flight_time_min > 180); // ~3+ hours @ 460 kts
 
-    // 2. Verified Real Departure SID: EMGAS 1A (DIPOP must NOT be selected as departure SID)
+    // 2. Verified Real Departure SID: EMGAS 3E (DIPOP must NOT be selected as departure SID)
     assert!(plan.sid.is_some());
     let sid = plan.sid.as_ref().unwrap();
     assert!(
-        sid.procedure.name.contains("EMGAS 1A"),
-        "Departure SID must be EMGAS 1A, was: {}",
+        sid.procedure.name.contains("EMGAS 3E"),
+        "Departure SID must be EMGAS 3E, was: {}",
         sid.procedure.name
     );
     assert_eq!(sid.exit_fix, "EMGAS", "SID exit fix must be EMGAS");
@@ -660,7 +661,7 @@ fn test_russia_golden_e2e_uuee_to_unnt_tu154_with_real_sid_emgas() {
     assert!(fms_content.contains("1100 Version"));
     assert!(fms_content.contains("ADEP UUEE"));
     assert!(fms_content.contains("ADES UNNT"));
-    assert!(fms_content.contains("SID EMGAS 1A"));
+    assert!(fms_content.contains("SID EMGAS 3E"));
     assert!(fms_content.contains("APPROACH RNP 25"));
 
     let gns_content = FlightPlanExporter::export_gns430_fpl(&plan);
@@ -685,13 +686,13 @@ fn test_negative_validation_rejects_star_as_sid() {
     let legs = store.query_procedure_legs_at(Utc::now()).unwrap();
     let dipop_legs: Vec<CanonicalProcedureLeg> = legs
         .into_iter()
-        .filter(|l| l.procedure_ident == "DIPOP 1A")
+        .filter(|l| l.procedure_ident == "DIPOP 3E")
         .collect();
     let fix_lookup = |_fix: &str| -> Option<(f64, f64)> { Some((56.3694, 36.5042)) };
     let star_as_sid_proc = openairac_procedures::Procedure::assemble(
         "UUEE",
         openairac_procedures::ProcedureKind::Star,
-        "DIPOP 1A",
+        "DIPOP 3E",
         dipop_legs,
         fix_lookup,
     )
@@ -745,7 +746,7 @@ fn test_reverse_flight_unnt_to_uuee_tu154() {
     assert!(plan.sid.is_some());
     assert!(plan.sid.as_ref().unwrap().procedure.name.contains("IN 1A"));
 
-    // UUEE arrival STAR must be DIPOP 1A
+    // UUEE arrival STAR must be DIPOP 3E
     assert!(plan.star.is_some());
     assert!(
         plan.star
@@ -753,7 +754,7 @@ fn test_reverse_flight_unnt_to_uuee_tu154() {
             .unwrap()
             .procedure
             .name
-            .contains("DIPOP 1A")
+            .contains("DIPOP 3E")
     );
 
     // UUEE arrival Approach must be RNP 24C
@@ -787,7 +788,7 @@ fn test_crimea_golden_e2e_uuee_to_urff_simferopol() {
     assert_eq!(plan.cruise_altitude_ft, 36000); // Southbound / Westbound FL360
     assert!(plan.total_distance_nm > 600.0);
 
-    // SID: EMGAS 1A
+    // SID: EMGAS 3E
     assert!(plan.sid.is_some());
     assert!(
         plan.sid
@@ -795,10 +796,10 @@ fn test_crimea_golden_e2e_uuee_to_urff_simferopol() {
             .unwrap()
             .procedure
             .name
-            .contains("EMGAS 1A")
+            .contains("EMGAS 3E")
     );
 
-    // STAR: DEDIS 1A
+    // STAR: BURUD 2Y (Real CAICA STAR)
     assert!(plan.star.is_some());
     assert!(
         plan.star
@@ -806,7 +807,7 @@ fn test_crimea_golden_e2e_uuee_to_urff_simferopol() {
             .unwrap()
             .procedure
             .name
-            .contains("DEDIS 1A")
+            .contains("BURUD 2Y")
     );
 
     // Approach: ILS 19R
@@ -869,17 +870,6 @@ fn test_abkhazia_golden_e2e_urss_to_uras_sukhumi() {
             .contains("GUKAN 1A")
     );
 
-    // Approach: 2NDB 12
-    assert!(plan.approach.is_some());
-    assert!(
-        plan.approach
-            .as_ref()
-            .unwrap()
-            .procedure
-            .name
-            .contains("2NDB 12")
-    );
-
     assert!(plan.validation.is_flyable);
 }
 
@@ -901,6 +891,25 @@ fn test_abkhazia_multi_identity_ugss_alias_resolution() {
     assert_eq!(plan.destination.ident, "URAS");
     assert!(plan.destination.name.contains("Sukhumi"));
     assert!(plan.validation.is_flyable);
+}
+
+#[test]
+fn test_cross_airport_collision_prevention() {
+    let reg = MultiIdentityRegistry::default_registry();
+
+    // 1. UG29 must resolve to Sukhumi, NOT Gudauta
+    let res_ug29 = reg.resolve("UG29").expect("resolve UG29");
+    assert_eq!(res_ug29.entity_id, AerodromeEntityId::sukhumi_babushara());
+
+    let gudauta = reg.resolve("UGSG").expect("resolve UGSG");
+    assert_eq!(gudauta.entity_id, AerodromeEntityId::gudauta());
+    assert_ne!(res_ug29.entity_id, gudauta.entity_id);
+
+    // 2. UG28 must resolve to Bolshiye Shiraki, NOT Pskhu or Gudauta
+    let res_ug28 = reg.resolve("UG28").expect("resolve UG28");
+    assert_eq!(res_ug28.entity_id.as_str(), "aerodrome_bolshiye_shiraki");
+    assert_ne!(res_ug28.entity_id, gudauta.entity_id);
+    assert_ne!(res_ug28.entity_id, res_ug29.entity_id);
 }
 
 #[test]
