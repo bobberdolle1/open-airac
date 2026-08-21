@@ -45,9 +45,21 @@ pub enum FlightPlanLegKind {
     Missed,
 }
 pub mod execution;
+pub mod flightdeck;
 pub use execution::{
     CompletedFlightRecord, FlightExecutionEvent, FlightExecutionSession, FlightPhase,
     FlightPhaseEngine, FlightProgress, TelemetryUpdate,
+};
+pub use flightdeck::{
+    AdvisoryLevel, COMPACT_AI_SNAPSHOT_SCHEMA_V1, CompactAiSnapshot, CrewAdvisory,
+    CrewAdvisoryEngine, FLIGHTDECK_SNAPSHOT_SCHEMA_V2, FlightEventStream, FlightEventType,
+    FlightStateDelta, FlightStateDeltaDetector, FlightdeckActiveLeg, FlightdeckAircraftProfile,
+    FlightdeckAirportBrief, FlightdeckArrivalBriefing, FlightdeckConnectionState,
+    FlightdeckConstraint, FlightdeckDataProvenance, FlightdeckDepartureBriefing,
+    FlightdeckDescentProfile, FlightdeckError, FlightdeckEvent, FlightdeckNavGeometry,
+    FlightdeckOnlineAtc, FlightdeckOsAdapter, FlightdeckOsContext, FlightdeckPosition,
+    FlightdeckRunwayWind, FlightdeckSnapshotV2, FlightdeckStaleFlags, FlightdeckToolRegistry,
+    FlightdeckWeatherSummary, InFlightBriefSummary,
 };
 
 impl FlightPlanLegKind {

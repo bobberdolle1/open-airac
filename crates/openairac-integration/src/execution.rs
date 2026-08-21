@@ -904,4 +904,40 @@ impl FlightExecutionSession {
             "last_telemetry_time": self.last_telemetry_time,
         })
     }
+
+    /// Generate complete Flightdeck Snapshot v2 with advisory evaluation.
+    pub fn snapshot_v2(
+        &self,
+        progress: Option<&FlightProgress>,
+        weather: Option<crate::flightdeck::snapshot::FlightdeckWeatherSummary>,
+        online_atc: Vec<crate::flightdeck::snapshot::FlightdeckOnlineAtc>,
+        simulator_name: Option<&str>,
+    ) -> crate::flightdeck::snapshot::FlightdeckSnapshotV2 {
+        let advisories = crate::flightdeck::advisory::CrewAdvisoryEngine::evaluate(
+            self,
+            progress,
+            weather.as_ref(),
+            &online_atc,
+        );
+        crate::flightdeck::snapshot::FlightdeckSnapshotV2::build(
+            self,
+            progress,
+            weather,
+            online_atc,
+            advisories,
+            simulator_name,
+        )
+    }
+
+    /// Generate context-budget Compact AI Snapshot.
+    pub fn compact_snapshot(
+        &self,
+        progress: Option<&FlightProgress>,
+        weather: Option<crate::flightdeck::snapshot::FlightdeckWeatherSummary>,
+        online_atc: Vec<crate::flightdeck::snapshot::FlightdeckOnlineAtc>,
+        simulator_name: Option<&str>,
+    ) -> crate::flightdeck::snapshot::CompactAiSnapshot {
+        self.snapshot_v2(progress, weather, online_atc, simulator_name)
+            .to_compact()
+    }
 }

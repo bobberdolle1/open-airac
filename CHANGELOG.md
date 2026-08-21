@@ -1,7 +1,35 @@
 # Changelog
 
-## 2.10.0 — 2026-08-21
+## 2.11.0 — 2026-08-21
 
+### OpenAIRAC 3.2 — FlightdeckOS & AI Crew Gateway
+
+- **Flightdeck Snapshot v2 (`openairac-integration::flightdeck::snapshot`)**:
+  - First-class authoritative machine interface for AI flight crew and FlightdeckOS consumers (`flightdeck_snapshot_v2`).
+  - Unified, consistent point-in-time snapshot with connection state, flight phase, position, active leg, next constraint, navigation geometry, descent profile, weather summary, online ATC context, advisories, provenance, and freshness flags.
+  - Context-budget Compact AI Snapshot (`compact_ai_snapshot_v1`) optimized for low-token LLM crew reasoning and narration.
+
+- **Deterministic Crew Advisory Engine (`openairac-integration::flightdeck::advisory`)**:
+  - Rule-based crew advisory generator (`INFO`, `CAUTION`, `WARNING`) operating entirely without external LLMs.
+  - Built-in rules: `TOD_APPROACHING`, `DESCENT_REQUIRED`, `OFF_ROUTE`, `TELEMETRY_STALE`, `SOURCE_REQUIRED_PROCEDURE`, `SIGNIFICANT_TAILWIND`, and `ALTITUDE_CONSTRAINT_APPROACHING`.
+
+- **Flight Event Stream & Delta Detection (`openairac-integration::flightdeck::events`)**:
+  - Bounded ring buffer stream for flight lifecycle events with monotonic IDs.
+  - Semantic state delta detector (`FlightStateDeltaDetector`) computing efficient diffs between consecutive snapshots.
+
+- **AI Crew Tool Registry & Structured Briefings (`openairac-integration::flightdeck::tools`)**:
+  - Deterministic query endpoints and typed machine error responses (`NoActiveFlight`, `SimNotConnected`, `TelemetryStale`, `WeatherUnavailable`, `ProviderSourceRequired`).
+  - Structured departure briefings, arrival briefings (strictly preserving `SOURCE_REQUIRED` semantics), and in-flight brief summaries.
+  - Multi-identity airport resolution across providers (e.g. `URAS` / `UGSS` / `SUI`, `URFF` / `UKFF` / `SIP`).
+
+- **FlightdeckOS Adapter (`openairac-integration::flightdeck::adapter`)**:
+  - Decoupled translation layer mapping canonical OpenAIRAC snapshots to standard `FlightdeckOsContext` structures.
+
+- **Developer Example & Tool Discovery Schema (`examples/flightdeck_ai_crew.py`, `openairac-service`)**:
+  - Interactive Python demo querying localhost REST endpoints and evaluating AI crew natural-language aviation questions with underlying deterministic evidence.
+  - Machine-readable tool discovery schema in `FlightdeckService::tool_definitions`.
+
+## 2.10.0 — 2026-08-21
 ### In-Flight Flight Execution Engine & Telemetry Runtime
 
 - **Flight Execution Session (`openairac-integration::execution`)**:

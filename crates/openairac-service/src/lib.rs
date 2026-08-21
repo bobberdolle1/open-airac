@@ -915,6 +915,86 @@ pub fn sanitize_path_for_report(path: &std::path::Path) -> String {
     }
     p_str
 }
+
+/// Unified FlightdeckOS and AI Crew Service Boundary.
+pub struct FlightdeckService;
+
+impl FlightdeckService {
+    /// Generate OpenAPI / tool discovery JSON schema for AI Crew integrations.
+    pub fn tool_definitions() -> serde_json::Value {
+        serde_json::json!({
+            "service": "OpenAIRAC FlightdeckOS & AI Crew Gateway",
+            "version": "3.2",
+            "schema_version": openairac_integration::FLIGHTDECK_SNAPSHOT_SCHEMA_V2,
+            "compact_schema_version": openairac_integration::COMPACT_AI_SNAPSHOT_SCHEMA_V1,
+            "tools": [
+                {
+                    "name": "get_flightdeck_snapshot",
+                    "description": "Get complete, authoritative Flightdeck Snapshot v2 containing all flight state, active leg, descent profile, weather, ATC, and advisories.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "compact": { "type": "boolean", "description": "If true, returns low-token compact AI snapshot for narration" }
+                        }
+                    }
+                },
+                {
+                    "name": "get_active_flight",
+                    "description": "Get current flight state, phase, position, and simulator connection status.",
+                    "parameters": { "type": "object", "properties": {} }
+                },
+                {
+                    "name": "get_active_leg",
+                    "description": "Get active navigation leg, next waypoint, desired track, and cross-track error (XTK).",
+                    "parameters": { "type": "object", "properties": {} }
+                },
+                {
+                    "name": "get_next_constraint",
+                    "description": "Get the next upcoming altitude or speed constraint along the active flight plan.",
+                    "parameters": { "type": "object", "properties": {} }
+                },
+                {
+                    "name": "get_departure_brief",
+                    "description": "Get structured preflight departure briefing for origin airport, runway, and SID.",
+                    "parameters": { "type": "object", "properties": {} }
+                },
+                {
+                    "name": "get_arrival_brief",
+                    "description": "Get structured in-flight arrival briefing for destination airport, runway, STAR, approach, and SOURCE_REQUIRED status.",
+                    "parameters": { "type": "object", "properties": {} }
+                },
+                {
+                    "name": "get_advisories",
+                    "description": "Get active deterministic rule-based crew advisories (INFO, CAUTION, WARNING).",
+                    "parameters": { "type": "object", "properties": {} }
+                },
+                {
+                    "name": "get_events",
+                    "description": "Get bounded stream of flight lifecycle events (takeoff, phase changes, fix sequencing, advisories).",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "since_id": { "type": "integer", "description": "Minimum event ID to filter from" },
+                            "limit": { "type": "integer", "description": "Maximum events to return (default: 50)" }
+                        }
+                    }
+                },
+                {
+                    "name": "resolve_airport_identity",
+                    "description": "Resolve multi-identity airport semantics across providers (e.g. URAS/UGSS/SUI, URFF/UKFF/SIP).",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "ident": { "type": "string", "description": "Airport ICAO or IATA code" }
+                        },
+                        "required": ["ident"]
+                    }
+                }
+            ]
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -922,7 +1002,6 @@ mod tests {
         AirportId, AirwayLegId, ProcedureLegId, SourceSnapshot, SourceSnapshotId, TemporalValidity,
         WaypointId,
     };
-
     fn temporal(t: DateTime<Utc>) -> TemporalValidity {
         TemporalValidity {
             valid_from: t,

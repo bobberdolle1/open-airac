@@ -184,6 +184,23 @@ fn test_replay_e2e_uuee_urff_tu154() {
     assert_eq!(p_cruise.current_phase, FlightPhase::Cruise);
     assert!(p_cruise.tod_distance_nm.unwrap() > 0.0);
 
+    // Assert Flightdeck Snapshot v2 & Compact AI Snapshot in Cruise
+    let snap_v2 = session.snapshot_v2(
+        Some(&p_cruise),
+        None,
+        Vec::new(),
+        Some("X-Plane 12 Protocol"),
+    );
+    assert_eq!(snap_v2.origin.ident, "UUEE");
+    assert_eq!(snap_v2.destination.ident, "URFF");
+    assert_eq!(snap_v2.flight_phase, FlightPhase::Cruise);
+    assert!(snap_v2.descent_profile.tod_distance_nm.is_some());
+
+    let compact = snap_v2.to_compact();
+    assert_eq!(compact.flight, "UUEE -> URFF");
+    assert_eq!(compact.phase, "CRUISE");
+    assert_eq!(compact.aircraft, "T154");
+    assert!(compact.tod.contains("NM"));
     // 4. Descent towards URFF
     t += Duration::seconds(800);
     let telem_descent = TelemetryUpdate {
@@ -320,13 +337,10 @@ fn test_replay_e2e_urss_uras_an24_source_required_arrival() {
     };
 
     let mut session = FlightExecutionSession::new(plan);
-    assert!(session.flight_plan.star.is_none());
-    assert!(session.flight_plan.approach.is_none());
-
     let telem_app = TelemetryUpdate {
         timestamp: Utc::now(),
-        latitude_deg: 42.9000,
-        longitude_deg: 41.0500,
+        latitude_deg: 43.1000,
+        longitude_deg: 40.5000,
         altitude_msl_ft: 3000.0,
         altitude_agl_ft: Some(2947.0),
         groundspeed_kts: 180.0,
@@ -341,6 +355,19 @@ fn test_replay_e2e_urss_uras_an24_source_required_arrival() {
     assert!(session.flight_plan.star.is_none());
     assert!(session.flight_plan.approach.is_none());
     assert!(progress.procedure_context.contains("ATS") || progress.procedure_context == "AIRPORT");
+
+    // Assert Flightdeck Snapshot v2 strictly preserves SOURCE_REQUIRED for URAS
+    let snap_uras = session.snapshot_v2(
+        Some(&progress),
+        None,
+        Vec::new(),
+        Some("X-Plane 12 Protocol"),
+    );
+    assert!(snap_uras.destination.is_source_required);
+    assert_eq!(snap_uras.destination.procedure_name, None);
+
+    let compact_uras = snap_uras.to_compact();
+    assert!(compact_uras.arrival.contains("SOURCE REQUIRED"));
 }
 
 #[test]
