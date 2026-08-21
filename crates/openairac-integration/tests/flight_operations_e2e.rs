@@ -1285,9 +1285,15 @@ fn test_second_region_e2e_france_lfpg_to_lfmn_a320() {
 
     // 2. Arrival Runway & Approach Role Invariants
     assert_eq!(plan.arrival_runway.as_deref(), Some("04L"));
-    let app = plan.approach.as_ref().expect("plan must have instrument approach");
+    let app = plan
+        .approach
+        .as_ref()
+        .expect("plan must have instrument approach");
     assert_eq!(app.procedure.airport_ident, "LFMN");
-    assert_eq!(app.procedure.kind, openairac_procedures::ProcedureKind::Approach);
+    assert_eq!(
+        app.procedure.kind,
+        openairac_procedures::ProcedureKind::Approach
+    );
     assert!(app.procedure.name.contains("RNP 04L"));
 
     // 3. Overall Plan Flyability
