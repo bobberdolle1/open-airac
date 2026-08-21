@@ -474,10 +474,9 @@ impl FlightExecutionSession {
             procedure_context = match active_leg.kind {
                 FlightPlanLegKind::AirportConnector => "AIRPORT".to_string(),
                 FlightPlanLegKind::Sid => "SID".to_string(),
-                FlightPlanLegKind::AtsRoute => format!(
-                    "ATS ({})",
-                    active_leg.route_ident.as_deref().unwrap_or("")
-                ),
+                FlightPlanLegKind::AtsRoute => {
+                    format!("ATS ({})", active_leg.route_ident.as_deref().unwrap_or(""))
+                }
                 FlightPlanLegKind::Dct | FlightPlanLegKind::Fra => "DCT".to_string(),
                 FlightPlanLegKind::Star => "STAR".to_string(),
                 FlightPlanLegKind::Approach => "APPROACH".to_string(),
@@ -501,8 +500,8 @@ impl FlightExecutionSession {
 
         // Remaining route distance
         let mut remaining_route_dist_nm = dist_to_next_fix;
-        for i in (self.active_leg_index + 1)..legs.len() {
-            remaining_route_dist_nm += legs[i].distance_nm;
+        for leg in legs.iter().skip(self.active_leg_index + 1) {
+            remaining_route_dist_nm += leg.distance_nm;
         }
 
         // ETE / ETA calculations (clean handling of stationary / low GS)
@@ -592,24 +591,24 @@ impl FlightExecutionSession {
             };
 
             // Sequence if along-track reached end of segment or within radius and passing
-            if at_dist >= seg_dist - 0.2 || dist_to_next < sequencing_radius {
-                if self.active_leg_index + 1 < legs.len() {
-                    let old_leg = self.active_leg_index;
-                    self.flown_leg_indices.push(old_leg);
-                    self.active_leg_index += 1;
+            if (at_dist >= seg_dist - 0.2 || dist_to_next < sequencing_radius)
+                && self.active_leg_index + 1 < legs.len()
+            {
+                let old_leg = self.active_leg_index;
+                self.flown_leg_indices.push(old_leg);
+                self.active_leg_index += 1;
 
-                    self.record_event(
-                        "FIX_SEQUENCED",
-                        &format!(
-                            "Sequenced waypoint {} -> {}",
-                            cur_leg.to_fix, legs[self.active_leg_index].to_fix
-                        ),
-                        serde_json::json!({
-                            "sequenced_fix": cur_leg.to_fix,
-                            "new_active_leg": self.active_leg_index,
-                        }),
-                    );
-                }
+                self.record_event(
+                    "FIX_SEQUENCED",
+                    &format!(
+                        "Sequenced waypoint {} -> {}",
+                        cur_leg.to_fix, legs[self.active_leg_index].to_fix
+                    ),
+                    serde_json::json!({
+                        "sequenced_fix": cur_leg.to_fix,
+                        "new_active_leg": self.active_leg_index,
+                    }),
+                );
             }
         }
     }
@@ -680,16 +679,21 @@ impl FlightExecutionSession {
         // Reconstruct all_legs while preserving flown enroute legs
         let mut new_all_legs = Vec::new();
         // 1. Keep departure & SID
-        if let Some(dep_leg) = self.flight_plan.all_legs.first().cloned() {
-            if dep_leg.kind == FlightPlanLegKind::AirportConnector {
-                new_all_legs.push(dep_leg);
-            }
+        if let Some(dep_leg) = self
+            .flight_plan
+            .all_legs
+            .first()
+            .filter(|l| l.kind == FlightPlanLegKind::AirportConnector)
+            .cloned()
+        {
+            new_all_legs.push(dep_leg);
         }
         if let Some(sid) = &self.flight_plan.sid {
             for l in &sid.legs {
-                let coord = l
-                    .fix_latitude
-                    .and_then(|lat| l.fix_longitude.and_then(|lon| Coordinate::new(lat, lon).ok()));
+                let coord = l.fix_latitude.and_then(|lat| {
+                    l.fix_longitude
+                        .and_then(|lon| Coordinate::new(lat, lon).ok())
+                });
                 let mut leg = FlightPlanLeg {
                     leg_index: new_all_legs.len(),
                     kind: FlightPlanLegKind::Sid,
@@ -728,9 +732,10 @@ impl FlightExecutionSession {
         // 3. New STAR
         if let Some(star) = &self.flight_plan.star {
             for l in &star.legs {
-                let coord = l
-                    .fix_latitude
-                    .and_then(|lat| l.fix_longitude.and_then(|lon| Coordinate::new(lat, lon).ok()));
+                let coord = l.fix_latitude.and_then(|lat| {
+                    l.fix_longitude
+                        .and_then(|lon| Coordinate::new(lat, lon).ok())
+                });
                 let mut leg = FlightPlanLeg {
                     leg_index: new_all_legs.len(),
                     kind: FlightPlanLegKind::Star,
@@ -762,9 +767,10 @@ impl FlightExecutionSession {
         // 4. New Approach
         if let Some(app) = &self.flight_plan.approach {
             for l in &app.legs {
-                let coord = l
-                    .fix_latitude
-                    .and_then(|lat| l.fix_longitude.and_then(|lon| Coordinate::new(lat, lon).ok()));
+                let coord = l.fix_latitude.and_then(|lat| {
+                    l.fix_longitude
+                        .and_then(|lon| Coordinate::new(lat, lon).ok())
+                });
                 let mut leg = FlightPlanLeg {
                     leg_index: new_all_legs.len(),
                     kind: FlightPlanLegKind::Approach,

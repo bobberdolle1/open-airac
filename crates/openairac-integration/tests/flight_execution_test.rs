@@ -167,7 +167,7 @@ fn test_flight_execution_session_lifecycle() {
     assert!(session.is_connected);
 
     // 2. Taxi Out
-    t0 = t0 + Duration::seconds(30);
+    t0 += Duration::seconds(30);
     let telem_taxi = TelemetryUpdate {
         timestamp: t0,
         latitude_deg: 55.9700,
@@ -187,7 +187,7 @@ fn test_flight_execution_session_lifecycle() {
     assert_eq!(p_taxi.current_phase, FlightPhase::TaxiOut);
 
     // 3. Takeoff Roll
-    t0 = t0 + Duration::seconds(20);
+    t0 += Duration::seconds(20);
     let telem_to = TelemetryUpdate {
         timestamp: t0,
         latitude_deg: 55.9650,
@@ -205,7 +205,7 @@ fn test_flight_execution_session_lifecycle() {
     assert_eq!(p_to.current_phase, FlightPhase::Takeoff);
 
     // 4. Initial Climb
-    t0 = t0 + Duration::seconds(15);
+    t0 += Duration::seconds(15);
     let telem_climb = TelemetryUpdate {
         timestamp: t0,
         latitude_deg: 55.9000,
@@ -220,10 +220,13 @@ fn test_flight_execution_session_lifecycle() {
         sim_rate: 1.0,
     };
     let p_iclimb = session.update_telemetry(telem_climb).unwrap();
-    assert!(p_iclimb.current_phase == FlightPhase::InitialClimb || p_iclimb.current_phase == FlightPhase::Climb);
+    assert!(
+        p_iclimb.current_phase == FlightPhase::InitialClimb
+            || p_iclimb.current_phase == FlightPhase::Climb
+    );
 
     // 5. Cruise at FL360
-    t0 = t0 + Duration::seconds(600);
+    t0 += Duration::seconds(600);
     let telem_cruise = TelemetryUpdate {
         timestamp: t0,
         latitude_deg: 53.0000,

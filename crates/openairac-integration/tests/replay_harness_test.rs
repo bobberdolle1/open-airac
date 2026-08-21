@@ -142,7 +142,7 @@ fn test_replay_e2e_uuee_urff_tu154() {
     assert_eq!(p_gate.current_phase, FlightPhase::Preflight);
 
     // 2. Climb out
-    t = t + Duration::seconds(120);
+    t += Duration::seconds(120);
     let telem_climb = TelemetryUpdate {
         timestamp: t,
         latitude_deg: 55.7000,
@@ -159,9 +159,12 @@ fn test_replay_e2e_uuee_urff_tu154() {
     session.update_telemetry(telem_climb.clone()).unwrap();
     session.update_telemetry(telem_climb.clone()).unwrap();
     let p_climb = session.update_telemetry(telem_climb).unwrap();
-    assert!(p_climb.current_phase == FlightPhase::Climb || p_climb.current_phase == FlightPhase::InitialClimb);
+    assert!(
+        p_climb.current_phase == FlightPhase::Climb
+            || p_climb.current_phase == FlightPhase::InitialClimb
+    );
     // 3. Cruise at FL360
-    t = t + Duration::seconds(1200);
+    t += Duration::seconds(1200);
     let telem_cruise = TelemetryUpdate {
         timestamp: t,
         latitude_deg: 51.0000,
@@ -182,7 +185,7 @@ fn test_replay_e2e_uuee_urff_tu154() {
     assert!(p_cruise.tod_distance_nm.unwrap() > 0.0);
 
     // 4. Descent towards URFF
-    t = t + Duration::seconds(800);
+    t += Duration::seconds(800);
     let telem_descent = TelemetryUpdate {
         timestamp: t,
         latitude_deg: 46.5000,
@@ -203,7 +206,7 @@ fn test_replay_e2e_uuee_urff_tu154() {
     assert!(p_desc.descent_profile_deviation_ft.is_some());
 
     // 5. Landing at URFF
-    t = t + Duration::seconds(400);
+    t += Duration::seconds(400);
     let telem_land = TelemetryUpdate {
         timestamp: t,
         latitude_deg: 45.0522,
@@ -317,8 +320,8 @@ fn test_replay_e2e_urss_uras_an24_source_required_arrival() {
     };
 
     let mut session = FlightExecutionSession::new(plan);
-    assert_eq!(session.flight_plan.star.is_none(), true);
-    assert_eq!(session.flight_plan.approach.is_none(), true);
+    assert!(session.flight_plan.star.is_none());
+    assert!(session.flight_plan.approach.is_none());
 
     let telem_app = TelemetryUpdate {
         timestamp: Utc::now(),
@@ -335,9 +338,8 @@ fn test_replay_e2e_urss_uras_an24_source_required_arrival() {
     };
     let progress = session.update_telemetry(telem_app).unwrap();
     // Verify no fabricated STAR was auto-invented during flight
-    assert_eq!(session.flight_plan.star.is_none(), true);
-    assert_eq!(session.flight_plan.star.is_none(), true);
-    assert_eq!(session.flight_plan.approach.is_none(), true);
+    assert!(session.flight_plan.star.is_none());
+    assert!(session.flight_plan.approach.is_none());
     assert!(progress.procedure_context.contains("ATS") || progress.procedure_context == "AIRPORT");
 }
 

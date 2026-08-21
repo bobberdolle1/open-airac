@@ -50,7 +50,6 @@ pub use execution::{
     FlightPhaseEngine, FlightProgress, TelemetryUpdate,
 };
 
-
 impl FlightPlanLegKind {
     pub fn as_str(&self) -> &'static str {
         match self {

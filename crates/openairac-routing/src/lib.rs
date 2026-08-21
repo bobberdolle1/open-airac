@@ -68,7 +68,11 @@ impl Coordinate {
 
     /// Cross-track deviation in nautical miles relative to the great-circle path from `start` to `end`.
     /// Positive = right of track, Negative = left of track.
-    pub fn cross_track_distance_nm(start: &Coordinate, end: &Coordinate, current: &Coordinate) -> f64 {
+    pub fn cross_track_distance_nm(
+        start: &Coordinate,
+        end: &Coordinate,
+        current: &Coordinate,
+    ) -> f64 {
         let seg_dist = start.distance_nm(end);
         if seg_dist < 1e-6 {
             return 0.0;
@@ -83,7 +87,11 @@ impl Coordinate {
 
     /// Along-track distance in nautical miles from `start` along the great-circle track towards `end`.
     /// Can be negative if `current` is behind `start`.
-    pub fn along_track_distance_nm(start: &Coordinate, end: &Coordinate, current: &Coordinate) -> f64 {
+    pub fn along_track_distance_nm(
+        start: &Coordinate,
+        end: &Coordinate,
+        current: &Coordinate,
+    ) -> f64 {
         let seg_dist = start.distance_nm(end);
         if seg_dist < 1e-6 {
             return 0.0;
@@ -104,11 +112,7 @@ impl Coordinate {
         if diff > 180.0 {
             diff = 360.0 - diff;
         }
-        if diff > 90.0 {
-            -at_mag
-        } else {
-            at_mag
-        }
+        if diff > 90.0 { -at_mag } else { at_mag }
     }
 
     /// Intermediate coordinate along great circle path at given fraction [0.0, 1.0].
