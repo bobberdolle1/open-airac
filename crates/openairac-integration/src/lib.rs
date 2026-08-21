@@ -452,27 +452,38 @@ impl<'a> Planner<'a> {
         let t = request.departure_time;
 
         let airports = self.store.query_airports_at(t)?;
-        let origin = airports
-            .iter()
-            .find(|a| a.ident.eq_ignore_ascii_case(&request.origin_airport))
-            .cloned()
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Origin airport {} not found in world store at {t}",
-                    request.origin_airport
-                )
-            })?;
-        let destination = airports
-            .iter()
-            .find(|a| a.ident.eq_ignore_ascii_case(&request.destination_airport))
-            .cloned()
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Destination airport {} not found in world store at {t}",
-                    request.destination_airport
-                )
-            })?;
+        let multi_reg = openairac_model::MultiIdentityRegistry::default_registry();
 
+        #[allow(clippy::collapsible_if)]
+        let resolve_airport = |ident: &str| -> Option<CanonicalAirport> {
+            // 1. Direct match in store
+            if let Some(a) = airports
+                .iter()
+                .find(|a| a.ident.eq_ignore_ascii_case(ident))
+            {
+                return Some((*a).clone());
+            }
+            // 2. Multi-identity alias resolution
+            if let Some(phys) = multi_reg.resolve(ident) {
+                if let Some(a) = airports.iter().find(|a| phys.matches_query(&a.ident)) {
+                    return Some((*a).clone());
+                }
+            }
+            None
+        };
+
+        let origin = resolve_airport(&request.origin_airport).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Origin airport {} not found in world store at {t}",
+                request.origin_airport
+            )
+        })?;
+        let destination = resolve_airport(&request.destination_airport).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Destination airport {} not found in world store at {t}",
+                request.destination_airport
+            )
+        })?;
         let profile = request
             .aircraft_profile
             .clone()
@@ -1022,7 +1033,10 @@ impl FlightPlanExporter {
     /// Export to Garmin GNS430 `.fpl` format.
     pub fn export_gns430_fpl(plan: &FlightPlan) -> String {
         let mut lines = Vec::new();
-        lines.push(format!("FPL:{}-{}", plan.origin.ident, plan.destination.ident));
+        lines.push(format!(
+            "FPL:{}-{}",
+            plan.origin.ident, plan.destination.ident
+        ));
         lines.push("AIRAC:2608".to_string());
         lines.push(format!("ORIGIN:{}", plan.origin.ident));
         for leg in &plan.enroute_legs {

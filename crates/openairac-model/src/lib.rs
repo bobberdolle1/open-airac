@@ -1,7 +1,9 @@
+pub mod aerodrome_identity;
 pub mod airac;
 pub mod fra;
 pub mod policy;
 pub mod provider;
+pub use aerodrome_identity::*;
 pub use airac::*;
 pub use fra::*;
 pub use policy::*;
