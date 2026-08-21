@@ -53,7 +53,7 @@ For normal flight-sim users, OpenAIRAC powers **[OpenAIRAC Map](https://github.c
 
 ---
 
-## ⚡ Current Release Truth (Core v2.11.0 / Product 3.3)
+## ⚡ Current Release Truth (Core v2.12.0 / Product 3.3)
 
 * **AIRAC Cycle Lifecycle Engine**: Automated discovery, effective date validation, preload scheduling, atomic activation, and temporal rollback.
 * **Temporal Provenance & Policy Layer**: Machine-readable provider registry (`data/providers.yaml`) with strict policy enforcement (`PublicRedistribution`, `LocalOnly`, `MetadataOnly`, `Forbidden`).

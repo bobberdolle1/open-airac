@@ -1276,28 +1276,22 @@ fn test_second_region_e2e_france_lfpg_to_lfmn_a320() {
     assert_eq!(plan.origin.ident, "LFPG");
     assert_eq!(plan.destination.ident, "LFMN");
 
-    // LFPG SID OPALE 5A
-    assert!(plan.sid.is_some());
-    assert!(
-        plan.sid
-            .as_ref()
-            .unwrap()
-            .procedure
-            .name
-            .contains("OPALE 5A")
-    );
+    // 1. Departure Runway & SID Role Invariants
+    assert_eq!(plan.departure_runway.as_deref(), Some("26L"));
+    let sid = plan.sid.as_ref().expect("plan must have departure SID");
+    assert_eq!(sid.procedure.airport_ident, "LFPG");
+    assert_eq!(sid.procedure.kind, openairac_procedures::ProcedureKind::Sid);
+    assert!(sid.procedure.name.contains("OPALE 5A"));
 
-    // LFMN Approach RNP 04L
-    assert!(plan.approach.is_some());
-    assert!(
-        plan.approach
-            .as_ref()
-            .unwrap()
-            .procedure
-            .name
-            .contains("RNP 04L")
-    );
+    // 2. Arrival Runway & Approach Role Invariants
+    assert_eq!(plan.arrival_runway.as_deref(), Some("04L"));
+    let app = plan.approach.as_ref().expect("plan must have instrument approach");
+    assert_eq!(app.procedure.airport_ident, "LFMN");
+    assert_eq!(app.procedure.kind, openairac_procedures::ProcedureKind::Approach);
+    assert!(app.procedure.name.contains("RNP 04L"));
 
+    // 3. Overall Plan Flyability
+    assert_eq!(plan.validation.status, FlightPlanValidationStatus::Valid);
     assert!(plan.validation.is_flyable);
 }
 
