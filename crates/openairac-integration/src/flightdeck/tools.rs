@@ -181,7 +181,7 @@ impl FlightdeckToolRegistry {
             )
         } else {
             format!(
-                "Arrival at {} (Elev {:.0} ft), Runway {}, STAR {} (Trans: {}), Approach {}.",
+                "Arrival at {} (Elev {:.0} ft), Runway {}, STAR {}, Approach {}.",
                 snapshot.destination.ident,
                 snapshot.destination.elevation_ft.unwrap_or(0.0),
                 snapshot
@@ -191,17 +191,12 @@ impl FlightdeckToolRegistry {
                     .unwrap_or("DEFAULT"),
                 snapshot
                     .destination
-                    .procedure_name
+                    .star_procedure
                     .as_deref()
                     .unwrap_or("DIRECT"),
                 snapshot
                     .destination
-                    .transition_name
-                    .as_deref()
-                    .unwrap_or("DEFAULT"),
-                snapshot
-                    .destination
-                    .procedure_name
+                    .approach_procedure
                     .as_deref()
                     .unwrap_or("VISUAL")
             )
@@ -215,7 +210,7 @@ impl FlightdeckToolRegistry {
             star_procedure: if is_source_req {
                 None
             } else {
-                snapshot.destination.procedure_name.clone()
+                snapshot.destination.star_procedure.clone()
             },
             star_transition: if is_source_req {
                 None
@@ -225,12 +220,12 @@ impl FlightdeckToolRegistry {
             approach_procedure: if is_source_req {
                 None
             } else {
-                snapshot.destination.procedure_name.clone()
+                snapshot.destination.approach_procedure.clone()
             },
             approach_type: if is_source_req {
                 None
             } else {
-                Some("ILS/RNP".to_string())
+                snapshot.destination.approach_type.clone()
             },
             final_approach_restrictions: snapshot.destination.initial_or_final_restrictions.clone(),
             weather_metar: snapshot.weather_summary.destination_metar.clone(),

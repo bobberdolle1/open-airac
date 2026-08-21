@@ -125,8 +125,8 @@ impl FlightdeckOsAdapter {
         let destination_brief = FlightdeckOsDestinationBrief {
             icao: snapshot.destination.ident.clone(),
             runway: snapshot.destination.selected_runway.clone(),
-            star: snapshot.destination.procedure_name.clone(),
-            approach: snapshot.destination.procedure_name.clone(),
+            star: snapshot.destination.star_procedure.clone(),
+            approach: snapshot.destination.approach_procedure.clone(),
             metar: snapshot.weather_summary.destination_metar.clone(),
             is_source_required: snapshot.destination.is_source_required,
         };

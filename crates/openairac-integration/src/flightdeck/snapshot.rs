@@ -49,6 +49,10 @@ pub struct FlightdeckAirportBrief {
     pub elevation_ft: Option<f64>,
     pub selected_runway: Option<String>,
     pub procedure_name: Option<String>,
+    pub sid_procedure: Option<String>,
+    pub star_procedure: Option<String>,
+    pub approach_procedure: Option<String>,
+    pub approach_type: Option<String>,
     pub transition_name: Option<String>,
     pub initial_or_final_restrictions: Vec<String>,
     pub provider_name: Option<String>,
@@ -315,12 +319,17 @@ impl FlightdeckSnapshotV2 {
             elevation_ft: plan.origin.elevation_ft,
             selected_runway: plan.departure_runway.clone(),
             procedure_name: plan.sid.as_ref().map(|s| s.procedure.name.clone()),
+            sid_procedure: plan.sid.as_ref().map(|s| s.procedure.name.clone()),
+            star_procedure: None,
+            approach_procedure: None,
+            approach_type: None,
             transition_name: plan.sid_transition.clone(),
             initial_or_final_restrictions: dep_restrictions,
             provider_name: plan.active_provider_datasets.first().cloned(),
             is_source_required: false,
             source_required_note: None,
         };
+
         // Destination Brief
         let is_dest_source_req = plan
             .diagnostics
@@ -359,12 +368,20 @@ impl FlightdeckSnapshotV2 {
             elevation_ft: plan.destination.elevation_ft,
             selected_runway: plan.arrival_runway.clone(),
             procedure_name: plan.star.as_ref().map(|s| s.procedure.name.clone()),
+            sid_procedure: None,
+            star_procedure: plan.star.as_ref().map(|s| s.procedure.name.clone()),
+            approach_procedure: plan.approach.as_ref().map(|a| a.procedure.name.clone()),
+            approach_type: plan
+                .approach
+                .as_ref()
+                .map(|a| a.procedure.kind.as_str().to_string()),
             transition_name: plan.star_transition.clone(),
             initial_or_final_restrictions: arr_restrictions,
             provider_name: plan.active_provider_datasets.first().cloned(),
             is_source_required: is_dest_source_req,
             source_required_note: dest_note,
         };
+
         let alternate = plan.alternates.first().map(|alt| FlightdeckAirportBrief {
             ident: alt.ident.clone(),
             iata_code: crate::flightdeck::tools::FlightdeckToolRegistry::resolve_airport_identity(
@@ -376,12 +393,17 @@ impl FlightdeckSnapshotV2 {
             elevation_ft: alt.elevation_ft,
             selected_runway: None,
             procedure_name: None,
+            sid_procedure: None,
+            star_procedure: None,
+            approach_procedure: None,
+            approach_type: None,
             transition_name: None,
             initial_or_final_restrictions: Vec::new(),
             provider_name: plan.active_provider_datasets.first().cloned(),
             is_source_required: false,
             source_required_note: None,
         });
+
         let position = session.last_telemetry.as_ref().map(|t| FlightdeckPosition {
             latitude_deg: t.latitude_deg,
             longitude_deg: t.longitude_deg,
@@ -710,11 +732,11 @@ impl FlightdeckSnapshotV2 {
             format!(
                 "{} / {} / RWY {}",
                 self.destination
-                    .procedure_name
+                    .star_procedure
                     .as_deref()
                     .unwrap_or("DIRECT"),
                 self.destination
-                    .procedure_name
+                    .approach_procedure
                     .as_deref()
                     .unwrap_or("VISUAL"),
                 self.destination.selected_runway.as_deref().unwrap_or("--")
