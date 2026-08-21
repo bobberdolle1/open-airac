@@ -1,85 +1,84 @@
-# ✈️ OpenAIRAC
+# ✈️ OpenAIRAC Core
 
 <div align="center">
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/Language-Rust_2024-orange.svg)](https://www.rust-lang.org/)
 [![NOAA WMM2025](https://img.shields.io/badge/Physics-NOAA_WMM2025-blue.svg)](https://www.ncei.noaa.gov/products/world-magnetic-model)
-[![X-Plane 12](https://img.shields.io/badge/Simulator-X--Plane_12-blue)](https://www.x-plane.com/)
+[![Target: X-Plane & MSFS](https://img.shields.io/badge/Simulators-X--Plane_12_|_MSFS-blue.svg)](https://github.com/bobberdolle1/open-airac/blob/main/docs/SIMULATOR_SETUP.md)
+[![Desktop EFB](https://img.shields.io/badge/Desktop_App-OpenAIRAC_Map-green.svg)](https://github.com/bobberdolle1/openairac-map)
 [![CI](https://github.com/bobberdolle1/open-airac/actions/workflows/ci.yml/badge.svg)](https://github.com/bobberdolle1/open-airac/actions/workflows/ci.yml)
 
-**OpenAIRAC — free/open Navigraph-class navigation-data infrastructure for flight simulation.**
+**OpenAIRAC — open aeronautical navigation data infrastructure and temporal database engine for flight simulation.**
 
-[Architecture](docs/ARCHITECTURE.md) • [Data Sources](docs/DATA_SOURCES.md) • [Roadmap](docs/ROADMAP.md)
+[📥 **OpenAIRAC Map Desktop App**](https://github.com/bobberdolle1/openairac-map) • [📖 **User Guide**](docs/USER_GUIDE.md) • [🏗️ **Architecture**](docs/ARCHITECTURE.md) • [🗄️ **Data Sources**](docs/DATA_SOURCES.md)
 
 </div>
 
 ---
 
-## What OpenAIRAC is
+> ⚠️ **FOR FLIGHT SIMULATION ONLY — NEVER USE FOR REAL-WORLD AVIATION.**  
+> OpenAIRAC is not certified, carries no operational guarantees, and must never be used for real flight planning or aircraft operations.
 
-OpenAIRAC is an open navigation-data **engine**: it ingests public
-navigation datasets, stores them in a canonical temporal database, and
-produces validated simulator navigation data — with the ambition of
-being free/open Navigraph-class infrastructure.
+---
 
-> **OpenAIRAC is for FLIGHT SIMULATION ONLY.** It is not certified,
-> not for real-world navigation, and must never be used for planning or
-> flying real aircraft. The data sources are public datasets (US
-> Government CIFP, OurAirports) that carry no operational guarantees.
-> See [docs/SECURITY.md](docs/SECURITY.md) for the signing model and
-> [docs/DATA_SOURCES.md](docs/DATA_SOURCES.md) for licensing.
+## 🧭 What OpenAIRAC Is
 
-## Why temporal navigation data matters
+OpenAIRAC is an open navigation-data **engine and compilation platform**: it ingests official and open-access aeronautical datasets, stores them in a high-performance canonical temporal SQLite database, executes procedure validation and ATS graph routing, and powers both simulator installations and modern Electronic Flight Bags (EFBs).
 
-Flight-sim navigation data changes on the real-world 28-day AIRAC
-cycle. Traditional tools replace whole datasets by hand. OpenAIRAC
-stores every entity as `(id, valid_from)` revisions with source
-provenance, so the engine can:
+For normal flight-sim users, OpenAIRAC powers **[OpenAIRAC Map](https://github.com/bobberdolle1/openairac-map)** — a standalone desktop EFB, moving map, and flight planner.
 
-* answer "what was the world on any date" (`world_at(t)`),
-* preload the next AIRAC cycle before it becomes effective,
-* diff cycles, validate referential integrity, and roll back cleanly,
-* never fabricate values: every missing field is skipped with a
-  diagnostic, never guessed.
+```text
+  ┌────────────────────────────────────────────────────────────────────────┐
+  │                           Data Ingestion                               │
+  │   FAA CIFP • OurAirports • OpenFlightmaps • France SIA • Local BYOD   │
+  └───────────────────────────────────┬────────────────────────────────────┘
+                                      │
+  ┌───────────────────────────────────▼────────────────────────────────────┐
+  │                   Canonical Temporal Database (SQLite)                 │
+  │      Revisions (id, valid_from) • Provenance Layer • WMM2025 Solver     │
+  └───────────────────────────────────┬────────────────────────────────────┘
+                                      │
+  ┌───────────────────────────────────▼────────────────────────────────────┐
+  │                 Routing Graph & Procedure Validation                   │
+  │    Airway Network (Dijkstra/A*) • ARINC 424 Path Terminators • RNP/RNAV│
+  └───────────────────┬───────────────────────────────┬────────────────────┘
+                      │                               │
+  ┌───────────────────▼──────────────┐  ┌─────────────▼────────────────────┐
+  │       Simulator Exporters        │  │        AI Crew Gateway           │
+  │  X-Plane 12/11 • MSFS • GNS430   │  │   REST API at 127.0.0.1:8989     │
+  │  KLN90B • PMDG • Little Navmap   │  │ FlightdeckOS & Desktop Map EFB   │
+  └──────────────────────────────────┘  └──────────────────────────────────┘
+```
 
-## What actually works today (v1.2 worldwide platform)
+---
 
-OpenAIRAC provides a complete worldwide aeronautical data engine:
+## ⚡ Current Release Truth (Core v2.11.0 / Product 3.3)
 
-* **AIRAC cycle lifecycle**: Automated discovery, confirmed effective date validation, preload scheduling, atomic activation, and temporal rollback.
-* **Worldwide Provider Federation**: Machine-readable provider registry (`data/providers.yaml`), strict redistribution policy enforcement (`PublicRedistribution`, `LocalOnly`, `MetadataOnly`, `Forbidden`), and cryptographic provenance.
-* **Generic AIXM 5.x Ingestion**: Full XML/GML parser for aerodromes, runways, radio navaids, designated points, routes, SIDs, STARs, and instrument approaches.
-* **Local / BYOD Ingestion**: CLI workflows (`openairac import aixm <file>`) allowing personal use of official AIP datasets without accidental public redistribution.
-* **Worldwide Procedure Validation Layer**: Comprehensive semantic and geometric validator detecting sequence gaps, unresolvable fixes, unbound runways, and geometric discontinuities (> 250 NM).
-* **Coverage Inspector & Terminal Doctor**: `openairac coverage [ICAO]` and `openairac doctor-airport <ICAO>` CLI commands with formatted text and machine-readable JSON output.
-* **Multi-Simulator Exporter Suite**:
+* **AIRAC Cycle Lifecycle Engine**: Automated discovery, effective date validation, preload scheduling, atomic activation, and temporal rollback.
+* **Temporal Provenance & Policy Layer**: Machine-readable provider registry (`data/providers.yaml`) with strict policy enforcement (`PublicRedistribution`, `LocalOnly`, `MetadataOnly`, `Forbidden`).
+* **Multi-Provider Data Fusion**: Global baseline fusion incorporating FAA CIFP, OurAirports, OpenFlightmaps, and France SIA datasets.
+* **Worldwide Procedure Engine**: Full ARINC 424 path terminator evaluation (`IF`, `TF`, `CF`, `DF`, `FA`, `CA`, `VA`, `HA`, `HF`, `HM`, `RF`), altitude/speed constraints, and procedure validation.
+* **High-Performance ATS Airway Routing**: Geodesic graph routing solver computing optimal enroute airways with airway directionality and level restrictions.
+* **Local AIP Vault (BYOD)**: Secure local import mechanism (`openairac import aixm <file>`) for official national AIP datasets that require local-only simulation use (such as Russian CAICA).
+* **AI Crew Gateway**: Integrated REST API at `http://127.0.0.1:8989/api/openairac/v1` supplying canonical flight telemetry snapshots (`OpenAiracSnapshotV2`), weather summaries, active legs, descent profiles, and procedure metadata.
+* **Complete Simulator Exporter Suite**:
   - **X-Plane 12 / 11** (`earth_fix.dat`, `earth_nav.dat`, `earth_awy.dat`, `earth_hold.dat`, `earth_aptmeta.dat`, `earth_msa.dat`, `earth_mora.dat`) — **SUPPORTED**
   - **Garmin GNS430 / Classic GPS** (`Airports.txt`, `Navaids.txt`, `Waypoints.txt`, `ATS.txt`, `Proc/<ICAO>.txt`) — **SUPPORTED**
   - **Bendix/King KLN90B GPS** (`APT.DAT`, `NAV.DAT`, `WPT.DAT`, `AWY.DAT`, `FAS.DAT`) — **SUPPORTED**
-  - **Little Navmap** (SQLite v14.29 schema) — **SUPPORTED**
-  - **MSFS 2024 / 2020** (SimpleNavData package layout) — **EXPERIMENTAL**
+  - **Little Navmap / OpenAIRAC Map** (SQLite schema) — **SUPPORTED**
+  - **MSFS 2024 / 2020** (SimpleNavData BGL layout) — **EXPERIMENTAL**
   - **PMDG classic FMC** (`wpNav*.txt`) — **EXPERIMENTAL**
-  - **Aerosoft CRJ / NavDataPro** — **RESEARCH**
-* **Deterministic Release Bundles & Update Channels**: Content-addressed bundles, Ed25519 cryptographic signing, and regional bundle filtering (`world-open`, `us`, `europe-open`).
 
-Run the release gate:
+---
 
-```bash
-cargo test --workspace
-openairac release-gate --db ./data/world.openairac.sqlite --effective 2026-08-13T09:01:00Z --out ./gate
-```
+## 🛡️ Data & Redistribution Policy
 
-### Data sources supported
+OpenAIRAC strictly enforces licensing boundaries:
 
-* **FAA CIFP / ARINC 424** — Full US enroute and terminal procedure semantics.
-* **FAA AIXM 5.1** — US NASR AIXM 5.1 aeronautical data.
-* **OurAirports** — Worldwide airport, runway, and radio navaid basic metadata (CC0).
-* **OpenFlightmaps** — European open VFR and enroute aeronautical data.
-* **DFS Germany Open Data** — German AIP dataset (GeoNutzV).
-* **Eurocontrol EAD (BYOD)** — European AIS database for authenticated personal use.
-* **User BYOD** — Local user-supplied AIXM 5.x and ARINC 424 files.
-* **Navigraph / Jeppesen** — Commercial proprietary: strictly **FORBIDDEN** from ingestion or redistribution.
+1. **Public Redistribution**: Open datasets (FAA CIFP, OurAirports, OpenFlightmaps, France SIA) are freely bundled in official releases.
+2. **Local-Only (BYOD)**: Datasets from national authorities permitted for personal use but without third-party redistribution rights (e.g. Russian CAICA) are supported exclusively via the user's **Local AIP Vault** on their local machine.
+3. **Strictly Forbidden**: Proprietary commercial datasets (Navigraph, Jeppesen, NavDataPro) are **NEVER** ingested, bundled, or redistributed.
 
 ---
 
@@ -89,17 +88,17 @@ openairac release-gate --db ./data/world.openairac.sqlite --effective 2026-08-13
 crates/
 ├── openairac-model/          # Canonical domain entities, provider policies & registry
 ├── openairac-magnetic/       # NOAA WMM2025 geomagnetic solver & runway drift engine
-├── openairac-store/          # Temporal SQLite store with schema migrations (v1-v13)
+├── openairac-store/          # Temporal SQLite store with schema migrations (v1-v19)
 ├── openairac-ingest/         # CIFP ARINC 424, Generic AIXM 5.x & OurAirports parsers
 ├── openairac-procedures/     # ARINC path terminators & Worldwide Procedure Validator
 ├── openairac-routing/        # Canonical airway routing graph (Dijkstra/A*) + geodesics
 ├── openairac-integration/    # Full flight-planning join (procedures + enroute graph)
-├── openairac-service/        # WorldQuery API: coverage inspector & terminal doctor
-├── openairac-bundle/         # Deterministic content-addressed bundles & signing
-├── openairac-export/         # Generic export architecture, target registry & installer
+├── openairac-service/        # WorldQuery API, AI Crew Gateway & HTTP server
+├── openairac-bundle/         # Deterministic content-addressed bundles & Ed25519 signing
+├── openairac-export/         # Generic export architecture & target registry
 ├── openairac-export-xplane/  # X-Plane 12 complete dataset exporter
 ├── openairac-export-msfs/    # MSFS BGL package exporter
-├── openairac-export-lnm/     # Little Navmap SQLite database exporter
+├── openairac-export-lnm/     # Little Navmap / OpenAIRAC Map SQLite database exporter
 ├── openairac-export-pmdg/    # PMDG classic FMC text exporter
 ├── openairac-plugin/         # X-Plane 12 C-ABI plugin for live SQLite status querying
 └── openairac-cli/            # Unified CLI interface
@@ -107,56 +106,19 @@ crates/
 
 ---
 
-## 🚀 CLI Commands
+## 📚 Documentation
 
-### 1. Coverage Inspector & Terminal Doctor
-```bash
-# Inspect worldwide data coverage summary
-openairac coverage
-
-# Inspect airport-specific terminal data, runways, procedures, and source provenance
-openairac coverage EDDF
-openairac coverage EDDF --json
-
-# Run full diagnostic health check on an airport's terminal procedures
-openairac doctor-airport EDDF
-openairac doctor-airport EDDF --json
-```
-
-### 2. Import Local / BYOD AIXM Dataset
-```bash
-openairac import aixm ./data/samples/aixm5_sample.xml --provider BYOD_AIXM --namespace byod
-```
-
-### 3. Build & Sign Deterministic Bundles
-```bash
-# Build official public release bundle (fails closed if local-only/forbidden sources exist)
-openairac bundle build --db ./data/world.openairac.sqlite --out ./bundles
-
-# Verify bundle integrity and authenticity
-openairac bundle verify --bundle ./bundles/<bundle_id>
-```
-
-### 4. Export Simulator Navigation Datasets
-```bash
-# Export X-Plane 12 Custom Data
-openairac export xplane --out ./dist/xplane
-
-# Export Garmin GNS430 / Classic GPS
-openairac export gns430 --out ./dist/gns430
-
-# Export Bendix/King KLN90B GPS (.DAT files)
-openairac export kln90b --out ./dist/kln90b
-
-# Export Little Navmap SQLite Database
-openairac export lnm --out ./dist/lnm
-
-# Export MSFS SimpleNavData Package
-openairac export msfs --out ./dist/msfs
-```
+* [📖 **User Guide**](docs/USER_GUIDE.md) — Master navigation and software guide.
+* [🚀 **First Flight Tutorial**](docs/FIRST_FLIGHT_TUTORIAL.md) — Getting started with public data.
+* [🎮 **Simulator Setup Guide**](docs/SIMULATOR_SETUP.md) — X-Plane and MSFS connection instructions.
+* [🗄️ **Data & Providers Guide**](docs/DATA_AND_PROVIDERS.md) — AIRAC cycles and provider federation.
+* [🇷🇺 **Russia / CAICA Guide**](docs/RUSSIA_CAICA_GUIDE.md) — Local AIP Vault import for Russian AIP.
+* [🤖 **AI Crew Gateway**](docs/AI_CREW_GATEWAY.md) — HTTP API for FlightdeckOS and companion apps.
+* [🔒 **Privacy & Security**](docs/PRIVACY_AND_SECURITY.md) — Data isolation and security model.
 
 ---
 
-## 📄 License
+## 📜 License
 
 Distributed under the **MIT License**. See [`LICENSE`](LICENSE) for details.
+OpenAIRAC Map desktop application is distributed under the **GNU General Public License v3.0 (GPLv3)**.
