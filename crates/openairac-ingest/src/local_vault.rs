@@ -123,6 +123,55 @@ impl LocalAipVault {
         std::fs::write(&manifest_path, json)?;
         Ok(())
     }
+    /// Stage a local file into the vault's staging area.
+    pub fn stage_file(
+        &self,
+        provider_name: &str,
+        file_path: &std::path::Path,
+    ) -> Result<VaultSourceFile> {
+        self.init()?;
+        let bytes = std::fs::read(file_path)
+            .with_context(|| format!("Reading source file: {:?}", file_path))?;
+        let sha256 = crate::provider::sha256_hex(&bytes);
+        let file_name = file_path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        let staging_dest = self
+            .vault_root
+            .join("staging")
+            .join(format!("{provider_name}_{file_name}"));
+        std::fs::write(&staging_dest, &bytes)?;
+
+        Ok(VaultSourceFile {
+            relative_path: file_name,
+            sha256,
+            size_bytes: bytes.len() as u64,
+            source_uri: Some(file_path.to_string_lossy().to_string()),
+            format: "unknown".to_string(),
+        })
+    }
+
+    /// Stage a whole directory into the vault.
+    pub fn stage_directory(
+        &self,
+        provider_name: &str,
+        dir_path: &std::path::Path,
+    ) -> Result<Vec<VaultSourceFile>> {
+        self.init()?;
+        let mut files = Vec::new();
+        if dir_path.is_dir() {
+            for entry in std::fs::read_dir(dir_path)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.is_file() {
+                    files.push(self.stage_file(provider_name, &path)?);
+                }
+            }
+        }
+        Ok(files)
+    }
 
     /// Rollback an active provider package to a previously active revision.
     pub fn rollback_provider(&self, provider_name: &str) -> Result<Option<VaultPackageManifest>> {

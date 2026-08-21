@@ -1,9 +1,11 @@
 pub mod airac;
 pub mod fra;
 pub mod policy;
+pub mod provider;
 pub use airac::*;
 pub use fra::*;
 pub use policy::*;
+pub use provider::*;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

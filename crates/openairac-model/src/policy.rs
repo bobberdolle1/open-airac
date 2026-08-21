@@ -634,7 +634,10 @@ impl ProviderRegistry {
             redistribution: RedistributionPermission::LocalOnly,
             derivative_work_allowed: true,
             attribution_required: true,
-            attribution_notice: Some("ФГУП «Госкорпорация по ОрВД» / ЦАИ".to_string()),
+            attribution_notice: Some(
+                "ФГУП «Госкорпорация по ОрВД» / ЦАИ (Использование только в личных целях / Local Personal Use Only)"
+                    .to_string(),
+            ),
             is_local_only: true,
             coverage: ProviderEntityCoverage {
                 airports: true,
@@ -645,15 +648,45 @@ impl ProviderRegistry {
                 sids: true,
                 stars: true,
                 approaches: true,
-                lpv_fas: true,
+                lpv_fas: false,
                 msa: true,
                 mora: false,
             },
-            source_uri_pattern: Some("http://www.caica.ru/".to_string()),
+            source_uri_pattern: Some("https://www.caica.ru".to_string()),
             notes: Some(
-                "Comprehensive Russian Federation aeronautical data provider in Local AIP Vault."
+                "Official Russian AIP coding tables and ATS Route Manual for local BYOD ingestion."
                     .to_string(),
             ),
+        });
+
+        reg.register(ProviderPolicy {
+            name: "RU_CAICA_LOCAL".to_string(),
+            namespace: "ru_caica_local".to_string(),
+            jurisdiction: "RU".to_string(),
+            authority: "ФАВТ / Росавиация / ЦАИ".to_string(),
+            format: DatasetFormat::CaicaHtml,
+            airac_cadence: Some("28-day AIRAC".to_string()),
+            license_id: "CAICA-TermsOfUse".to_string(),
+            redistribution: RedistributionPermission::LocalOnly,
+            derivative_work_allowed: true,
+            attribution_required: true,
+            attribution_notice: Some("ЦАИ / Росавиация (Local BYOD)".to_string()),
+            is_local_only: true,
+            coverage: ProviderEntityCoverage {
+                airports: true,
+                runways: true,
+                navaids: true,
+                fixes: true,
+                airways: true,
+                sids: true,
+                stars: true,
+                approaches: true,
+                lpv_fas: false,
+                msa: true,
+                mora: false,
+            },
+            source_uri_pattern: Some("https://www.caica.ru".to_string()),
+            notes: Some("Local AIP Vault provider alias for CAICA Russia.".to_string()),
         });
 
         // 5g. Russian Federation ARNAD Commercial Database (Local-Only / BYOD)

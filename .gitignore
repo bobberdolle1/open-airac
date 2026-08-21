@@ -35,3 +35,6 @@ tools/test-logs/
 tools/upstream_lnm_schema.sql
 data/charts_cache/
 tools/faa_metafile_sample.xml
+data/caica_raw/
+data/vault/
+data/local_vault/

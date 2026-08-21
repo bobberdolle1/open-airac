@@ -6,10 +6,12 @@ pub mod caica_rsbn;
 pub mod cifp_discovery;
 pub mod faa_cifp;
 pub mod local_vault;
+pub mod merge_engine;
 pub mod ourairports;
 pub mod provider;
 pub mod registry;
 pub mod sia_procedures;
+pub mod validation;
 pub mod world_composer;
 
 pub use caica_ats::{

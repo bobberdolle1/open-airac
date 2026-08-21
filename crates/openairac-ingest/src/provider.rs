@@ -12,6 +12,112 @@ pub fn sha256_hex(content: &[u8]) -> String {
     hasher.update(content);
     format!("{:x}", hasher.finalize())
 }
+use crate::validation::ProviderValidationReport;
+use openairac_model::{
+    ProviderCoverageMetrics, ProviderDescriptor, ProviderId, ProviderProvenance,
+};
+
+/// A snapshot of raw source material acquired from an official authority, open URL, or Local AIP Vault.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RawSourceSnapshot {
+    pub provider_id: ProviderId,
+    pub source_uri: String,
+    pub content_sha256: String,
+    pub retrieved_at: DateTime<Utc>,
+    pub airac_cycle: Option<String>,
+    pub effective_from: Option<DateTime<Utc>>,
+    pub effective_until: Option<DateTime<Utc>>,
+    pub raw_bytes: Vec<u8>,
+    pub files: BTreeMap<String, Vec<u8>>,
+}
+
+impl RawSourceSnapshot {
+    pub fn new(provider_id: ProviderId, source_uri: impl Into<String>, raw_bytes: Vec<u8>) -> Self {
+        let checksum = sha256_hex(&raw_bytes);
+        Self {
+            provider_id,
+            source_uri: source_uri.into(),
+            content_sha256: checksum,
+            retrieved_at: Utc::now(),
+            airac_cycle: None,
+            effective_from: None,
+            effective_until: None,
+            raw_bytes,
+            files: BTreeMap::new(),
+        }
+    }
+
+    pub fn with_file(mut self, relative_path: impl Into<String>, bytes: Vec<u8>) -> Self {
+        self.files.insert(relative_path.into(), bytes);
+        self
+    }
+
+    pub fn with_cycle(
+        mut self,
+        cycle: impl Into<String>,
+        effective_from: Option<DateTime<Utc>>,
+        effective_until: Option<DateTime<Utc>>,
+    ) -> Self {
+        self.airac_cycle = Some(cycle.into());
+        self.effective_from = effective_from;
+        self.effective_until = effective_until;
+        self
+    }
+}
+
+/// Generic container for canonical aeronautical entities produced by a provider parser.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CanonicalProviderDataset {
+    pub provider_id: ProviderId,
+    pub version_tag: String,
+    pub airac_cycle: Option<String>,
+    pub effective_from: Option<DateTime<Utc>>,
+    pub effective_until: Option<DateTime<Utc>>,
+    pub metrics: ProviderCoverageMetrics,
+    pub provenance_records: Vec<ProviderProvenance>,
+    pub raw_entities_json: BTreeMap<String, String>,
+}
+
+impl CanonicalProviderDataset {
+    pub fn new(provider_id: ProviderId, version_tag: impl Into<String>) -> Self {
+        Self {
+            provider_id,
+            version_tag: version_tag.into(),
+            airac_cycle: None,
+            effective_from: None,
+            effective_until: None,
+            metrics: ProviderCoverageMetrics::default(),
+            provenance_records: Vec::new(),
+            raw_entities_json: BTreeMap::new(),
+        }
+    }
+}
+
+/// Generic Provider Adapter SDK interface.
+pub trait ProviderAdapter: Send + Sync {
+    /// Return the immutable provider descriptor.
+    fn descriptor(&self) -> &ProviderDescriptor;
+
+    /// Discover available source publications / URLs / cycles.
+    fn discover(&self) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+
+    /// Acquire raw source material (from URL, local file, or Local AIP Vault).
+    fn acquire(&self, source_hint: Option<&str>) -> Result<RawSourceSnapshot>;
+
+    /// Parse the raw source snapshot into canonical aviation entities.
+    fn parse(&self, snapshot: &RawSourceSnapshot) -> Result<CanonicalProviderDataset>;
+
+    /// Run generic and provider-specific semantic/geometric validation.
+    fn validate(&self, dataset: &CanonicalProviderDataset) -> Result<ProviderValidationReport> {
+        let report = ProviderValidationReport::new(
+            self.descriptor().name.clone(),
+            dataset.version_tag.clone(),
+        );
+        Ok(report)
+    }
+}
 
 /// Explicit, unambiguous fetch target for cycle-aware providers.
 ///

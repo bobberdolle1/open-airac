@@ -748,6 +748,22 @@ impl WorldQuery {
     pub fn navaids(&self, date: DateTime<Utc>) -> Result<Vec<CanonicalNavaid>> {
         self.store.query_navaids_at(date)
     }
+    /// List all registered aeronautical data providers in the central registry.
+    pub fn list_providers(&self) -> Vec<openairac_model::ProviderDescriptor> {
+        openairac_model::ProviderRegistryV2::default_registry()
+            .list()
+            .into_iter()
+            .cloned()
+            .collect()
+    }
+
+    /// Lookup a single provider descriptor by name or identifier.
+    pub fn get_provider(&self, id: &str) -> Option<openairac_model::ProviderDescriptor> {
+        let pid = openairac_model::ProviderId::new(id);
+        openairac_model::ProviderRegistryV2::default_registry()
+            .get(&pid)
+            .cloned()
+    }
 }
 
 pub const OPENAIRAC_CORE_VERSION: &str = "2.0.0";
