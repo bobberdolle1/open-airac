@@ -16,7 +16,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use openairac_model::{CanonicalAirport, CanonicalProcedureLeg, ProviderId, ProviderProvenance};
 use openairac_procedures::{Procedure, ProcedureKind, ProcedureLeg};
-use openairac_routing::random_flight::AircraftProfile;
+pub use openairac_routing::random_flight::AircraftProfile;
 use openairac_routing::{
     AircraftCapabilities, AirwayGraph, Coordinate, DirectRoute, Exclusion, RouteRequest,
 };
@@ -44,6 +44,12 @@ pub enum FlightPlanLegKind {
     /// Missed approach procedure leg.
     Missed,
 }
+pub mod execution;
+pub use execution::{
+    CompletedFlightRecord, FlightExecutionEvent, FlightExecutionSession, FlightPhase,
+    FlightPhaseEngine, FlightProgress, TelemetryUpdate,
+};
+
 
 impl FlightPlanLegKind {
     pub fn as_str(&self) -> &'static str {

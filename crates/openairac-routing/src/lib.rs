@@ -59,6 +59,86 @@ impl Coordinate {
     pub fn distance_nm(&self, other: &Coordinate) -> f64 {
         Geodesic::distance(self.to_geo_point(), other.to_geo_point()) / 1852.0
     }
+
+    /// Initial true bearing to another coordinate in degrees [0.0, 360.0).
+    pub fn bearing_to(&self, other: &Coordinate) -> f64 {
+        let b = Geodesic::bearing(self.to_geo_point(), other.to_geo_point());
+        (b + 360.0) % 360.0
+    }
+
+    /// Cross-track deviation in nautical miles relative to the great-circle path from `start` to `end`.
+    /// Positive = right of track, Negative = left of track.
+    pub fn cross_track_distance_nm(start: &Coordinate, end: &Coordinate, current: &Coordinate) -> f64 {
+        let seg_dist = start.distance_nm(end);
+        if seg_dist < 1e-6 {
+            return 0.0;
+        }
+        let r = 6371000.0 / 1852.0; // Earth mean radius in nautical miles (~3440.065)
+        let d13 = start.distance_nm(current) / r;
+        let theta13 = start.bearing_to(current).to_radians();
+        let theta12 = start.bearing_to(end).to_radians();
+        let xt = (d13.sin() * (theta13 - theta12).sin()).asin() * r;
+        if xt.is_nan() { 0.0 } else { xt }
+    }
+
+    /// Along-track distance in nautical miles from `start` along the great-circle track towards `end`.
+    /// Can be negative if `current` is behind `start`.
+    pub fn along_track_distance_nm(start: &Coordinate, end: &Coordinate, current: &Coordinate) -> f64 {
+        let seg_dist = start.distance_nm(end);
+        if seg_dist < 1e-6 {
+            return 0.0;
+        }
+        let r = 6371000.0 / 1852.0;
+        let d13 = start.distance_nm(current);
+        let xt = Self::cross_track_distance_nm(start, end, current);
+        let d13_rad = d13 / r;
+        let xt_rad = xt / r;
+
+        let cos_at = d13_rad.cos() / xt_rad.cos();
+        let at_mag = cos_at.clamp(-1.0, 1.0).acos() * r;
+
+        // Determine if along-track progress is forward or backward relative to segment bearing
+        let b_start_cur = start.bearing_to(current);
+        let b_start_end = start.bearing_to(end);
+        let mut diff = (b_start_cur - b_start_end).abs();
+        if diff > 180.0 {
+            diff = 360.0 - diff;
+        }
+        if diff > 90.0 {
+            -at_mag
+        } else {
+            at_mag
+        }
+    }
+
+    /// Intermediate coordinate along great circle path at given fraction [0.0, 1.0].
+    pub fn intermediate_point(start: &Coordinate, end: &Coordinate, fraction: f64) -> Coordinate {
+        let f = fraction.clamp(0.0, 1.0);
+        let lat1 = start.latitude_deg.to_radians();
+        let lon1 = start.longitude_deg.to_radians();
+        let lat2 = end.latitude_deg.to_radians();
+        let lon2 = end.longitude_deg.to_radians();
+
+        let r = 6371000.0 / 1852.0;
+        let d = start.distance_nm(end) / r;
+        if d < 1e-9 {
+            return *start;
+        }
+
+        let a = ((1.0 - f) * d).sin() / d.sin();
+        let b = (f * d).sin() / d.sin();
+
+        let x = a * lat1.cos() * lon1.cos() + b * lat2.cos() * lon2.cos();
+        let y = a * lat1.cos() * lon1.sin() + b * lat2.cos() * lon2.sin();
+        let z = a * lat1.sin() + b * lat2.sin();
+
+        let lat = z.atan2((x * x + y * y).sqrt()).to_degrees();
+        let lon = y.atan2(x).to_degrees();
+        Coordinate {
+            latitude_deg: lat,
+            longitude_deg: lon,
+        }
+    }
 }
 
 /// Direct Geodesic Route calculation result
