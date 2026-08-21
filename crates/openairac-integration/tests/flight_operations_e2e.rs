@@ -363,7 +363,7 @@ fn setup_test_world_store() -> (WorldStore, DateTime<Utc>) {
         ("BURUD", 45.6000, 34.4000, "UR"),
         ("FF001", 45.1000, 34.0000, "UR"),
         ("FF080", 45.2000, 34.0500, "UR"),
-        ("GUKAN", 43.1333, 40.3000, "UR"),
+        ("BINOL", 43.3333, 39.7500, "UR"),
         ("SU", 42.8600, 41.1300, "UR"),
         ("OPALE", 49.3000, 2.9000, "LF"),
         ("MN080", 43.6000, 7.1500, "LF"),
@@ -393,7 +393,7 @@ fn setup_test_world_store() -> (WorldStore, DateTime<Utc>) {
         ("B210", "BINBA", "UN", "IN", "UN", 2),
         ("W109", "EMGAS", "UU", "BURUD", "UR", 1),
         ("W109", "BURUD", "UR", "NL", "UR", 2),
-        ("G247", "GUKAN", "UR", "SU", "UR", 1),
+        ("G247", "BINOL", "UR", "SU", "UR", 1),
     ];
 
     for (r_ident, f_ident, f_reg, t_ident, t_reg, seq) in airway_legs {
@@ -540,11 +540,11 @@ fn setup_test_world_store() -> (WorldStore, DateTime<Utc>) {
         (
             "URSS",
             'D',
-            "GUKAN 1A",
-            "GUKAN",
+            "BINOL 1A",
+            "BINOL",
             "TF",
             10,
-            Some(64.0),
+            Some(220.0),
             Some(12.0),
             Some(10000),
             Some(230),
@@ -859,7 +859,7 @@ fn test_abkhazia_golden_e2e_urss_to_uras_sukhumi() {
     assert_eq!(plan.origin.ident, "URSS");
     assert_eq!(plan.destination.ident, "URAS");
 
-    // SID: GUKAN 1A
+    // SID: BINOL 1A (Real CAICA SID for URSS Sochi)
     assert!(plan.sid.is_some());
     assert!(
         plan.sid
@@ -867,9 +867,8 @@ fn test_abkhazia_golden_e2e_urss_to_uras_sukhumi() {
             .unwrap()
             .procedure
             .name
-            .contains("GUKAN 1A")
+            .contains("BINOL 1A")
     );
-
     assert!(plan.validation.is_flyable);
 }
 
@@ -910,6 +909,11 @@ fn test_cross_airport_collision_prevention() {
     assert_eq!(res_ug28.entity_id.as_str(), "aerodrome_bolshiye_shiraki");
     assert_ne!(res_ug28.entity_id, gudauta.entity_id);
     assert_ne!(res_ug28.entity_id, res_ug29.entity_id);
+
+    // 3. Pskhu must resolve via exact baseline identifier GE-0015, NOT UG28
+    let pskhu = reg.resolve("GE-0015").expect("resolve GE-0015");
+    assert_eq!(pskhu.entity_id.as_str(), "aerodrome_pskhu");
+    assert_ne!(pskhu.entity_id, res_ug28.entity_id);
 }
 
 #[test]

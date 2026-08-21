@@ -115,6 +115,8 @@ impl AerodromeIdentifierType {
 pub enum AerodromeIdentityStatus {
     /// Currently active and asserted in the provider's active publication.
     CurrentInProvider,
+    /// Explicitly not listed in this provider's active location indicator directory.
+    NotListedInProvider,
     /// Legacy code supported for backwards compatibility.
     Legacy,
     /// Historical code no longer published by the primary authority.
@@ -131,6 +133,7 @@ impl AerodromeIdentityStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::CurrentInProvider => "current_in_provider",
+            Self::NotListedInProvider => "not_listed_in_provider",
             Self::Legacy => "legacy",
             Self::Historical => "historical",
             Self::SimulatorAlias => "simulator_alias",
@@ -394,13 +397,23 @@ impl MultiIdentityRegistry {
             provider_id: ProviderId::ourairports(),
             identifier: "UGSS".to_string(),
             identifier_type: AerodromeIdentifierType::IcaoLegacy,
-            status: AerodromeIdentityStatus::Legacy,
+            status: AerodromeIdentityStatus::CurrentInProvider,
             name: "Sukhumi Babushara Airport".to_string(),
             valid_from: None,
             valid_to: None,
-            source:
-                "OurAirports / Historical International Record (Not in active 2026 Georgian AIP)"
-                    .to_string(),
+            source: "OurAirports Baseline Dataset (Current in OurAirports)".to_string(),
+            provenance: None,
+        })
+        .add_identity(AerodromeIdentity {
+            entity_id: AerodromeEntityId::sukhumi_babushara(),
+            provider_id: ProviderId::new("georgia_ais"),
+            identifier: "UGSS".to_string(),
+            identifier_type: AerodromeIdentifierType::IcaoLegacy,
+            status: AerodromeIdentityStatus::NotListedInProvider,
+            name: "Sukhumi (Not listed in active 2026 Georgian AIP GEN 2.4)".to_string(),
+            valid_from: None,
+            valid_to: None,
+            source: "Georgian AIP GEN 2.4 Location Indicators".to_string(),
             provenance: None,
         })
         .add_identity(AerodromeIdentity {
@@ -424,11 +437,10 @@ impl MultiIdentityRegistry {
             name: "Sukhumi Historical Keyword / Secondary Code".to_string(),
             valid_from: None,
             valid_to: None,
-            source: "OurAirports Secondary Identifier".to_string(),
+            source: "OurAirports Secondary Identifier Mapping".to_string(),
             provenance: None,
         });
         reg.register(sukhumi);
-
         // 5. Gudauta (Bombora Air Base / UGSG / UG23)
         let gudauta = PhysicalAerodrome::new(
             AerodromeEntityId::gudauta(),
@@ -509,6 +521,29 @@ impl MultiIdentityRegistry {
             provenance: None,
         });
         reg.register(shiraki);
+
+        // 8. Pskhu Mountain Airfield (GE-0015)
+        let pskhu = PhysicalAerodrome::new(
+            AerodromeEntityId::new("aerodrome_pskhu"),
+            "Pskhu Mountain Airfield",
+            "GE-0015",
+            43.3764,
+            40.8019,
+        )
+        .with_elevation(2040.0)
+        .add_identity(AerodromeIdentity {
+            entity_id: AerodromeEntityId::new("aerodrome_pskhu"),
+            provider_id: ProviderId::ourairports(),
+            identifier: "GE-0015".to_string(),
+            identifier_type: AerodromeIdentifierType::LocalAipCode,
+            status: AerodromeIdentityStatus::CurrentInProvider,
+            name: "Pskhu Mountain Landing Site".to_string(),
+            valid_from: None,
+            valid_to: None,
+            source: "OurAirports Baseline Identifier GE-0015".to_string(),
+            provenance: None,
+        });
+        reg.register(pskhu);
         reg
     }
 }
