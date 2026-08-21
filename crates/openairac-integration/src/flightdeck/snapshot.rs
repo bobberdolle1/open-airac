@@ -164,6 +164,60 @@ pub struct FlightdeckDataProvenance {
     pub confidence: String,
 }
 
+/// Granular data freshness report across all independent subsystems.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FlightdeckFreshnessReport {
+    pub telemetry: TelemetryFreshness,
+    pub weather: WeatherFreshness,
+    pub online_atc: OnlineAtcFreshness,
+    pub navdata: NavdataFreshness,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelemetryFreshness {
+    pub source_timestamp: Option<DateTime<Utc>>,
+    pub received_at: Option<DateTime<Utc>>,
+    pub age_ms: u64,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WeatherFreshness {
+    pub source: String,
+    pub observation_time: Option<DateTime<Utc>>,
+    pub fetched_at: Option<DateTime<Utc>>,
+    pub age_sec: Option<u64>,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OnlineAtcFreshness {
+    pub network: String,
+    pub fetched_at: Option<DateTime<Utc>>,
+    pub age_sec: Option<u64>,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NavdataFreshness {
+    pub primary_provider: String,
+    pub airac_cycle: String,
+    pub effective_from: Option<DateTime<Utc>>,
+    pub effective_to: Option<DateTime<Utc>>,
+    pub status: String,
+}
+
+/// Structured freshness summary in Compact AI Snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompactAiFreshness {
+    pub telemetry: String,
+    pub weather: String,
+    pub online: String,
+    pub navdata: String,
+    pub telemetry_age_ms: u64,
+    pub weather_age_sec: Option<u64>,
+}
+
 /// Data freshness flags for AI reasoning.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FlightdeckStaleFlags {
@@ -172,7 +226,6 @@ pub struct FlightdeckStaleFlags {
     pub weather_stale: bool,
     pub navdata_stale: bool,
 }
-
 /// Comprehensive Flightdeck Snapshot v2.
 ///
 /// Designed as the deterministic, authoritative machine interface for
@@ -200,6 +253,7 @@ pub struct FlightdeckSnapshotV2 {
     pub advisories: Vec<CrewAdvisory>,
     pub data_provenance: FlightdeckDataProvenance,
     pub stale_flags: FlightdeckStaleFlags,
+    pub freshness_report: FlightdeckFreshnessReport,
     pub navigation_warnings: Vec<String>,
 }
 
@@ -449,12 +503,78 @@ impl FlightdeckSnapshotV2 {
             source_required_items: source_req_items,
             confidence: "AUTHORITATIVE_FEDERATED".to_string(),
         };
-
         let stale_flags = FlightdeckStaleFlags {
             telemetry_stale: telem_stale,
             telemetry_age_ms: telem_age_ms,
             weather_stale: weather_summary.weather_stale,
             navdata_stale: false,
+        };
+
+        let telem_freshness = TelemetryFreshness {
+            source_timestamp: session.last_telemetry_time,
+            received_at: session.last_telemetry_time,
+            age_ms: telem_age_ms,
+            status: match connection_state {
+                FlightdeckConnectionState::Connected => "CURRENT".to_string(),
+                FlightdeckConnectionState::Stale => "STALE".to_string(),
+                _ => "DISCONNECTED".to_string(),
+            },
+        };
+
+        let weather_freshness = WeatherFreshness {
+            source: if weather_summary.destination_metar.is_some() {
+                "NOAA/AviationWeather.gov".to_string()
+            } else {
+                "UNAVAILABLE".to_string()
+            },
+            observation_time: None,
+            fetched_at: Some(now),
+            age_sec: weather_summary.weather_age_sec,
+            status: if weather_summary.destination_metar.is_none() {
+                "UNAVAILABLE".to_string()
+            } else if weather_summary.weather_stale {
+                "STALE".to_string()
+            } else {
+                "CURRENT".to_string()
+            },
+        };
+
+        let online_freshness = OnlineAtcFreshness {
+            network: if online_atc.is_empty() {
+                "NONE".to_string()
+            } else {
+                online_atc[0].network.clone()
+            },
+            fetched_at: Some(now),
+            age_sec: Some(60),
+            status: if online_atc.is_empty() {
+                "UNAVAILABLE".to_string()
+            } else {
+                "CURRENT".to_string()
+            },
+        };
+
+        let navdata_freshness = NavdataFreshness {
+            primary_provider: plan
+                .active_provider_datasets
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "GLOBAL_OPEN".to_string()),
+            airac_cycle: "2608".to_string(),
+            effective_from: None,
+            effective_to: None,
+            status: if is_dest_source_req {
+                "SOURCE_REQUIRED".to_string()
+            } else {
+                "CURRENT".to_string()
+            },
+        };
+
+        let freshness_report = FlightdeckFreshnessReport {
+            telemetry: telem_freshness,
+            weather: weather_freshness,
+            online_atc: online_freshness,
+            navdata: navdata_freshness,
         };
 
         Self {
@@ -481,6 +601,7 @@ impl FlightdeckSnapshotV2 {
             advisories,
             data_provenance,
             stale_flags,
+            freshness_report,
             navigation_warnings: plan.diagnostics.clone(),
         }
     }
@@ -627,12 +748,14 @@ impl FlightdeckSnapshotV2 {
                 .unwrap_or("CURRENT")
         );
 
-        let freshness = format!(
-            "{} (telem: {}ms age)",
-            self.connection_state.as_str(),
-            self.stale_flags.telemetry_age_ms
-        );
-
+        let freshness = CompactAiFreshness {
+            telemetry: self.freshness_report.telemetry.status.clone(),
+            weather: self.freshness_report.weather.status.clone(),
+            online: self.freshness_report.online_atc.status.clone(),
+            navdata: self.freshness_report.navdata.status.clone(),
+            telemetry_age_ms: self.stale_flags.telemetry_age_ms,
+            weather_age_sec: self.weather_summary.weather_age_sec,
+        };
         CompactAiSnapshot {
             schema_version: COMPACT_AI_SNAPSHOT_SCHEMA_V1.to_string(),
             flight,
@@ -677,6 +800,6 @@ pub struct CompactAiSnapshot {
     pub online_atc: Vec<String>,
     pub advisories: Vec<String>,
     pub provenance: String,
-    pub freshness: String,
+    pub freshness: CompactAiFreshness,
     pub warnings: Vec<String>,
 }

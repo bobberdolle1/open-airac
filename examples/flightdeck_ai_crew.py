@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-OpenAIRAC 3.2 — FlightdeckOS & AI Crew Gateway Developer Example.
+OpenAIRAC 3.2 — AI Crew Gateway Developer Example.
 
 Demonstrates deterministic interaction between an AI flight crew consumer
 and OpenAIRAC Map / Core running on localhost.
@@ -134,14 +134,21 @@ def ask_ai_crew(question: str, snapshot: dict) -> dict:
         }
         
     elif "current" in q or "fresh" in q or "stale" in q:
-        stale = snapshot.get("stale_flags", {})
-        conn = snapshot.get("connection_state", "DISCONNECTED")
-        telem_age = stale.get("telemetry_age_ms", 0)
-        answer = f"System status: {conn}. Telemetry packet age: {telem_age} ms. Telemetry stale: {stale.get('telemetry_stale', False)}."
+        freshness = snapshot.get("freshness", {})
+        if isinstance(freshness, dict):
+            telem_status = freshness.get("telemetry", "UNKNOWN")
+            wx_status = freshness.get("weather", "UNKNOWN")
+            online_status = freshness.get("online", "UNKNOWN")
+            nav_status = freshness.get("navdata", "UNKNOWN")
+            age_ms = freshness.get("telemetry_age_ms", 0)
+            answer = f"Data freshness: Telemetry is {telem_status} ({age_ms} ms age), Weather is {wx_status}, Online ATC is {online_status}, Navdata is {nav_status}."
+        else:
+            conn = snapshot.get("connection_state", "DISCONNECTED")
+            answer = f"System status: {conn}."
         return {
             "question": question,
             "answer": answer,
-            "evidence": stale
+            "evidence": freshness
         }
         
     else:
@@ -154,7 +161,7 @@ def ask_ai_crew(question: str, snapshot: dict) -> dict:
 
 def main():
     print("================================================================================")
-    print("OpenAIRAC 3.2 — FlightdeckOS & AI Crew Integration Demo")
+    print("OpenAIRAC 3.2 — AI Crew Gateway Integration Demo")
     print("================================================================================")
     
     # 1. Fetch flightdeck snapshot
@@ -180,6 +187,14 @@ def main():
             "descent_profile": {"tod_distance_nm": 42.5, "profile_status": "CRUISE_LEVEL", "required_descent_rate_fpm": -1850.0, "profile_deviation_ft": 0.0},
             "weather_summary": {"destination_metar": "URFF 19012KT 9999 SCT030 22/14 Q1013", "destination_runway_wind": {"runway_ident": "19R", "headwind_kts": 12.0, "crosswind_kts": 0.0, "is_tailwind": False, "is_recommended": True}},
             "advisories": [],
+            "freshness": {
+                "telemetry": "CURRENT",
+                "weather": "CURRENT",
+                "online": "CURRENT",
+                "navdata": "CURRENT",
+                "telemetry_age_ms": 150,
+                "weather_age_sec": 120
+            },
             "stale_flags": {"telemetry_stale": False, "telemetry_age_ms": 150}
         }
     
@@ -190,7 +205,7 @@ def main():
         "When is TOD?",
         "What's the weather at destination?",
         "What STAR are we flying?",
-        "Is our telemetry current?"
+        "Is our data current?"
     ]
     
     for q in questions:

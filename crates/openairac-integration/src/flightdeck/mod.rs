@@ -18,11 +18,13 @@ pub use events::{
     FlightEventStream, FlightEventType, FlightStateDelta, FlightStateDeltaDetector, FlightdeckEvent,
 };
 pub use snapshot::{
-    COMPACT_AI_SNAPSHOT_SCHEMA_V1, CompactAiSnapshot, FLIGHTDECK_SNAPSHOT_SCHEMA_V2,
-    FlightdeckActiveLeg, FlightdeckAircraftProfile, FlightdeckAirportBrief,
-    FlightdeckConnectionState, FlightdeckConstraint, FlightdeckDataProvenance,
-    FlightdeckDescentProfile, FlightdeckNavGeometry, FlightdeckOnlineAtc, FlightdeckPosition,
-    FlightdeckRunwayWind, FlightdeckSnapshotV2, FlightdeckStaleFlags, FlightdeckWeatherSummary,
+    COMPACT_AI_SNAPSHOT_SCHEMA_V1, CompactAiFreshness, CompactAiSnapshot,
+    FLIGHTDECK_SNAPSHOT_SCHEMA_V2, FlightdeckActiveLeg, FlightdeckAircraftProfile,
+    FlightdeckAirportBrief, FlightdeckConnectionState, FlightdeckConstraint,
+    FlightdeckDataProvenance, FlightdeckDescentProfile, FlightdeckFreshnessReport,
+    FlightdeckNavGeometry, FlightdeckOnlineAtc, FlightdeckPosition, FlightdeckRunwayWind,
+    FlightdeckSnapshotV2, FlightdeckStaleFlags, FlightdeckWeatherSummary, NavdataFreshness,
+    OnlineAtcFreshness, TelemetryFreshness, WeatherFreshness,
 };
 pub use tools::{
     FlightdeckError, FlightdeckToolRegistry, ProviderScopedIdentity, ResolvedAirportIdentity,

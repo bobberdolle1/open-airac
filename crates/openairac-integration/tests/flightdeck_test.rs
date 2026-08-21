@@ -367,3 +367,73 @@ fn test_airport_multi_identity_and_source_required_canary() {
     assert!(arr_brief.approach_procedure.is_none());
     assert!(arr_brief.briefing_text.contains("SOURCE_REQUIRED"));
 }
+
+#[test]
+fn test_multi_source_independent_freshness_aging() {
+    let plan = create_test_flight_plan("UUEE", "URFF");
+    let mut session = FlightExecutionSession::new(plan);
+
+    // 1. All sources fresh
+    let telem = TelemetryUpdate {
+        timestamp: Utc::now(),
+        latitude_deg: 52.41,
+        longitude_deg: 37.89,
+        altitude_msl_ft: 36000.0,
+        altitude_agl_ft: Some(35400.0),
+        groundspeed_kts: 460.0,
+        track_true_deg: 195.0,
+        vertical_speed_fpm: 0.0,
+        on_ground: false,
+        paused: false,
+        sim_rate: 1.0,
+    };
+    let progress = session.update_telemetry(telem).unwrap();
+
+    let wx_fresh = FlightdeckWeatherSummary {
+        destination_metar: Some("URFF 19012KT 9999 SCT030 22/14 Q1013".to_string()),
+        weather_stale: false,
+        weather_age_sec: Some(120),
+        ..Default::default()
+    };
+    let online_fresh = vec![openairac_integration::flightdeck::FlightdeckOnlineAtc {
+        network: "VATSIM".to_string(),
+        callsign: "URFF_APP".to_string(),
+        frequency_mhz: "125.700".to_string(),
+        facility_type: "APP".to_string(),
+        role_context: "APPROACH".to_string(),
+        distance_nm: Some(85.0),
+    }];
+
+    let snap_all_fresh =
+        session.snapshot_v2(Some(&progress), Some(wx_fresh), online_fresh.clone(), None);
+    assert_eq!(snap_all_fresh.freshness_report.telemetry.status, "CURRENT");
+    assert_eq!(snap_all_fresh.freshness_report.weather.status, "CURRENT");
+    assert_eq!(snap_all_fresh.freshness_report.online_atc.status, "CURRENT");
+    assert_eq!(snap_all_fresh.freshness_report.navdata.status, "CURRENT");
+
+    let compact_fresh = snap_all_fresh.to_compact();
+    assert_eq!(compact_fresh.freshness.telemetry, "CURRENT");
+    assert_eq!(compact_fresh.freshness.weather, "CURRENT");
+    assert_eq!(compact_fresh.freshness.online, "CURRENT");
+    assert_eq!(compact_fresh.freshness.navdata, "CURRENT");
+
+    // 2. Weather expires / becomes stale while telemetry and online stay fresh
+    let wx_stale = FlightdeckWeatherSummary {
+        destination_metar: Some("URFF 19012KT 9999 SCT030 22/14 Q1013".to_string()),
+        weather_stale: true, // Expired weather cache
+        weather_age_sec: Some(4200),
+        ..Default::default()
+    };
+
+    let snap_wx_stale = session.snapshot_v2(Some(&progress), Some(wx_stale), online_fresh, None);
+    assert_eq!(snap_wx_stale.freshness_report.telemetry.status, "CURRENT"); // Telemetry remains fresh
+    assert_eq!(snap_wx_stale.freshness_report.weather.status, "STALE"); // ONLY weather becomes stale
+    assert_eq!(snap_wx_stale.freshness_report.online_atc.status, "CURRENT");
+    assert_eq!(snap_wx_stale.freshness_report.navdata.status, "CURRENT");
+
+    let compact_wx_stale = snap_wx_stale.to_compact();
+    assert_eq!(compact_wx_stale.freshness.telemetry, "CURRENT");
+    assert_eq!(compact_wx_stale.freshness.weather, "STALE");
+    assert_eq!(compact_wx_stale.freshness.online, "CURRENT");
+    assert_eq!(compact_wx_stale.freshness.navdata, "CURRENT");
+}
