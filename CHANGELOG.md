@@ -1,5 +1,25 @@
 # Changelog
 
+## 2.10.0 — 2026-08-21
+
+### In-Flight Flight Execution Engine & Telemetry Runtime
+
+- **Flight Execution Session (`openairac-integration::execution`)**:
+  - First-class `FlightExecutionSession` linking immutable flight plan, telemetry streams, along-track navigation geometry, and execution event logs.
+  - Geodesic active-leg tracking and cross-track deviation (`XTK`) calculation on WGS84 great-circle segments.
+  - Along-track distance-to-go (`DTG`) and groundspeed-smoothed time estimates (`ETE` and `ETA`) with zero/low groundspeed guards.
+  - Deterministic 12-state `FlightPhaseEngine` (`Preflight`, `TaxiOut`, `Takeoff`, `InitialClimb`, `Climb`, `Cruise`, `Descent`, `Approach`, `Landing`, `TaxiIn`, `Parked`, `GoAround`) with multi-tick hysteresis to prevent phase flapping.
+  - Top of Descent (`TOD`) estimation and 3.0° descent profile deviation monitoring.
+  - Telemetry freshness quality tracking (`STALE TELEMETRY`) and disconnect/reconnect resilience without destroying active plans.
+  - Mid-flight arrival replanning (`replan_arrival`) preserving flown history and Direct-To waypoint activation (`activate_direct_to`).
+  - Completed flight log record generator (`complete_flight`) and FlightdeckOS-ready unified execution snapshot (`snapshot`).
+
+- **Geodesic Navigation Primitives (`openairac-routing`)**:
+  - Added spherical & geodesic cross-track distance (`cross_track_distance_nm`), along-track distance (`along_track_distance_nm`), and great-circle waypoint interpolation (`intermediate_point`).
+
+- **Deterministic Telemetry Replay & Regression Harness (`openairac-integration::tests`)**:
+  - Added comprehensive automated telemetry replay test suite verifying end-to-end flight execution across Russia (`UUEE -> URFF`), Abkhazia (`URSS -> URAS` with strict `SOURCE_REQUIRED` arrival constraints), and France (`LFPG -> LFMN`).
+
 ## 2.1.0 — 2026-08-20
 
 ### Worldwide Procedures Expansion I: France Official Procedure Tables
