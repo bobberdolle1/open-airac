@@ -272,6 +272,71 @@ enum Commands {
         #[command(subcommand)]
         cmd: ProviderCmd,
     },
+    /// Operational flight planning, route inspection, validation, and simulator export
+    Flight {
+        #[command(subcommand)]
+        cmd: FlightCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum FlightCmd {
+    /// Plan an end-to-end operational flight plan between two airports
+    Plan {
+        origin: String,
+        destination: String,
+        #[arg(short, long, default_value = "A320")]
+        aircraft: String,
+        #[arg(short, long, default_value = "strict_ats")]
+        mode: String,
+        #[arg(long)]
+        alt_ft: Option<u32>,
+        #[arg(long)]
+        dep_rwy: Option<String>,
+        #[arg(long)]
+        arr_rwy: Option<String>,
+        #[arg(long)]
+        sid: Option<String>,
+        #[arg(long)]
+        star: Option<String>,
+        #[arg(long)]
+        approach: Option<String>,
+        #[arg(short, long, default_value = "./data/world.openairac.sqlite")]
+        db: PathBuf,
+        #[arg(long)]
+        save: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Inspect a saved flight plan
+    Show {
+        flight_id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Validate flight plan continuity, aircraft suitability, and provider consistency
+    Validate {
+        flight_id: String,
+        #[arg(short, long, default_value = "./data/world.openairac.sqlite")]
+        db: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Export flight plan to simulator formats (X-Plane .fms, GNS430 .fpl, KLN90B)
+    Export {
+        flight_id: String,
+        #[arg(short, long, default_value = "xplane")]
+        format: String,
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+    },
+    /// List all saved flight plans
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Delete a saved flight plan
+    Delete { flight_id: String },
 }
 
 #[derive(Subcommand)]
@@ -5446,6 +5511,242 @@ fn run_cli(cli: Cli) -> Result<()> {
                         "  Source Provenance: {} (100%)",
                         metrics.source_provenance_count
                     );
+                }
+            }
+        },
+        Commands::Flight { cmd } => match cmd {
+            FlightCmd::Plan {
+                origin,
+                destination,
+                aircraft,
+                mode,
+                alt_ft,
+                dep_rwy,
+                arr_rwy,
+                sid,
+                star,
+                approach,
+                db,
+                save,
+                json,
+            } => {
+                let mut store = WorldStore::open(db)?;
+                store.migrate()?;
+
+                let profile =
+                    openairac_routing::random_flight::AircraftProfile::from_ident(aircraft)
+                        .unwrap_or_else(
+                            openairac_routing::random_flight::AircraftProfile::a320_narrowbody,
+                        );
+
+                let plan_mode = match mode.to_ascii_lowercase().as_str() {
+                    "ats_with_terminal_procedures" | "terminal" => {
+                        openairac_integration::PlanningMode::AtsWithTerminalProcedures
+                    }
+                    "allow_dct_gaps" | "dct" | "direct" => {
+                        openairac_integration::PlanningMode::AllowDctGaps
+                    }
+                    _ => openairac_integration::PlanningMode::StrictAts,
+                };
+
+                let mut req = openairac_integration::FlightPlanRequest::new(origin, destination)
+                    .with_aircraft(profile)
+                    .with_mode(plan_mode);
+                req.cruise_altitude_ft = *alt_ft;
+                req.departure_runway = dep_rwy.clone();
+                req.arrival_runway = arr_rwy.clone();
+                req.sid_ident = sid.clone();
+                req.star_ident = star.clone();
+                req.approach_ident = approach.clone();
+
+                let planner = openairac_integration::Planner::new(&store);
+                let plan = planner.plan(&req)?;
+
+                if *save {
+                    let saved_path =
+                        openairac_integration::FlightPlanStore::default_store().save(&plan)?;
+                    println!("Flight plan saved to: {}", saved_path.display());
+                }
+
+                if *json {
+                    println!("{}", serde_json::to_string_pretty(&plan)?);
+                } else {
+                    println!("OpenAIRAC Operational Flight Plan");
+                    println!(
+                        "================================================================================"
+                    );
+                    println!("  Flight ID:        {}", plan.flight_id);
+                    println!(
+                        "  Aircraft:         {} ({})",
+                        plan.aircraft_profile.name,
+                        plan.aircraft_profile.icao_type.as_deref().unwrap_or("")
+                    );
+                    println!(
+                        "  Origin:           {} ({})",
+                        plan.origin.ident, plan.origin.name
+                    );
+                    println!(
+                        "  Destination:      {} ({})",
+                        plan.destination.ident, plan.destination.name
+                    );
+                    println!(
+                        "  Departure Runway: {}",
+                        plan.departure_runway.as_deref().unwrap_or("N/A")
+                    );
+                    println!(
+                        "  Arrival Runway:   {}",
+                        plan.arrival_runway.as_deref().unwrap_or("N/A")
+                    );
+                    println!("  Route String:     {}", plan.route_string());
+                    println!(
+                        "  Cruise Altitude:  FL{} ({} ft)",
+                        plan.cruise_altitude_ft / 100,
+                        plan.cruise_altitude_ft
+                    );
+                    println!("  Total Distance:   {:.1} NM", plan.total_distance_nm);
+                    println!(
+                        "  Est Flight Time:  {}h {:02}m ({} min)",
+                        plan.estimated_flight_time_min / 60,
+                        plan.estimated_flight_time_min % 60,
+                        plan.estimated_flight_time_min
+                    );
+                    println!(
+                        "  Planning Mode:    {}",
+                        plan.planning_mode.as_str().to_uppercase()
+                    );
+                    println!(
+                        "  Validation:       {:?} (Flyable: {})",
+                        plan.validation.status, plan.validation.is_flyable
+                    );
+                    if !plan.validation.warnings.is_empty() {
+                        println!(
+                            "  Warnings:         {}",
+                            plan.validation.warnings.join(" | ")
+                        );
+                    }
+                    println!(
+                        "--------------------------------------------------------------------------------"
+                    );
+                    println!(
+                        "{:<4} {:<16} {:<12} {:<12} {:<10} {:<16} {:<14}",
+                        "#", "KIND", "FROM", "TO", "DIST (NM)", "ROUTE/PROC", "ALT/SPEED"
+                    );
+                    println!(
+                        "--------------------------------------------------------------------------------"
+                    );
+                    for l in &plan.all_legs {
+                        println!(
+                            "{:<4} {:<16} {:<12} {:<12} {:<10.1} {:<16} {:<14}",
+                            l.leg_index,
+                            l.kind.as_str(),
+                            l.from_fix,
+                            l.to_fix,
+                            l.distance_nm,
+                            l.route_ident
+                                .as_deref()
+                                .or(l.procedure_ident.as_deref())
+                                .unwrap_or("-"),
+                            l.altitude_constraint_str.as_deref().unwrap_or("-")
+                        );
+                    }
+                }
+            }
+            FlightCmd::Show { flight_id, json } => {
+                let store = openairac_integration::FlightPlanStore::default_store();
+                let plan = store.load(flight_id)?;
+                if *json {
+                    println!("{}", serde_json::to_string_pretty(&plan)?);
+                } else {
+                    println!("Flight Plan: {}", plan.flight_id);
+                    println!("  Route:            {}", plan.route_string());
+                    println!("  Distance:         {:.1} NM", plan.total_distance_nm);
+                    println!("  Cruise Level:     FL{}", plan.cruise_altitude_ft / 100);
+                    println!("  Validation:       {:?}", plan.validation.status);
+                }
+            }
+            FlightCmd::Validate {
+                flight_id,
+                db,
+                json,
+            } => {
+                let store = openairac_integration::FlightPlanStore::default_store();
+                let mut plan = store.load(flight_id)?;
+                let mut wstore = WorldStore::open(db)?;
+                wstore.migrate()?;
+                let active_providers = vec![
+                    "OurAirports".to_string(),
+                    "CAICA_Russia".to_string(),
+                    "SIA_France".to_string(),
+                    "FAA_CIFP".to_string(),
+                ];
+                plan.revalidate(chrono::Utc::now(), &active_providers);
+
+                if *json {
+                    println!("{}", serde_json::to_string_pretty(&plan.validation)?);
+                } else {
+                    println!("Flight Plan Validation: {}", plan.flight_id);
+                    println!("  Status:     {:?}", plan.validation.status);
+                    println!("  Is Flyable: {}", plan.validation.is_flyable);
+                    println!(
+                        "  Issues:     {}",
+                        if plan.validation.issues.is_empty() {
+                            "None".to_string()
+                        } else {
+                            plan.validation.issues.join(", ")
+                        }
+                    );
+                    println!(
+                        "  Warnings:   {}",
+                        if plan.validation.warnings.is_empty() {
+                            "None".to_string()
+                        } else {
+                            plan.validation.warnings.join(", ")
+                        }
+                    );
+                }
+            }
+            FlightCmd::Export {
+                flight_id,
+                format,
+                out,
+            } => {
+                let store = openairac_integration::FlightPlanStore::default_store();
+                let plan = store.load(flight_id)?;
+                let content = match format.to_ascii_lowercase().as_str() {
+                    "gns430" | "fpl" => {
+                        openairac_integration::FlightPlanExporter::export_gns430_fpl(&plan)
+                    }
+                    "kln90b" | "kln" => {
+                        openairac_integration::FlightPlanExporter::export_kln90b(&plan)
+                    }
+                    _ => openairac_integration::FlightPlanExporter::export_xplane_fms(&plan),
+                };
+
+                if let Some(out_path) = out {
+                    std::fs::write(out_path, &content)?;
+                    println!("Flight plan exported to: {}", out_path.display());
+                } else {
+                    println!("{}", content);
+                }
+            }
+            FlightCmd::List { json } => {
+                let store = openairac_integration::FlightPlanStore::default_store();
+                let plans = store.list()?;
+                if *json {
+                    println!("{}", serde_json::to_string_pretty(&plans)?);
+                } else {
+                    println!("Saved Flight Plans ({} total):", plans.len());
+                    for p in plans {
+                        println!("  - {}", p);
+                    }
+                }
+            }
+            FlightCmd::Delete { flight_id } => {
+                let store = openairac_integration::FlightPlanStore::default_store();
+                if store.delete(flight_id)? {
+                    println!("Deleted flight plan: {}", flight_id);
+                } else {
+                    println!("Flight plan not found: {}", flight_id);
                 }
             }
         },

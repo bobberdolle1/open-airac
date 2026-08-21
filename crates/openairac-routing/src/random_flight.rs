@@ -230,7 +230,25 @@ impl AircraftProfile {
         }
     }
 
-    /// Evaluates whether an airport satisfies this aircraft's physical suitability constraints.
+    /// Lookup an aircraft profile by ICAO code or common designator.
+    pub fn from_ident(s: &str) -> Option<Self> {
+        let clean = s.trim().to_ascii_uppercase();
+        match clean.as_str() {
+            "C172" | "C172P" | "C172S" | "CESSNA" | "PISTON" => Some(Self::light_piston()),
+            "A320" | "A320NEO" | "A321" | "A319" | "B737" | "B738" | "B739" | "NARROWBODY" => {
+                Some(Self::a320_narrowbody())
+            }
+            "B747" | "B744" | "B748" | "A380" | "A388" | "WIDEBODY" => Some(Self::b747_class()),
+            "TU154" | "T154" | "TU154M" | "TU154B" => Some(Self::tu154()),
+            "IL76" | "IL76MD" | "IL76TD" => Some(Self::il76()),
+            "IL96" | "IL96300" => Some(Self::il96()),
+            "AN24" | "AN24RV" | "AN26" => Some(Self::an24()),
+            "YK40" | "YAK40" => Some(Self::yak40()),
+            "CRJ" | "ERJ" | "E190" | "E195" | "REGIONAL" => Some(Self::regional_jet()),
+            "B350" | "DH8D" | "TURBOPROP" => Some(Self::turboprop()),
+            _ => None,
+        }
+    }
     pub fn evaluate_airport(&self, airport: &CanonicalAirport) -> (bool, Vec<String>) {
         let mut reasons = Vec::new();
         let mut passed = true;

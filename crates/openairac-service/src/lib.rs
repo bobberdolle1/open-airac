@@ -764,6 +764,36 @@ impl WorldQuery {
             .get(&pid)
             .cloned()
     }
+
+    /// Plan an operational end-to-end flight plan over the canonical world store.
+    pub fn plan_flight(
+        &self,
+        req: &openairac_integration::FlightPlanRequest,
+    ) -> Result<openairac_integration::FlightPlan> {
+        let planner = openairac_integration::Planner::new(&self.store);
+        planner.plan(req)
+    }
+
+    /// Save a flight plan to local persistence store.
+    pub fn save_flightplan(
+        &self,
+        plan: &openairac_integration::FlightPlan,
+    ) -> Result<std::path::PathBuf> {
+        let store = openairac_integration::FlightPlanStore::default_store();
+        store.save(plan)
+    }
+
+    /// Load a flight plan from local persistence store.
+    pub fn load_flightplan(&self, flight_id: &str) -> Result<openairac_integration::FlightPlan> {
+        let store = openairac_integration::FlightPlanStore::default_store();
+        store.load(flight_id)
+    }
+
+    /// List all saved flight plan identifiers.
+    pub fn list_saved_flightplans(&self) -> Result<Vec<String>> {
+        let store = openairac_integration::FlightPlanStore::default_store();
+        store.list()
+    }
 }
 
 pub const OPENAIRAC_CORE_VERSION: &str = "2.0.0";
@@ -1134,19 +1164,7 @@ mod tests {
     fn test_plan_requires_both_ends() {
         let t = Utc::now();
         let service = seeded(t).unwrap();
-        let request = FlightPlanRequest {
-            origin_airport: "KSFO".to_string(),
-            destination_airport: "KJFK".to_string(),
-            departure_time: t,
-            cruise_altitude_ft: None,
-            aircraft_capabilities: openairac_routing::AircraftCapabilities { rnav: true },
-            sid_ident: None,
-            sid_transition: None,
-            star_ident: None,
-            star_transition: None,
-            approach_ident: None,
-            exclusions: Vec::new(),
-        };
+        let request = FlightPlanRequest::new("KSFO", "KJFK");
         // KJFK does not exist in the fixture: fail closed with the airport.
         let err = service.plan(&request).unwrap_err();
         assert!(err.to_string().contains("KJFK"));

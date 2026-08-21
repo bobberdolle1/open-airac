@@ -1448,6 +1448,7 @@ dependencies = [
  "openairac-export-pmdg",
  "openairac-export-xplane",
  "openairac-ingest",
+ "openairac-integration",
  "openairac-magnetic",
  "openairac-model",
  "openairac-online",

@@ -13,8 +13,8 @@ use openairac_ingest::local_vault::LocalAipVault;
 use openairac_ingest::merge_engine::{CanonicalMergeEngine, MergeConflictKind};
 use openairac_ingest::provider::CanonicalProviderDataset;
 use openairac_model::{
-    validate_bundle_distribution_policy, ProviderId, ProviderProvenance, ProviderRegistryV2,
-    RedistributionPermission,
+    ProviderId, ProviderProvenance, ProviderRegistryV2, RedistributionPermission,
+    validate_bundle_distribution_policy,
 };
 #[test]
 fn test_provider_registry_default_descriptors() {

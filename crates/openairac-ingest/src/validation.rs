@@ -172,7 +172,11 @@ pub fn validate_ats_segment_distance(
 }
 
 /// Validate runway dimensions and magnetic heading.
-#[allow(clippy::too_many_arguments, clippy::collapsible_if, clippy::manual_range_contains)]
+#[allow(
+    clippy::too_many_arguments,
+    clippy::collapsible_if,
+    clippy::manual_range_contains
+)]
 pub fn validate_runway_geometry(
     airport_ident: &str,
     rwy_ident: &str,

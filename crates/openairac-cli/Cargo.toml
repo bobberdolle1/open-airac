@@ -13,6 +13,7 @@ openairac-store = { path = "../openairac-store" }
 openairac-ingest = { path = "../openairac-ingest" }
 openairac-procedures = { path = "../openairac-procedures" }
 openairac-routing = { path = "../openairac-routing" }
+openairac-integration = { path = "../openairac-integration" }
 openairac-export-xplane = { path = "../openairac-export-xplane" }
 openairac-export = { path = "../openairac-export" }
 openairac-export-msfs = { path = "../openairac-export-msfs" }
